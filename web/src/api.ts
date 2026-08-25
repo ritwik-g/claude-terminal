@@ -1,0 +1,40 @@
+import type { Session, UserState } from '../../server/types';
+
+export interface SessionsPayload {
+  sessions: Session[];
+  tags: string[];
+  counts: Record<string, number>;
+  scannedAt: number;
+  scanMs: number;
+  storeReadOnly: boolean;
+}
+
+async function json<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${res.statusText}${body ? ` — ${body}` : ''}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const api = {
+  sessions: (force = false) => json<SessionsPayload>(`/api/sessions${force ? '?force=1' : ''}`),
+
+  patchState: (id: string, patch: Partial<UserState>) =>
+    json<{ id: string; user: UserState }>(`/api/sessions/${encodeURIComponent(id)}/state`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  startTerm: (body: { id: string; sessionId: string | null; cwd: string; cols: number; rows: number }) =>
+    json<{ term: unknown }>('/api/terms', { method: 'POST', body: JSON.stringify(body) }),
+
+  killTerm: (id: string, hard = false) =>
+    json<{ ok: boolean }>(`/api/terms/${encodeURIComponent(id)}${hard ? '?hard=1' : ''}`, {
+      method: 'DELETE',
+    }),
+};

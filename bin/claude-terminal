@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Launch claude-terminal: start the server if it is not already up, then open
+# the UI in a chrome-less app window.
+#
+# Targets bash 3.2 (macOS default) — no mapfile, no associative arrays, no ${v,,}.
+set -euo pipefail
+
+PORT="${CLAUDE_TERMINAL_PORT:-7777}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+URL="http://127.0.0.1:${PORT}"
+LOG="${HOME}/.claude-terminal/server.log"
+CMD="${1:-start}"
+
+cd "$ROOT"
+
+server_up() {
+  curl -sf -m 2 "${URL}/api/health" >/dev/null 2>&1
+}
+
+# `npx tsx` leaves an npm-exec wrapper between us and node, so killing the pid
+# we spawned can orphan the real server. Resolve the actual listener instead.
+listener_pid() {
+  lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN -t 2>/dev/null | head -1
+}
+
+case "$CMD" in
+  stop)
+    pid="$(listener_pid)"
+    if [ -z "$pid" ]; then
+      echo "claude-terminal: not running on port ${PORT}"
+      exit 0
+    fi
+    # SIGTERM so the server flushes tag edits and closes its PTYs cleanly.
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      server_up || break
+      sleep 0.25
+    done
+    if server_up; then
+      echo "claude-terminal: did not stop; sending SIGKILL to ${pid}" >&2
+      kill -KILL "$pid" 2>/dev/null || true
+      exit 1
+    fi
+    echo "claude-terminal: stopped (pid ${pid})"
+    exit 0
+    ;;
+  status)
+    if server_up; then
+      echo "claude-terminal: running on ${URL} (pid $(listener_pid))"
+      exit 0
+    fi
+    echo "claude-terminal: not running"
+    exit 1
+    ;;
+  start) ;;
+  *)
+    echo "usage: claude-terminal [start|stop|status]" >&2
+    exit 2
+    ;;
+esac
+
+if [ ! -d node_modules ]; then
+  echo "claude-terminal: installing dependencies…"
+  npm install
+fi
+
+if server_up; then
+  echo "claude-terminal: server already running on ${URL}"
+else
+  # Build the SPA if it is missing or older than the newest source file.
+  needs_build=0
+  if [ ! -f dist/index.html ]; then
+    needs_build=1
+  elif [ -n "$(find web server -newer dist/index.html -type f -print -quit 2>/dev/null)" ]; then
+    needs_build=1
+  fi
+  if [ "$needs_build" -eq 1 ]; then
+    echo "claude-terminal: building UI…"
+    npx vite build >/dev/null
+  fi
+
+  mkdir -p "$(dirname "$LOG")"
+  echo "claude-terminal: starting server on ${URL}"
+  PORT="$PORT" nohup npx tsx server/index.ts >>"$LOG" 2>&1 &
+
+  # Wait for it, rather than racing the browser against startup.
+  for _ in $(seq 1 40); do
+    if server_up; then break; fi
+    sleep 0.25
+  done
+
+  if ! server_up; then
+    echo "claude-terminal: server failed to start. Last lines of ${LOG}:" >&2
+    tail -20 "$LOG" >&2 || true
+    exit 1
+  fi
+fi
+
+# A Chrome app window has no tabs or address bar, so it reads as a real app.
+# Falls back to the default browser when Chrome is not installed.
+if [ -d "/Applications/Google Chrome.app" ]; then
+  open -na "Google Chrome" --args --app="${URL}" \
+    --user-data-dir="${HOME}/.claude-terminal/chrome-profile"
+else
+  open "${URL}"
+fi
