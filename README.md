@@ -55,10 +55,11 @@ process.
 
 ## Install
 
-**macOS (Apple Silicon)** — download `Claude Terminal-<version>-arm64.dmg`, drag
-it to Applications, and launch it like any app. It is **not code-signed**, so
-Gatekeeper will refuse the first launch. Either right-click the app and choose
-*Open*, or:
+**macOS** — grab the `.dmg` for your chip from
+[Releases](https://github.com/ritwik-g/claude-terminal/releases)
+(`mac-arm64` for Apple Silicon, `mac-x64` for Intel), open it, and drag
+**Claude Terminal** to Applications. It is **not code-signed**, so Gatekeeper
+will refuse the first launch. Either right-click the app and choose *Open*, or:
 
 ```bash
 xattr -cr "/Applications/Claude Terminal.app"
@@ -72,9 +73,22 @@ affected.
 
 ```bash
 npm install
-npm run dist:mac     # -> release/*.dmg and release/*.zip
+npm run dist:mac     # -> release/*.dmg and release/*.zip (host architecture)
 npm run app          # run the desktop app from source
 ```
+
+**Cutting a release.** `.github/workflows/release.yml` builds macOS arm64,
+macOS x64 and a Linux AppImage on their own native runners — one per
+architecture, which is far more reliable for a native module than
+cross-compiling — and attaches every installer to a GitHub Release:
+
+```bash
+npm version patch          # or edit package.json
+git push --follow-tags     # tag v* triggers the workflow
+```
+
+There is also a `workflow_dispatch` trigger, so a release can be re-cut without
+moving a tag.
 
 ### Headless / Linux
 

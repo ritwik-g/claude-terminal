@@ -1,0 +1,147 @@
+name: Release
+
+# Tag-driven: `git tag v0.1.0 && git push --tags` builds and publishes.
+# workflow_dispatch is there so a release can be re-cut without moving a tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One failing architecture should not throw away the others' artifacts.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon runner
+            label: macOS arm64
+            platform: --mac
+          - os: macos-13        # Intel runner
+            label: macOS x64
+            platform: --mac
+          - os: ubuntu-latest
+            label: Linux x64
+            platform: --linux
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # node-gyp imports distutils, which was removed in Python 3.12. The
+      # runners default to 3.12+, so pin an interpreter that still has it —
+      # otherwise every native build dies with a bare ModuleNotFoundError.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Point node-gyp at that Python
+        shell: bash
+        run: echo "npm_config_python=$(which python3)" >> "$GITHUB_ENV"
+
+      # AppImage packaging needs FUSE; the runner image does not ship it.
+      - name: Linux packaging deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 rpm
+
+      - run: npm ci
+
+      - name: Build renderer and main process
+        run: |
+          npm run build
+          npm run build:electron
+
+      # electron-builder rebuilds node-pty for Electron's ABI itself, and
+      # builds for the host architecture (see electron-builder.yml).
+      - name: Package
+        run: npx electron-builder ${{ matrix.platform }} --publish never
+        env:
+          # Unsigned build: no Developer ID secret is configured. Tell
+          # electron-builder not to go looking for one.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Check something was produced
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(release/*.dmg release/*.zip release/*.AppImage)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no installers in release/ — packaging silently produced nothing" >&2
+            ls -la release/ || true
+            exit 1
+          fi
+          printf '  %s\n' "${files[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what will be published
+        run: ls -lh artifacts/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          files: artifacts/*
+          body: |
+            ## Install
+
+            **macOS** — download the `.dmg` for your chip
+            (`arm64` for Apple Silicon, `x64` for Intel), open it, and drag
+            **Claude Terminal** to Applications.
+
+            These builds are **not code-signed**, so Gatekeeper blocks the first
+            launch. Either right-click the app and choose *Open*, or run:
+
+            ```bash
+            xattr -cr "/Applications/Claude Terminal.app"
+            ```
+
+            **Linux** — download the `.AppImage`, `chmod +x` it, and run it.
+            Untested; the headless server (`npm start`) is the supported path.
+
+            ## Notes
+
+            Launch by double-clicking; quit with ⌘Q. Quitting closes every
+            terminal the app started and asks first if any are still running —
+            sessions in your own terminals are never affected, and every session
+            keeps its transcript either way.
+
+            The app never writes to `~/.claude`. Its own state lives in
+            `~/.claude-terminal/`.

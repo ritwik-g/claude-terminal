@@ -21,13 +21,19 @@ files:
 asarUnpack:
   - '**/node_modules/node-pty/**'
 
+# Each artifact names its own architecture, so the two macOS builds can live
+# side by side on one release without colliding.
+artifactName: '${productName}-${version}-${os}-${arch}.${ext}'
+
 mac:
   category: public.app-category.developer-tools
+  # No arch pinned: each build produces its host's architecture. CI runs one
+  # job on an Apple Silicon runner and one on an Intel runner, which is far
+  # more reliable for a native module than cross-compiling or a universal
+  # binary built from a single host.
   target:
-    - target: dmg
-      arch: [arm64]
-    - target: zip
-      arch: [arm64]
+    - dmg
+    - zip
   icon: build/icon.icns
   # Unsigned: no Developer ID here. Hardened runtime without a signature just
   # makes Gatekeeper louder, so leave it off and document the xattr step.
@@ -52,8 +58,7 @@ dmg:
 linux:
   category: Development
   target:
-    - target: AppImage
-      arch: [x64]
+    - AppImage
   icon: build/icon.png
   synopsis: Attention-ranked workspace for Claude Code sessions
   desktop:

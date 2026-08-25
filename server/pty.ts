@@ -4,6 +4,7 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import * as nodePty from 'node-pty';
 import { LOG_DIR } from './paths.js';
+import { resolveShellEnv, fallbackPathEntries } from './shell-env.js';
 
 /** Keep this much replayable history per terminal, and trim above the cap. */
 const LOG_CAP_BYTES = 8 * 1024 * 1024;
@@ -68,17 +69,53 @@ export function isValidTermId(id: unknown): id is string {
  */
 function cleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
+
+  // Start from the user's real login-shell environment when we can get it.
+  // Launched from Finder or the Dock we inherit launchd's, where PATH is just
+  // /usr/bin:/bin:/usr/sbin:/sbin — so `claude` is not found and the terminal
+  // exits 127 before it starts.
+  const shellEnv = resolveShellEnv();
+  const source = shellEnv ?? (process.env as Record<string, string>);
+
+  for (const [k, v] of Object.entries(source)) {
     if (v === undefined) continue;
     if (k === 'CLAUDECODE') continue;
     if (k.startsWith('CLAUDE_')) continue;
     env[k] = v;
   }
+
+  // Keep anything the parent had that the login shell did not report, so a
+  // deliberately-set variable is not silently dropped.
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || k in env) continue;
+    if (k === 'CLAUDECODE' || k.startsWith('CLAUDE_')) continue;
+    if (k === 'PATH') continue;   // the shell's PATH wins; never merge them
+    env[k] = v;
+  }
+
+  env.PATH = ensurePath(env.PATH ?? process.env.PATH ?? '');
   env.TERM = 'xterm-256color';
   env.COLORTERM = 'truecolor';
   // Marks sessions started from here, and makes them obvious in `ps`.
   env.CLAUDE_TERMINAL = '1';
   return env;
+}
+
+/**
+ * Belt and braces: if the shell probe failed we may still be on launchd's
+ * minimal PATH, so append the handful of places a per-user CLI normally lives.
+ * Appended, never prepended — the user's own ordering must win.
+ */
+function ensurePath(current: string): string {
+  const parts = current.split(':').filter(Boolean);
+  const seen = new Set(parts);
+  for (const dir of fallbackPathEntries()) {
+    if (!seen.has(dir) && fs.existsSync(dir)) {
+      parts.push(dir);
+      seen.add(dir);
+    }
+  }
+  return parts.join(':');
 }
 
 function shell(): string {
