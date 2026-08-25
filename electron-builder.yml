@@ -46,14 +46,13 @@ mac:
 
 dmg:
   title: Claude Terminal
-  contents:
-    - x: 140
-      y: 200
-      type: file
-    - x: 400
-      y: 200
-      type: link
-      path: /Applications
+  # No custom window layout and no background image. dmgbuild tries to install
+  # a .background/background.tiff into the mounted volume and dies with
+  # FileNotFoundError on GitHub's macOS runners — it works locally, so this is
+  # CI-only and cost a build to find. electron-builder's default layout still
+  # ships the app alongside an /Applications alias, which is all the window
+  # needs to do.
+  background: null
 
 linux:
   category: Development
