@@ -46,16 +46,22 @@ jobs:
           node-version: '22'
           cache: npm
 
-      # node-gyp imports distutils, which was removed in Python 3.12. The
-      # runners default to 3.12+, so pin an interpreter that still has it —
-      # otherwise every native build dies with a bare ModuleNotFoundError.
+      # node-gyp imports distutils, removed in Python 3.12. On Linux the
+      # default python3 is newer, so pin one that still has it.
+      #
+      # Deliberately NOT done on macOS: setup-python puts its interpreter ahead
+      # of /usr/bin/python3 on PATH, and dmg-builder runs `python3` for its
+      # vendored dmgbuild — which then fails installing the DMG background and
+      # takes the whole package step with it. The runner's own python3 is 3.9
+      # and has distutils, and scripts/find-python.mjs already prefers it.
       - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
         with:
           python-version: '3.11'
 
-      - name: Point node-gyp at that Python
+      - name: Point node-gyp at a Python with distutils
         shell: bash
-        run: echo "npm_config_python=$(which python3)" >> "$GITHUB_ENV"
+        run: echo "npm_config_python=$(node scripts/find-python.mjs)" >> "$GITHUB_ENV"
 
       # AppImage packaging needs FUSE; the runner image does not ship it.
       - name: Linux packaging deps

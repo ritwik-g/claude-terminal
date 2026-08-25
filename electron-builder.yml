@@ -51,8 +51,11 @@ dmg:
   # FileNotFoundError on GitHub's macOS runners — it works locally, so this is
   # CI-only and cost a build to find. electron-builder's default layout still
   # ships the app alongside an /Applications alias, which is all the window
-  # needs to do.
+  # needs to do. `background: null` is NOT enough — electron-builder falls back
+  # to a built-in background image, which is the file dmgbuild then fails on.
   background: null
+  # Skip the writable-volume step entirely where possible.
+  writeUpdateInfo: false
 
 linux:
   category: Development
