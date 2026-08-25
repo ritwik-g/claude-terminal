@@ -131,6 +131,38 @@ Claude Code, and it belongs to the session, not to this app.
 Use **+ New** to start a fresh session in any directory. It runs before Claude
 has registered a session id, and adopts itself into the list once it does.
 
+## Testing conventions
+
+**Do functional and click testing in Chrome, against `http://localhost:7777`.**
+The Electron window and the browser render the *same* page from the *same*
+server, so anything about behaviour — clicking rows, keyboard shortcuts, filters,
+opening a terminal, reconnect — is far easier to drive and inspect there.
+Synthetic clicks into a packaged macOS app (System Events) are unreliable and
+tell you less when they fail.
+
+**Verify the packaged app with a simple screenshot instead.** What the `.app`
+build needs to prove is only what packaging can break:
+
+1. it launches at all,
+2. the window renders and everything is visible (no blank page, no missing
+   assets, nothing overlapping — this is how the traffic-lights-over-the-brand
+   bug was caught),
+3. its embedded server answers (`curl localhost:7777/api/health`),
+4. a PTY actually spawns from inside the bundle — the asar/spawn-helper path.
+
+```bash
+open -a "Claude Terminal"
+curl -s localhost:7777/api/health
+# window bounds, then capture just that region
+osascript -e 'tell application "System Events" to tell process "Claude Terminal" \
+  to get {position, size} of front window'
+screencapture -x -R"<x>,<y>,<w>,<h>" /tmp/app.png
+```
+
+Both need macOS **Accessibility** (for window bounds) and **Screen Recording**
+(for the capture) granted to the terminal — they are separate toggles in
+System Settings > Privacy & Security.
+
 ## Where state lives
 
 Everything this tool owns is under `~/.claude-terminal/` — `state.json` (tags,
