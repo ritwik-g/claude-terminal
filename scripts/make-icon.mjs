@@ -98,3 +98,44 @@ const png = Buffer.concat([
 mkdirSync('build', { recursive: true });
 writeFileSync('build/icon.png', png);
 console.log(`wrote build/icon.png (${S}x${S}, ${(png.length / 1024).toFixed(0)}KB)`);
+
+/**
+ * The DMG background.
+ *
+ * Not decoration — it is load-bearing. With a custom `contents` layout,
+ * dmgbuild installs a background into the mounted volume, and on GitHub's
+ * macOS runners it dies with
+ *   FileNotFoundError: /Volumes/.../.background/background.tiff
+ * when electron-builder has to supply its own. Giving it a real file at
+ * build/background.png (which electron-builder picks up by convention) is what
+ * makes the DMG build reproducible in CI.
+ */
+const BW = 660, BH = 400;
+const bg = Buffer.alloc(BW * BH * 4);
+for (let y = 0; y < BH; y++) {
+  for (let x = 0; x < BW; x++) {
+    const i = (y * BW + x) * 4;
+    // Gentle vertical gradient in the app's own background colours.
+    const t = y / BH;
+    bg[i]     = Math.round(0x0e + (0x16 - 0x0e) * t);
+    bg[i + 1] = Math.round(0x10 + (0x1a - 0x10) * t);
+    bg[i + 2] = Math.round(0x13 + (0x21 - 0x13) * t);
+    bg[i + 3] = 255;
+  }
+}
+const braw = Buffer.alloc(BH * (BW * 4 + 1));
+for (let y = 0; y < BH; y++) {
+  braw[y * (BW * 4 + 1)] = 0;
+  bg.copy(braw, y * (BW * 4 + 1) + 1, y * BW * 4, (y + 1) * BW * 4);
+}
+const bihdr = Buffer.alloc(13);
+bihdr.writeUInt32BE(BW, 0); bihdr.writeUInt32BE(BH, 4);
+bihdr[8] = 8; bihdr[9] = 6;
+const bpng = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  chunk('IHDR', bihdr),
+  chunk('IDAT', deflateSync(braw, { level: 9 })),
+  chunk('IEND', Buffer.alloc(0)),
+]);
+writeFileSync('build/background.png', bpng);
+console.log(`wrote build/background.png (${BW}x${BH}, ${(bpng.length / 1024).toFixed(0)}KB)`);
