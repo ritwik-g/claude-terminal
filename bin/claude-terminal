@@ -19,8 +19,19 @@ server_up() {
 
 # `npx tsx` leaves an npm-exec wrapper between us and node, so killing the pid
 # we spawned can orphan the real server. Resolve the actual listener instead.
+# lsof is standard on macOS but not guaranteed on Linux; try each in turn.
 listener_pid() {
-  lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN -t 2>/dev/null | head -1
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN -t 2>/dev/null | head -1
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -lptnH "sport = :${PORT}" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2
+    return
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp "${PORT}" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' | head -1
+  fi
 }
 
 case "$CMD" in
@@ -81,7 +92,7 @@ else
 
   mkdir -p "$(dirname "$LOG")"
   echo "claude-terminal: starting server on ${URL}"
-  PORT="$PORT" nohup npx tsx server/index.ts >>"$LOG" 2>&1 &
+  PORT="$PORT" nohup npx tsx server/cli.ts >>"$LOG" 2>&1 &
 
   # Wait for it, rather than racing the browser against startup.
   for _ in $(seq 1 40); do
@@ -98,9 +109,22 @@ fi
 
 # A Chrome app window has no tabs or address bar, so it reads as a real app.
 # Falls back to the default browser when Chrome is not installed.
-if [ -d "/Applications/Google Chrome.app" ]; then
-  open -na "Google Chrome" --args --app="${URL}" \
-    --user-data-dir="${HOME}/.claude-terminal/chrome-profile"
-else
-  open "${URL}"
-fi
+open_url() {
+  if [ -d "/Applications/Google Chrome.app" ]; then
+    # A Chrome app window has no tabs or address bar, so it reads as a real app.
+    open -na "Google Chrome" --args --app="$1" \
+      --user-data-dir="${HOME}/.claude-terminal/chrome-profile"
+  elif command -v google-chrome >/dev/null 2>&1; then
+    google-chrome --app="$1" --user-data-dir="${HOME}/.claude-terminal/chrome-profile" >/dev/null 2>&1 &
+  elif command -v chromium >/dev/null 2>&1; then
+    chromium --app="$1" --user-data-dir="${HOME}/.claude-terminal/chrome-profile" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$1" >/dev/null 2>&1 &
+  elif command -v open >/dev/null 2>&1; then
+    open "$1"
+  else
+    echo "claude-terminal: open ${1} in your browser"
+  fi
+}
+
+open_url "${URL}"

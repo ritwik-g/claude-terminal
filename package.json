@@ -6,14 +6,22 @@
   "description": "Attention-ranked workspace for Claude Code sessions, with embedded terminals",
   "scripts": {
     "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
-    "dev:server": "tsx watch --clear-screen=false server/index.ts",
+    "dev:server": "tsx watch --clear-screen=false server/cli.ts",
     "dev:web": "vite",
+    "start": "tsx server/cli.ts",
     "build": "vite build",
-    "start": "tsx server/index.ts",
+    "build:electron": "node scripts/build-electron.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "rebuild:electron": "npm_config_python=\"$(node scripts/find-python.mjs)\" electron-rebuild -f -w node-pty",
+    "rebuild:node": "npm_config_python=\"$(node scripts/find-python.mjs)\" npm rebuild node-pty --build-from-source",
+    "app": "npm run build && npm run build:electron && npm run rebuild:electron && electron .",
+    "dist": "npm run build && npm run build:electron && npm_config_python=\"$(node scripts/find-python.mjs)\" electron-builder && npm run rebuild:node",
+    "dist:mac": "npm run build && npm run build:electron && npm_config_python=\"$(node scripts/find-python.mjs)\" electron-builder --mac && npm run rebuild:node",
+    "dist:linux": "npm run build && npm run build:electron && npm_config_python=\"$(node scripts/find-python.mjs)\" electron-builder --linux && npm run rebuild:node",
     "postinstall": "node scripts/fix-node-pty.mjs",
     "doctor": "tsx scripts/doctor.ts",
-    "app": "bash bin/claude-terminal",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "app:cli": "bash bin/claude-terminal"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -27,6 +35,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.18",
@@ -34,8 +43,16 @@
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.7"
-  }
+  },
+  "main": "dist-electron/main.mjs",
+  "author": {
+    "name": "Ritwik G"
+  },
+  "license": "MIT"
 }

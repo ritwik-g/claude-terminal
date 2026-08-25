@@ -53,14 +53,50 @@ pane reconnects on its own with backoff and replays its scrollback, and says so
 rather than looking frozen. Nothing in the recovery path touches the running
 process.
 
-## Run it
+## Install
+
+**macOS (Apple Silicon)** — download `Claude Terminal-<version>-arm64.dmg`, drag
+it to Applications, and launch it like any app. It is **not code-signed**, so
+Gatekeeper will refuse the first launch. Either right-click the app and choose
+*Open*, or:
+
+```bash
+xattr -cr "/Applications/Claude Terminal.app"
+```
+
+Quitting the app (⌘Q) stops the server and closes every terminal it started —
+it asks first if any are still running. Sessions in your own terminals are never
+affected.
+
+**Build it yourself:**
+
+```bash
+npm install
+npm run dist:mac     # -> release/*.dmg and release/*.zip
+npm run app          # run the desktop app from source
+```
+
+### Headless / Linux
+
+There is no packaged Linux app yet (`npm run dist:linux` builds an AppImage but
+is untested). The server runs fine without Electron — use your own browser:
 
 ```bash
 npm install                 # postinstall repairs node-pty's broken arm64 prebuild
-bin/claude-terminal         # builds if needed, starts the server, opens an app window
+bin/claude-terminal         # builds if needed, starts the server, opens a window
 bin/claude-terminal status  # is it running, and as which pid
 bin/claude-terminal stop    # SIGTERM the real listener (flushes tags, closes PTYs)
 ```
+
+> **Native module note.** `node-pty` must be compiled for whichever runtime is
+> loading it, and Electron's ABI differs from Node's — so the app and the CLI
+> cannot share one build. `npm run dist` restores the Node build when it
+> finishes; `npm run app` switches to the Electron build. If the CLI ever dies
+> with a version mismatch, `npm run rebuild:node` puts it back.
+>
+> Builds also need a Python with `distutils`, which was removed in 3.12.
+> `scripts/find-python.mjs` locates a usable one automatically (on macOS,
+> `/usr/bin/python3`).
 
 Or during development, with hot reload:
 

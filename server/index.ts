@@ -17,11 +17,9 @@ import {
 import type { Priority, UserState } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT ?? 7777);
-const HOST = process.env.HOST ?? '127.0.0.1';
 
-initSessions();
-loadStore();
+export const DEFAULT_PORT = Number(process.env.PORT ?? 7777);
+export const DEFAULT_HOST = process.env.HOST ?? '127.0.0.1';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -255,17 +253,17 @@ function resolveNewSessionIds(): void {
   }
 }
 
-const houseKeeping = setInterval(() => {
-  resolveNewSessionIds();
-  reapExited();
-}, 2000);
-houseKeeping.unref();
+let houseKeeping: ReturnType<typeof setInterval> | null = null;
 
-// In production the built SPA is served from here; in dev Vite proxies to us.
-const dist = path.join(__dirname, '..', 'dist');
-if (fs.existsSync(dist)) {
-  app.use(express.static(dist));
-  app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+/**
+ * Serve the built SPA. In dev, Vite proxies to us instead and this is absent;
+ * in a packaged app the assets live wherever the bundler put them, so the
+ * location is a parameter rather than a fixed sibling of this file.
+ */
+function serveStatic(staticDir: string): void {
+  if (!fs.existsSync(staticDir)) return;
+  app.use(express.static(staticDir));
+  app.get('*', (_req, res) => res.sendFile(path.join(staticDir, 'index.html')));
 }
 
 // Express's default handler returns an HTML stack trace with absolute paths.
@@ -371,31 +369,86 @@ wss.on('error', (err) => console.error('[claude-terminal] wss error:', err?.mess
 
 server.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`[claude-terminal] port ${PORT} is already in use — is it already running?`);
-    process.exit(1);
+    // EADDRINUSE surfaces through startServer's promise rejection instead, so
+    // the caller can report it in whatever way suits (CLI message, dialog).
+    return;
   }
   console.error('[claude-terminal] server error:', err);
 });
 
-// A crash here would orphan every PTY, so log and keep serving rather than die.
-process.on('uncaughtException', (err) => console.error('[claude-terminal] uncaught:', err));
-process.on('unhandledRejection', (err) => console.error('[claude-terminal] unhandled rejection:', err));
-
-server.listen(PORT, HOST, () => {
-  console.log(`claude-terminal server  http://${HOST}:${PORT}`);
-});
-
-let shuttingDown = false;
-function shutdown() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  flushStore();
-  saveCache({ force: true });
-  shutdownAll();
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 1500).unref();
+/** What a caller gets back so it can stop us and reason about live work. */
+export interface ServerHandle {
+  url: string;
+  port: number;
+  /** Terminals still running — quitting will kill these. */
+  liveTerminalCount(): number;
+  close(): Promise<void>;
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-// Closing the terminal that launched us must not lose debounced tag edits.
-process.on('SIGHUP', shutdown);
+
+/**
+ * Start the HTTP + WebSocket server and return a handle.
+ *
+ * Split out of the module body so the Electron app and the CLI share one
+ * implementation: the desktop app hosts this in its main process (so quitting
+ * the app really does stop the server), while the CLI keeps its own signal
+ * handling.
+ */
+export async function startServer(opts: {
+  port?: number;
+  host?: string;
+  staticDir?: string;
+} = {}): Promise<ServerHandle> {
+  const port = opts.port ?? DEFAULT_PORT;
+  const host = opts.host ?? DEFAULT_HOST;
+
+  initSessions();
+  loadStore();
+  serveStatic(opts.staticDir ?? path.join(__dirname, '..', 'dist'));
+
+  houseKeeping = setInterval(() => {
+    resolveNewSessionIds();
+    reapExited();
+  }, 2000);
+  houseKeeping.unref();
+
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      server.off('listening', onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
+
+  let closing: Promise<void> | null = null;
+
+  return {
+    url: `http://${host}:${port}`,
+    port,
+    liveTerminalCount: () => listTerms().filter((t) => !t.exited).length,
+    close() {
+      // Idempotent: quit can be triggered from the menu, the dock and a signal.
+      if (closing) return closing;
+      closing = (async () => {
+        if (houseKeeping) { clearInterval(houseKeeping); houseKeeping = null; }
+        // Persist before killing anything, so a quit never costs tag edits.
+        flushStore();
+        saveCache({ force: true });
+        shutdownAll();
+        for (const ws of wss.clients) {
+          try { ws.terminate(); } catch { /* already gone */ }
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 1500);
+          server.close(() => { clearTimeout(timer); resolve(); });
+        });
+      })();
+      return closing;
+    },
+  };
+}

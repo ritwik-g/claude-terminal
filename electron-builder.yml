@@ -1,0 +1,65 @@
+appId: com.ritwikg.claude-terminal
+productName: Claude Terminal
+copyright: Ritwik G
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the bundled main process, the built renderer, and the manifest. The
+# server is bundled INTO main.mjs, so server/ itself is not shipped.
+files:
+  - dist-electron/**
+  - dist/**
+  - package.json
+  - '!**/*.map'
+
+# node-pty is a native module: its .node binary and, critically, its
+# spawn-helper must be real files on disk with the exec bit, not entries inside
+# app.asar. Leaving it packed is the classic "posix_spawnp failed" in a
+# packaged Electron app.
+asarUnpack:
+  - '**/node_modules/node-pty/**'
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  icon: build/icon.icns
+  # Unsigned: no Developer ID here. Hardened runtime without a signature just
+  # makes Gatekeeper louder, so leave it off and document the xattr step.
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null
+  extendInfo:
+    # No mic, camera or location use — declare nothing rather than inherit.
+    NSSupportsAutomaticGraphicsSwitching: true
+
+dmg:
+  title: Claude Terminal
+  contents:
+    - x: 140
+      y: 200
+      type: file
+    - x: 400
+      y: 200
+      type: link
+      path: /Applications
+
+linux:
+  category: Development
+  target:
+    - target: AppImage
+      arch: [x64]
+  icon: build/icon.png
+  synopsis: Attention-ranked workspace for Claude Code sessions
+  desktop:
+    entry:
+      Terminal: 'false'
+      Type: Application
+
+# Native deps are rebuilt for Electron's ABI at package time.
+npmRebuild: true
