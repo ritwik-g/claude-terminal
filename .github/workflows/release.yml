@@ -23,12 +23,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14        # Apple Silicon runner
-            label: macOS arm64
-            platform: --mac
-          - os: macos-13        # Intel runner
-            label: macOS x64
-            platform: --mac
+          # Both Mac architectures come off the Apple Silicon runner. Xcode
+          # targets x86_64 natively, and the cross-built artifacts are genuinely
+          # x86_64 down to node-pty's pty.node and spawn-helper (verified with
+          # lipo). This also avoids depending on the Intel `macos-13` runners,
+          # which GitHub is retiring — a job requesting one sat unscheduled
+          # indefinitely rather than failing.
+          - os: macos-14
+            label: macOS (arm64 + x64)
+            platform: --mac --arm64 --x64
           - os: ubuntu-latest
             label: Linux x64
             platform: --linux
