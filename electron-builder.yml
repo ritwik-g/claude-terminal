@@ -51,11 +51,23 @@ dmg:
   # FileNotFoundError on GitHub's macOS runners — it works locally, so this is
   # CI-only and cost a build to find. electron-builder's default layout still
   # ships the app alongside an /Applications alias, which is all the window
-  # needs to do. `background: null` is NOT enough — electron-builder falls back
-  # to a built-in background image, which is the file dmgbuild then fails on.
+  # `background: null` is load-bearing: without it electron-builder supplies a
+  # built-in background image, and dmgbuild dies installing it on GitHub's
+  # macOS runners (FileNotFoundError on .background/background.tiff). Works
+  # locally, fails only in CI.
   background: null
-  # Skip the writable-volume step entirely where possible.
   writeUpdateInfo: false
+  # Restore the drag target. Dropping the whole `contents` block to dodge the
+  # background bug also removed the /Applications alias, so the released DMG
+  # opened with nothing to drag the app onto.
+  contents:
+    - x: 150
+      y: 180
+      type: file
+    - x: 390
+      y: 180
+      type: link
+      path: /Applications
 
 linux:
   category: Development
