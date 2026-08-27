@@ -413,7 +413,10 @@ body.resizing .term-wrap { pointer-events: none; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0; flex: 0 1 auto;
 }
-.detail-actions { margin-left: auto; display: flex; gap: 5px; flex: none; }
+/* `center`, not the default `stretch`: anything in this row that is not a
+   button (the review tag) would otherwise have its BOX stretched to the button
+   height while its own smaller text stayed pinned near the top of it. */
+.detail-actions { margin-left: auto; display: flex; align-items: center; gap: 5px; flex: none; }
 /* flex:none so the id stays whole while the title and path ellipsize around
    it — a half-shown id is worse than none, since you cannot copy it by eye. */
 .detail-id {
@@ -629,6 +632,30 @@ kbd {
 }
 
 .chip.review { color: var(--p2); border-color: color-mix(in srgb, var(--p2) 42%, transparent); }
+
+/* The same marker as `.chip.review`, but for the detail pane's action row
+   rather than a list row. `.chip` is deliberately tiny — it shares a row with
+   four other chips beside a session title — and reusing it here put 9.5px text
+   in a 24.7px button-height box. This matches the buttons it sits with.
+   Monospace is kept on purpose: it is a command you could type. */
+.review-tag {
+  display: inline-flex;
+  align-items: center;
+  /* Take the row's height from the buttons rather than trying to match their
+     metrics with padding — mono at 11px and system at 13px do not agree on
+     line height, and any hand-tuned number here breaks the moment either
+     changes. `align-items: center` on the row keeps the text centred. */
+  align-self: stretch;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid color-mix(in srgb, var(--p2) 42%, transparent);
+  color: var(--p2);
+  white-space: nowrap;
+}
 
 /* --------------------------------------------------------------------- help */
 

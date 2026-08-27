@@ -998,7 +998,7 @@ export function App() {
                 <div className="detail-actions">
                   {selected.review && (
                     <span
-                      className="chip review"
+                      className="review-tag"
                       title={`This session was opened with /${selected.review.command}`}
                     >
                       /{selected.review.command}
