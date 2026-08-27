@@ -51,9 +51,25 @@ artifacts are read whole-file, on demand, for the one session you are looking
 at — about 60ms for a 14MB transcript, cached on its mtime.
 
 **Review sessions name what they are reviewing.** A session opened with a
-review command (`/pr-review`, `/code-review`, a plugin-scoped
-`unstract:standard-review`) is marked as one, and when the invocation named a
-GitHub PR the list links straight to it. This is derived on every scan and
+review command is marked as one, and links straight to the PR under review.
+Nothing here is tool-specific: commands are matched by stem — `review`,
+`remediation`, `critique` — on the last colon-separated segment, so
+`/pr-review`, `/code-review`, `/security-review`,
+`/pr-review-toolkit:review-pr`, `/unstract:standard-review-lite` and
+`/unstract:max-remediation` all land, and a new review tool works with no
+change as long as its name says what it does. `remediation` is in that list
+because those skills *are* review loops — they run the review repeatedly and
+fix what it finds — and none of their names contain "review". The list stays
+short deliberately: stems like `audit` would drag in commands that have
+nothing to do with code review, and a session wrongly labelled a review is
+worse than one left unlabelled.
+
+The PR comes from the command's own arguments, and failing that from the first
+PR **you** typed earlier in the session — running `/pr-review` bare after
+pasting the link in an earlier message is a normal way to work, and used to
+show no link at all. A PR seen only in tool output is never adopted:
+transcripts are full of PR URLs in command output, and a confident wrong link
+is worse than none. This is derived on every scan and
 never written into your tags — an auto-applied tag could not be removed,
 because the next scan would put it straight back. The PR a session is
 *reviewing* stays distinct from the PR it *raised*; they are usually different,

@@ -12,7 +12,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 
 export interface ScannedSession {
   id: string;
@@ -246,6 +246,13 @@ function extract(
   let aiTitle = '';
   let agentName = '';
   let firstUserText = '';
+  /**
+   * The first PR the PERSON typed anywhere in the session. Used only to fill
+   * in a review that named no PR of its own — `/pr-review` with bare arguments
+   * after the URL was given in an earlier message, which is a normal way to
+   * work and otherwise showed no link at all.
+   */
+  let typedPr: PrLink | null = null;
 
   const absorb = (rec: any) => {
     if (!rec) return;
@@ -286,13 +293,22 @@ function extract(
           s.recap = stripRecapHint(rec.content);
         }
         break;
-      case 'user':
+      case 'user': {
         if (!firstUserText && !rec.isMeta) firstUserText = textOf(rec.message?.content);
         // Detect a review invocation from the RAW text: textOf() strips the
         // very slash-command envelope this reads, and cleanPromptText throws
         // the args away, so this has to run before either of them.
-        if (!s.review) s.review = detectReview(rawTextOf(rec.message?.content));
+        const raw = rawTextOf(rec.message?.content);
+        if (!s.review) s.review = detectReview(raw);
+        // Typed by a person, not echoed back by a tool. Transcripts are full
+        // of PR URLs in command output and Claude's own prose — attaching one
+        // of those would put a confident, wrong link on sessions that merely
+        // mentioned a PR in passing.
+        if (!typedPr && !rec.isMeta && !hasToolResult(rec.message?.content)) {
+          typedPr = parsePrUrl(raw);
+        }
         break;
+      }
     }
   };
 
@@ -313,6 +329,9 @@ function extract(
       s.messages = Math.max(sampledLines, Math.round(st.size / Math.max(avg, 1)));
     }
   }
+
+  // A review that named no PR still usually has one — said earlier, in prose.
+  if (s.review && !s.review.pr && typedPr) s.review = { ...s.review, pr: typedPr };
 
   s.tail = readTail(tailLines.length ? tailLines : headLines);
 
@@ -417,6 +436,11 @@ function readTail(lines: string[]): TailInfo {
   return info;
 }
 
+/** A message carrying tool output is the machine talking, not the person. */
+function hasToolResult(content: any): boolean {
+  return Array.isArray(content) && content.some((p: any) => p?.type === 'tool_result');
+}
+
 /** Raw concatenated text of a message, with Claude Code's markup left intact. */
 function rawTextOf(content: any): string {
   if (typeof content === 'string') return content;
@@ -429,12 +453,28 @@ function rawTextOf(content: any): string {
 }
 
 /**
- * Commands whose job is reviewing code. Matched on the last colon-separated
- * segment so plugin-scoped names land too — `pr-review`, `code-review`,
- * `security-review`, `pr-review-toolkit:review-pr`,
- * `unstract:standard-review-lite`.
+ * Commands whose job is reviewing code, matched by stem so this does not need
+ * a list of every tool by name. Nothing here is tool-specific: whichever
+ * command matched, the PR is read out of its arguments the same way, so a new
+ * review tool works without any change here as long as its name says what it
+ * does.
+ *
+ * `remediation` earns its place because unstract's remediation skills ARE
+ * review loops — they run the standard review repeatedly and fix what it
+ * finds — and none of their names contain "review".
+ *
+ * Kept deliberately short. Broader stems like `audit` or `check` would drag in
+ * commands that have nothing to do with code review (`/audit-logs`), and a
+ * session wrongly labelled a review is worse than one left unlabelled.
  */
-const REVIEW_COMMAND = /^(?:[a-z0-9_-]+:)*([a-z0-9-]*review[a-z0-9-]*)$/i;
+const REVIEW_STEMS = ['review', 'remediation', 'critique'];
+const COMMAND_SEGMENT = /^(?:[a-z0-9_-]+:)*([a-z0-9-]+)$/i;
+
+function isReviewCommand(name: string): boolean {
+  const seg = COMMAND_SEGMENT.exec(name)?.[1]?.toLowerCase();
+  if (!seg) return false;
+  return REVIEW_STEMS.some((stem) => seg.includes(stem));
+}
 const COMMAND_NAME = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/gi;
 const COMMAND_ARGS = /<command-args>([\s\S]*?)<\/command-args>/i;
 /** Only a full PR URL is trusted: a bare "#12" names no repository. */
@@ -446,7 +486,7 @@ function detectReview(raw: string): ReviewInfo | null {
   let m: RegExpExecArray | null;
   while ((m = COMMAND_NAME.exec(raw)) !== null) {
     const name = m[1].replace(/^\/+/, '');
-    if (!REVIEW_COMMAND.test(name)) continue;
+    if (!isReviewCommand(name)) continue;
     // Args follow their command name, and a message can carry more than one
     // command, so search forward from this match rather than the whole string.
     const rest = raw.slice(m.index);

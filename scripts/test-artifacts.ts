@@ -39,6 +39,9 @@ const S = {
   review: '44444444-4444-4444-8444-444444444444',
   reviewNoPr: '55555555-5555-4555-8555-555555555555',
   notReview: '66666666-6666-4666-8666-666666666666',
+  remediation: '77777777-7777-4777-8777-777777777777',
+  reviewLatePr: '88888888-8888-4888-8888-888888888888',
+  prInToolOutput: '99999999-9999-4999-8999-999999999999',
 };
 
 const PROJECTS = path.join(FAKE_HOME, '.claude', 'projects', '-ct-artifacts-work');
@@ -143,6 +146,51 @@ function scaffold(): void {
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
   ]);
 
+  // A remediation skill is a review loop whose name contains no "review".
+  write(S.remediation, [
+    ...base(900_000),
+    command('unstract:max-remediation', 'https://github.com/Zipstack/unstract/pull/2135', 890_000),
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // The PR was given in prose first, and the review invoked bare afterwards.
+  write(S.reviewLatePr, [
+    ...base(900_000),
+    {
+      type: 'user',
+      cwd: WORK,
+      timestamp: at(880_000),
+      message: { role: 'user', content: [{ type: 'text', text: 'look at https://github.com/Zipstack/unstract-cloud/pull/1706 with me' }] },
+    },
+    command('pr-review', 'keep it lite', 870_000),
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // A PR URL that only ever appears in TOOL OUTPUT must not be adopted: a bare
+  // review here names no PR, and inventing one is worse than showing none.
+  //
+  // The message MIXES a tool_result with a text part, which is the only shape
+  // that actually tests the guard: rawTextOf() already ignores a lone
+  // tool_result, so a pure-tool_result fixture passes whether the guard is
+  // there or not — it did, until deleting the guard failed to break it.
+  write(S.prInToolOutput, [
+    ...base(900_000),
+    command('pr-review', 'the current diff', 890_000),
+    {
+      type: 'user',
+      cwd: WORK,
+      timestamp: at(880_000),
+      message: {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'ok' },
+          { type: 'text', text: 'gh output: https://github.com/Zipstack/unstract/pull/9999' },
+        ],
+      },
+    },
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
   // Names a PR but is not a review; must not be marked as one.
   write(S.notReview, [
     ...base(900_000),
@@ -180,7 +228,7 @@ const main = async () => {
   try {
     await waitForUp(proc);
     const payload: any = await (await fetch(`${BASE}/api/sessions?force=1`)).json();
-    check('all synthetic sessions are scanned', payload.sessions.length === 6, `got ${payload.sessions.length}`);
+    check('all synthetic sessions are scanned', payload.sessions.length === 9, `got ${payload.sessions.length}`);
 
     const get = async (id: string) =>
       (await (await fetch(`${BASE}/api/sessions/${id}/artifacts`)).json()).artifacts;
@@ -229,6 +277,19 @@ const main = async () => {
     check('a non-review command is not a review even when it names a PR',
       by(S.notReview)?.review === null, JSON.stringify(by(S.notReview)?.review));
     check('a session with no command at all is not a review', by(S.none)?.review === null);
+    check('a remediation skill counts as a review, despite its name',
+      by(S.remediation)?.review?.command === 'unstract:max-remediation',
+      JSON.stringify(by(S.remediation)?.review));
+    check('  and its PR is read the same way', by(S.remediation)?.review?.pr?.number === 2135);
+    check('a bare review falls back to the PR the person typed earlier',
+      by(S.reviewLatePr)?.review?.pr?.number === 1706,
+      JSON.stringify(by(S.reviewLatePr)?.review));
+    check('a PR seen only in tool output is NOT adopted',
+      by(S.prInToolOutput)?.review?.pr === null,
+      JSON.stringify(by(S.prInToolOutput)?.review));
+    check('  but that session is still marked a review',
+      by(S.prInToolOutput)?.review?.command === 'pr-review');
+
     check('review is never written into the tags a human owns',
       by(S.review)?.user.tags.length === 0, JSON.stringify(by(S.review)?.user.tags));
   } finally {
