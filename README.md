@@ -75,14 +75,19 @@ because the next scan would put it straight back. The PR a session is
 *reviewing* stays distinct from the PR it *raised*; they are usually different,
 and both show when they are.
 
-**Active only, by default.** The list opens showing just the sessions with
-something outstanding — needs you, working, or parked — because the quiet tail
-grows without bound and is not what you came to look at. Here that is 34 of
-128. It is one click to turn off, and it is a default rather than a
-constraint: searching, or clicking one of the bucket counts along the top,
-overrides it, so a session it hides is never a session you cannot reach. The
-counts themselves are deliberately calculated *before* it applies — showing
-"Quiet 0" would leave no way to discover the 78 sitting there.
+**Active only, by default.** The list opens showing just the sessions Claude
+is actually running right now — live in `~/.claude/sessions`, or attached to a
+terminal here. Here that is 5 of 129. Attached counts as active on its own
+because a session you have just opened takes a second or two to register
+itself as live, and the row would otherwise vanish at the moment you opened
+it. Snoozing outranks running: a session you set aside stays set aside even
+while it works, which is how the rest of the app already treats snooze.
+
+It is one click to turn off, and it is a default rather than a constraint:
+searching, or clicking one of the bucket counts along the top, overrides it,
+so a session it hides is never a session you cannot reach. The counts
+themselves are deliberately calculated *before* it applies — showing "Quiet 0"
+would leave no way to discover the 78 sitting there.
 
 **Manual state is an override, never load-bearing.** Tags, P0/P1/P2, pin and
 snooze all exist, but the tool works fully if you never touch them. Tags become
