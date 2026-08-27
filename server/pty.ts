@@ -358,9 +358,19 @@ export function livePids(): Map<number, string> {
   return out;
 }
 
+/**
+ * Point this terminal at the session it is CURRENTLY serving.
+ *
+ * Not write-once. `/branch` forks a session into a new id inside the same
+ * process, so the PTY that started out running session X is now running Y —
+ * and refusing the update left the branched session with no terminal at all,
+ * showing "Running in another terminal" about the terminal you were sitting
+ * in. Claude Code keeps one registry file per pid, so the pid always resolves
+ * to exactly one current session and this cannot oscillate.
+ */
 export function setTermSessionId(id: string, sessionId: string): void {
   const t = terms.get(id);
-  if (t && !t.info.sessionId) t.info.sessionId = sessionId;
+  if (t) t.info.sessionId = sessionId;
 }
 
 export function shutdownAll(): void {

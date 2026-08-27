@@ -254,6 +254,55 @@ app.delete('/api/restore', (_req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * Run one of Claude Code's own slash commands in a terminal we own.
+ *
+ * Deliberately not a general "write this to the PTY" route. The socket already
+ * carries arbitrary keystrokes, so this adds no capability — but a route that
+ * takes a command NAME rather than raw bytes cannot be talked into sending
+ * something else, and the text that reaches the terminal is built here rather
+ * than accepted from the caller.
+ */
+const TERM_COMMANDS: Record<string, { takesArg: boolean }> = {
+  branch: { takesArg: false },
+  rename: { takesArg: true },
+};
+const MAX_COMMAND_ARG = 200;
+
+app.post('/api/terms/:id/command', (req, res) => {
+  try {
+    if (!isValidTermId(req.params.id)) throw new BadRequest('invalid id');
+    const name = req.body?.command;
+    if (typeof name !== 'string' || !Object.hasOwn(TERM_COMMANDS, name)) {
+      throw new BadRequest('unknown command');
+    }
+    const spec = TERM_COMMANDS[name];
+
+    let line = `/${name}`;
+    if (spec.takesArg) {
+      const raw = req.body?.arg;
+      if (typeof raw !== 'string') throw new BadRequest(`${name} needs an argument`);
+      // Strip control characters, newline and carriage return above all: a
+      // newline in the middle would submit the command early and leave the
+      // remainder sitting at the prompt as if you had typed it.
+      const arg = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, MAX_COMMAND_ARG);
+      if (!arg) throw new BadRequest(`${name} needs a non-empty argument`);
+      line += ` ${arg}`;
+    }
+
+    // A terminal that has exited cannot run anything, and writeTerm says so
+    // rather than failing silently.
+    if (!writeTerm(req.params.id, `${line}\r`)) {
+      res.status(409).json({ error: 'no running terminal' });
+      return;
+    }
+    res.json({ ok: true, sent: line });
+  } catch (err) {
+    if (err instanceof BadRequest) res.status(400).json({ error: err.message });
+    else res.status(500).json({ error: String((err as any)?.message ?? err) });
+  }
+});
+
 app.delete('/api/terms/:id', (req, res) => {
   if (!isValidTermId(req.params.id)) return res.status(400).json({ error: 'invalid id' });
   const hard = req.query.hard === '1';
@@ -281,7 +330,10 @@ function resolveNewSessionIds(): void {
     const termId = pids.get(info.pid);
     if (!termId) continue;
     const term = getTerm(termId);
-    if (!term || term.sessionId) continue;
+    // Adopt a change of session, not just a first identification: `/branch`
+    // gives the same process a new session id, and skipping on "already has
+    // one" stranded the branched session outside the app.
+    if (!term || term.sessionId === sessionId) continue;
     setTermSessionId(termId, sessionId);
     ptyEvents.emit('identified', termId, sessionId);
     matched = true;

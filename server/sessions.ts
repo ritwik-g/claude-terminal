@@ -64,8 +64,12 @@ async function build(): Promise<SessionsPayload> {
   const termIdFor = new Map<string, string>();
   for (const t of listTerms()) {
     if (t.exited) continue;
-    termIdFor.set(t.id, t.id);
+    // The session it is serving NOW wins, and is the only key once known.
+    // Mapping `t.id` as well meant that after a `/branch` the parent session
+    // and the branched one both claimed the same terminal — two rows offering
+    // to open one PTY, one of them lying about what is running in it.
     if (t.sessionId) termIdFor.set(t.sessionId, t.id);
+    else termIdFor.set(t.id, t.id);
   }
   const now = Date.now();
 

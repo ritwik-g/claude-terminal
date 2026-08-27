@@ -89,6 +89,23 @@ so a session it hides is never a session you cannot reach. The counts
 themselves are deliberately calculated *before* it applies — showing "Quiet 0"
 would leave no way to discover the 78 sitting there.
 
+**Branch and rename, from the app.** With a terminal open, **Branch** and
+**Rename** run Claude Code's own `/branch` and `/rename` in it. The app does
+not reimplement either — it types the command you would have typed, so the
+session stays the only source of truth for its own title and lineage. The
+route takes a command *name* rather than raw bytes, and builds the text
+server-side: a newline in a rename would otherwise submit early and leave the
+rest sitting at the prompt as though you had typed it.
+
+Branching is why a terminal's session id is not learned once and kept.
+`/branch` forks the session into a new id inside the *same* process, so the
+PTY that started out running A is now running B. Believing the first answer
+left the branched session — the one you were sitting in — with no terminal at
+all, while the pane announced *"Running in another terminal"* about the very
+terminal you were typing into. Claude Code keeps one registry file per pid, so
+the pid always resolves to exactly one current session and re-reading it
+cannot oscillate.
+
 **Manual state is an override, never load-bearing.** Tags, P0/P1/P2, pin and
 snooze all exist, but the tool works fully if you never touch them. Tags become
 filter chips as soon as you create one; priority colours the row's left edge,
@@ -288,6 +305,7 @@ System Settings > Privacy & Security.
 | `npm run test:search` | id and text matching against your real session set — that every id is reachable, and that ordinary words do not start matching ids | a running server |
 | `npm run test:restore` | the working-set round trip across two full server lifetimes | nothing |
 | `npm run test:artifacts` | artifact extraction and review detection, including an artifact stranded mid-file where the sampled scanner is blind | nothing |
+| `npm run test:branch` | that a terminal follows its session across a `/branch`, and the slash-command route the Branch and Rename buttons drive | nothing |
 
 `test:restore` builds a throwaway `HOME` with synthetic transcripts and a stub
 `claude` on the PATH, because verifying it means opening terminals, quitting and

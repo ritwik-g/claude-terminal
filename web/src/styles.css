@@ -392,6 +392,9 @@ body.resizing .term-wrap { pointer-events: none; }
 .main { grid-area: main; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 
 .detail {
+  /* Anchors the rename popover, which belongs to the selected session rather
+     than to the window. */
+  position: relative;
   border-bottom: 1px solid var(--border);
   background: var(--bg-raised);
   padding: 9px 14px;
@@ -729,3 +732,22 @@ kbd {
   gap: 6px;
 }
 .help-list strong { color: var(--fg-muted); }
+
+/* Same shape as the new-session popover, anchored to the detail pane. */
+.rename-pop {
+  position: absolute;
+  top: 100%;
+  right: 14px;
+  z-index: 20;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .5);
+}
+.rename-hint { font-size: 10.5px; line-height: 1.5; color: var(--fg-dim); }
+.rename-hint code { font-family: var(--mono); color: var(--fg-muted); }

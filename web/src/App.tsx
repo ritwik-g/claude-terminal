@@ -127,6 +127,9 @@ export function App() {
   const [restoring, setRestoring] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameText, setRenameText] = useState('');
+  const renameRef = useRef<HTMLInputElement>(null);
   // Artifacts are fetched per selected session rather than arriving with the
   // poll payload, because finding them means reading a transcript whole.
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -591,6 +594,7 @@ export function App() {
 
       if (e.key === 'Escape') {
         if (helpOpen) { setHelpOpen(false); e.preventDefault(); return; }
+        if (renameOpen) { setRenameOpen(false); e.preventDefault(); return; }
         if (newOpen) { setNewOpen(false); e.preventDefault(); return; }
         if (typing) { (el as HTMLInputElement).blur(); e.preventDefault(); }
         return;
@@ -653,7 +657,32 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flat, cursor, attach, patch, cyclePriority, refresh, newOpen, helpOpen, sidebarOpen]);
+  }, [flat, cursor, attach, patch, cyclePriority, refresh, newOpen, helpOpen, renameOpen, sidebarOpen]);
+
+  /**
+   * Drive one of Claude Code's own slash commands in the attached terminal.
+   * The app does not reimplement branching or renaming — it types the command
+   * you would have typed, so the session stays the single source of truth for
+   * its own title and lineage.
+   */
+  const termCommand = useCallback(
+    async (s: Session, command: 'branch' | 'rename', arg?: string) => {
+      if (!s.termId) return;
+      setBusy(true);
+      try {
+        await api.termCommand(s.termId, command, arg);
+        // A branch gives the terminal a NEW session id. The server notices on
+        // its next tick and the client follows via `identified`; refreshing
+        // shortly after just makes that feel immediate rather than delayed.
+        setTimeout(() => void refresh(true), 1200);
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh],
+  );
 
   // ------------------------------------------------------------------ view
   const termId = selected?.termId ?? selected?.id ?? null;
@@ -1022,6 +1051,51 @@ export function App() {
         ) : selected ? (
           <>
             <div className="detail">
+              {renameOpen && (
+                <>
+                  <div className="scrim" onClick={() => setRenameOpen(false)} />
+                  <div className="rename-pop">
+                    <div className="detail-label">Rename this session</div>
+                    <input
+                      ref={renameRef}
+                      className="tag-input"
+                      style={{ width: '100%', fontSize: 12 }}
+                      value={renameText}
+                      autoFocus
+                      onChange={(e) => setRenameText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setRenameOpen(false);
+                          return;
+                        }
+                        if (e.key !== 'Enter') return;
+                        e.preventDefault();
+                        if (!renameText.trim()) return;
+                        setRenameOpen(false);
+                        void termCommand(selected, 'rename', renameText.trim());
+                      }}
+                    />
+                    <div className="rename-hint">
+                      Runs <code>/rename</code> in the terminal, so the session names itself.
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                      <button className="btn sm" onClick={() => setRenameOpen(false)}>Cancel</button>
+                      <button
+                        className="btn sm primary"
+                        disabled={busy || !renameText.trim()}
+                        onClick={() => {
+                          setRenameOpen(false);
+                          void termCommand(selected, 'rename', renameText.trim());
+                        }}
+                      >
+                        Rename
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
               {artifacts.length > 0 && (
                 <div className="artifacts" aria-label="Artifacts published by this session">
                   <span className="detail-label">Artifacts</span>
@@ -1102,6 +1176,26 @@ export function App() {
                   </button>
                   {termOpen ? (
                     <>
+                      <button
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => void termCommand(selected, 'branch')}
+                        title="Fork this session into a new one from here (/branch). The terminal follows the branch."
+                      >
+                        Branch
+                      </button>
+                      <button
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => {
+                          setRenameText(selected.title);
+                          setRenameOpen(true);
+                          setTimeout(() => renameRef.current?.select(), 30);
+                        }}
+                        title="Rename this session (/rename)"
+                      >
+                        Rename
+                      </button>
                       <button className="btn" disabled={busy} onClick={() => void restart(selected)}>Restart</button>
                       <button className="btn danger" disabled={busy} onClick={() => void closeTerm(selected)}>Close</button>
                     </>

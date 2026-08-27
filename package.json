@@ -1,6 +1,6 @@
 {
   "name": "claude-terminal",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Attention-ranked workspace for Claude Code sessions, with embedded terminals",
@@ -23,6 +23,7 @@
     "smoke": "tsx scripts/smoke.ts",
     "test:search": "tsx scripts/test-search.ts",
     "test:artifacts": "tsx scripts/test-artifacts.ts",
+    "test:branch": "tsx scripts/test-branch.ts",
     "test:restore": "tsx scripts/test-restore.ts",
     "app:cli": "bash bin/claude-terminal"
   },
