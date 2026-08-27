@@ -1,6 +1,6 @@
 import React from 'react';
 import type { Session } from '../../../server/types';
-import { STATE_COLOR, STATE_LABEL, SHAPE_GLYPH, SHAPE_HINT, relTime, shortPath } from '../util';
+import { STATE_COLOR, STATE_LABEL, SHAPE_GLYPH, SHAPE_HINT, relTime, shortId, shortPath } from '../util';
 
 interface Props {
   s: Session;
@@ -53,6 +53,10 @@ export const SessionRow = React.memo(function SessionRow({ s, selected, atCursor
           {s.title}
         </div>
         <div className="row-sub">
+          {/* Every id is the same width in a mono font, so this reads as a
+              column you can scan down rather than as prose. */}
+          <span className="row-id" title={s.id}>{shortId(s.id)}</span>
+          {' · '}
           {detail && <span className="row-reason">{detail}</span>}
           {detail && sub ? ' · ' : ''}
           {sub}

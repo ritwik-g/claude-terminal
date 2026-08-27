@@ -58,6 +58,18 @@ export function App() {
   // Handing over on the pid alone dropped the pane into "Pick a session" with
   // a live PTY behind it, so we wait until the scan actually sees the session.
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
+  // Which copy button was last pressed, so a click that puts something on the
+  // clipboard says so. Without it both copy controls are silent and you press
+  // them twice to be sure.
+  const [copied, setCopied] = useState<string | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
+  const copy = useCallback((what: string, text: string) => {
+    void navigator.clipboard?.writeText(text);
+    setCopied(what);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(null), 1200);
+  }, []);
 
   // ------------------------------------------------------------------ data
   const refresh = useCallback(async (force = false) => {
@@ -441,20 +453,44 @@ export function App() {
     <div className="app">
       <div className="topbar">
         <div className="brand"><span className="brand-dot" /> Claude Terminal</div>
-        <input
-          ref={searchRef}
-          className="search"
-          placeholder="Search titles, prompts, tags, branches, PRs…   /"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key !== 'Enter') return;
-            e.preventDefault();
-            const first = flat[0];
-            if (first) { setSelectedId(first.id); setCursorId(first.id); void attach(first); }
-            (e.target as HTMLInputElement).blur();
-          }}
-        />
+        <div className="search-wrap">
+          <input
+            ref={searchRef}
+            className="search"
+            placeholder="Search titles, ids, prompts, tags, branches, PRs…   /"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              // Escape clears first and blurs only once the box is empty, so
+              // the reflex key does the thing you actually wanted; an empty box
+              // falls through to the window handler, which blurs it.
+              if (e.key === 'Escape' && query) {
+                e.preventDefault();
+                e.stopPropagation();
+                setQuery('');
+                return;
+              }
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              const first = flat[0];
+              if (first) { setSelectedId(first.id); setCursorId(first.id); void attach(first); }
+              (e.target as HTMLInputElement).blur();
+            }}
+          />
+          {query && (
+            <button
+              className="search-clear"
+              aria-label="Clear search"
+              title="Clear search (Esc)"
+              // The pointer lands on the button, not the field, so without this
+              // the input blurs on mousedown and you lose your place.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => { setQuery(''); searchRef.current?.focus(); }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
         <div className="counts">
           {BUCKET_ORDER.map((b) => {
             const n = groups.get(b)?.length ?? 0;
@@ -701,6 +737,14 @@ export function App() {
                 <span className="row-dot" style={{ background: STATE_COLOR[selected.state], marginTop: 0 }}
                       title={STATE_LABEL[selected.state]} />
                 <span className="detail-title">{selected.title}</span>
+                <button
+                  className="detail-id"
+                  onClick={() => copy('id', selected.id)}
+                  title="Copy the full session id"
+                >
+                  {selected.id}
+                  {copied === 'id' && <span className="copied-flash">copied</span>}
+                </button>
                 <span className="detail-path">
                   {shortPath(selected.cwd)}
                   {selected.branch ? ` · ${selected.branch}` : ''}
@@ -716,10 +760,11 @@ export function App() {
                   )}
                   <button
                     className="btn"
-                    onClick={() => navigator.clipboard?.writeText(`cd ${selected.cwd} && claude --resume ${selected.id}`)}
+                    onClick={() => copy('resume', `cd ${selected.cwd} && claude --resume ${selected.id}`)}
                     title="Copy the resume command for your own terminal"
                   >
                     Copy resume
+                    {copied === 'resume' && <span className="copied-flash">Copied</span>}
                   </button>
                   {termOpen ? (
                     <>
@@ -856,7 +901,7 @@ export function App() {
                 <kbd>j</kbd><span>down</span>
                 <kbd>k</kbd><span>up</span>
                 <kbd>Enter</kbd><span>open terminal</span>
-                <kbd>/</kbd><span>search, Enter opens the top match</span>
+                <kbd>/</kbd><span>search titles, session ids, prompts, tags — Enter opens the top match</span>
                 <kbd>p</kbd><span>cycle priority</span>
                 <kbd>x</kbd><span>pin</span>
                 <kbd>t</kbd><span>add tag</span>

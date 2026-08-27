@@ -10,6 +10,7 @@
   --fg:            #e6e9ef;
   --fg-muted:      #9aa4b4;
   --fg-dim:        #7b8698;
+  --fg-faint:      #5c6678;
 
   --accent:        #6ea8fe;
   --accent-dim:    #2b4a7d;
@@ -95,21 +96,47 @@ input  { font-family: inherit; font-size: inherit; }
   box-shadow: 0 0 8px var(--accent);
 }
 
-.search {
+/* The flex sizing lives on the wrapper now; the field fills it, so the clear
+   button can be positioned against the field's own right edge. */
+.search-wrap {
   /* min-width:0 let it shrink to 22px — technically responsive, useless in
      practice. Give it a floor and let the count chips yield instead. */
   flex: 1 1 220px;
   min-width: 120px;
   max-width: 460px;
+  position: relative;
+  display: flex;
+}
+.search {
+  width: 100%;
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--fg);
-  padding: 6px 10px;
+  /* Right padding keeps the text from running under the clear button. */
+  padding: 6px 26px 6px 10px;
   outline: none;
 }
 .search:focus { border-color: var(--accent-dim); }
 .search::placeholder { color: var(--fg-dim); }
+.search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.search-clear:hover { background: var(--bg-hover); color: var(--fg); }
+.search-clear:focus-visible { outline: 1px solid var(--accent-dim); }
 
 .counts { display: flex; gap: 6px; margin-left: auto; align-items: center; min-width: 0; overflow-x: auto; }
 .count-chip.zero { opacity: .45; }
@@ -266,6 +293,10 @@ input  { font-family: inherit; font-size: inherit; }
   font-family: var(--mono);
 }
 .row-reason { color: var(--fg-muted); }
+/* Sits a shade behind the rest of the line: present when you are looking for
+   it, quiet when you are reading the prompt next to it. */
+.row-id { color: var(--fg-faint); letter-spacing: -0.01em; }
+.row.sel .row-id { color: var(--fg-dim); }
 
 .row-meta {
   display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
@@ -329,6 +360,29 @@ input  { font-family: inherit; font-size: inherit; }
   min-width: 0; flex: 0 1 auto;
 }
 .detail-actions { margin-left: auto; display: flex; gap: 5px; flex: none; }
+/* flex:none so the id stays whole while the title and path ellipsize around
+   it — a half-shown id is worse than none, since you cannot copy it by eye. */
+.detail-id {
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint);
+  background: var(--bg-inset); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 2px 6px; flex: none;
+  position: relative;
+  cursor: pointer; transition: color .1s, border-color .1s;
+}
+.detail-id:hover { color: var(--fg-muted); border-color: var(--border-strong); }
+
+/* Confirmation covers the label instead of replacing it. Swapping the text
+   outright resized the button — 36 chars of id down to 6 of 'copied' — and
+   dragged the path and the action row across with it on every copy. */
+.copied-flash {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  color: var(--st-working);
+}
+.btn { position: relative; }
 
 .btn {
   background: var(--bg-inset);

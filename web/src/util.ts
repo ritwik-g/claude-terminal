@@ -88,6 +88,38 @@ export function shortPath(p: string): string {
   return p;
 }
 
+/**
+ * The leading chunk of a session id — what Claude Code itself shows you in
+ * `--resume` and what names the transcript file. Long enough to be unique
+ * across any realistic number of sessions, short enough to read at a glance.
+ */
+export function shortId(id: string): string {
+  return id.slice(0, 8);
+}
+
+/**
+ * A term that is really a transcript path or filename means the session that
+ * owns it: `…/b0b0bcc6-….jsonl` should find b0b0bcc6. Anything else is left
+ * exactly as typed, so searching a cwd like `~/unstract-repos` still works.
+ */
+function normalizeTerm(t: string): string {
+  if (!t.endsWith('.jsonl')) return t;
+  return t.slice(t.lastIndexOf('/') + 1, -'.jsonl'.length);
+}
+
+/**
+ * Ids are hex, so folding one into the free-text haystack would make short
+ * terms match at random — 'ab' appears in roughly half of all UUIDs. Match
+ * them deliberately instead: by prefix, which covers both the 8 chars shown in
+ * the list and a whole id pasted in, and by an inner chunk only once the term
+ * is long enough to be meant.
+ */
+function idMatches(id: string, t: string): boolean {
+  if (t.length < 3) return false;
+  if (id.startsWith(t)) return true;
+  return t.length >= 8 && id.includes(t);
+}
+
 /** Matches on everything a person might remember about a session. */
 export function matches(s: Session, q: string): boolean {
   if (!q) return true;
@@ -98,6 +130,10 @@ export function matches(s: Session, q: string): boolean {
     s.user.priority ?? '',
     s.shape,
   ].join(' ').toLowerCase();
+  const id = s.id.toLowerCase();
   // every whitespace-separated term must appear somewhere
-  return q.toLowerCase().split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every((raw) => {
+    const t = normalizeTerm(raw);
+    return hay.includes(t) || idMatches(id, t);
+  });
 }
