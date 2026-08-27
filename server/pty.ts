@@ -142,6 +142,49 @@ export function listTerms(): TermInfo[] {
   return [...terms.values()].map((t) => t.info);
 }
 
+/**
+ * Decide whether an open request reuses a terminal or needs a new one, and
+ * under which key.
+ *
+ * Reuse is the common case and must stay: asking to open a session that is
+ * already open hands back the running terminal rather than spawning a second
+ * PTY against the same transcript.
+ *
+ * The exception is a terminal whose session has moved on. `/branch` leaves the
+ * terminal created as A running B, so the key A no longer describes what is in
+ * it. Reusing on the key alone found that terminal under A and handed it
+ * straight back — reporting success, starting nothing, and leaving A
+ * unopenable until the app was restarted.
+ *
+ * Re-keying the existing terminal instead would be worse: its id is in the
+ * live WebSocket URL and its scrollback log path, both of which would break
+ * underneath a connected client. So the NEW terminal takes a fresh key, and
+ * the id stays what it always was — an opaque handle the client reads back
+ * from the server rather than assuming.
+ */
+function resolveKey(
+  requested: string,
+  sessionId: string | null,
+): { reuse: TermInfo } | { id: string } {
+  const existing = terms.get(requested);
+  if (!existing) return { id: requested };
+  if (existing.info.exited) {
+    disposeTerm(requested);
+    return { id: requested };
+  }
+  const serving = existing.info.sessionId;
+  // Unknown on either side means we cannot say they differ; reuse, which is
+  // right for a terminal still coming up and is the long-standing behaviour.
+  if (!serving || !sessionId || serving === sessionId) return { reuse: existing.info };
+
+  for (let n = 2; n < 50; n++) {
+    const candidate = `${requested}-r${n}`;
+    if (!terms.has(candidate) && isValidTermId(candidate)) return { id: candidate };
+  }
+  // Fall back to the shape a fresh session uses, so the charset still holds.
+  return { id: `new-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` };
+}
+
 export function startTerm(opts: {
   id: string;
   sessionId: string | null;
@@ -150,9 +193,12 @@ export function startTerm(opts: {
   rows?: number;
   extraArgs?: string[];
 }): TermInfo {
-  const existing = terms.get(opts.id);
-  if (existing && !existing.info.exited) return existing.info;
-  if (existing) disposeTerm(opts.id);
+  const resolved = resolveKey(opts.id, opts.sessionId);
+  // Already open for this session: hand back the running terminal. Dropping
+  // this in an earlier pass would have spawned a second PTY against the same
+  // transcript and orphaned the first, with no map entry left to kill it by.
+  if ('reuse' in resolved) return resolved.reuse;
+  const id = resolved.id;
 
   const cols = opts.cols ?? 120;
   const rows = opts.rows ?? 32;
@@ -173,7 +219,7 @@ export function startTerm(opts: {
   } catch (err) {
     console.error('[claude-terminal] could not create log dir:', err);
   }
-  const logPath = path.join(LOG_DIR, `${opts.id}.log`);
+  const logPath = path.join(LOG_DIR, `${id}.log`);
   // A fresh terminal starts a fresh scrollback.
   let logFd: number | null = null;
   try {
@@ -184,7 +230,7 @@ export function startTerm(opts: {
 
   const term: Term = {
     info: {
-      id: opts.id,
+      id,
       sessionId: opts.sessionId,
       cwd,
       pid: proc.pid,
@@ -200,18 +246,18 @@ export function startTerm(opts: {
     logFd,
     logBytes: 0,
   };
-  terms.set(opts.id, term);
+  terms.set(id, term);
 
   // A disposed-and-restarted terminal reuses the same id, so these closures
   // must confirm they still own the entry. Without this, the SIGHUP'd old
   // process writes into — and then CLOSES — the new terminal's log fd, which
   // POSIX will happily have recycled to the same number.
-  const isCurrent = () => terms.get(opts.id) === term;
+  const isCurrent = () => terms.get(id) === term;
 
   proc.onData((chunk) => {
     if (!isCurrent()) return;
     appendLog(term, chunk);
-    ptyEvents.emit('data', opts.id, chunk);
+    ptyEvents.emit('data', id, chunk);
   });
 
   proc.onExit(({ exitCode }) => {
@@ -220,10 +266,10 @@ export function startTerm(opts: {
     term.info.exitedAt = Date.now();
     closeLog(term);
     if (!isCurrent()) return;
-    ptyEvents.emit('exit', opts.id, exitCode);
+    ptyEvents.emit('exit', id, exitCode);
   });
 
-  ptyEvents.emit('started', opts.id, term.info);
+  ptyEvents.emit('started', id, term.info);
   return term.info;
 }
 

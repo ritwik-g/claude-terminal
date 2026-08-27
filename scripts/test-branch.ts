@@ -149,6 +149,21 @@ const main = async () => {
     check('the parent is attached', by(PARENT)?.attached === true);
     check('the branch is not attached yet', by(BRANCHED)?.attached === false);
 
+    // Opening a session that is already open must hand back the SAME terminal,
+    // not spawn a second PTY against one transcript. Easy to lose while making
+    // the key smarter, and it leaks a process with no map entry to kill it by.
+    await fetch(`${BASE}/api/terms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: PARENT, sessionId: PARENT, cwd: WORK, cols: 100, rows: 30 }),
+    });
+    await new Promise((r) => setTimeout(r, 700));
+    const afterReopen = (await (await fetch(`${BASE}/api/terms`)).json()).terms
+      .filter((t: any) => !t.exited);
+    check('re-opening an already-open session reuses its terminal',
+      afterReopen.length === 1 && afterReopen[0].pid === pid,
+      JSON.stringify(afterReopen.map((t: any) => ({ id: t.id.slice(0, 8), pid: t.pid }))));
+
     // ---- the branch: same process, new session id ----
     writeRegistry(pid, BRANCHED);
 
@@ -215,6 +230,36 @@ const main = async () => {
     check('rename with no argument is refused', (await cmd({ command: 'rename' })).status === 400);
     check('rename with only control characters is refused',
       (await cmd({ command: 'rename', arg: '\u0007\u0000 ' })).status === 400);
+
+    // ---- reopening the PARENT once the branch has moved on ----
+    // The terms map is keyed by the id a terminal was CREATED with, which
+    // after a branch no longer names the session it serves. "Open terminal"
+    // on the parent asks for that same key, so startTerm found the branch's
+    // still-running terminal sitting there and handed it back — reporting
+    // success while starting nothing, and leaving the parent unattached.
+    const termsBefore = (await (await fetch(`${BASE}/api/terms`)).json()).terms
+      .filter((t: any) => !t.exited).length;
+
+    await fetch(`${BASE}/api/terms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: PARENT, sessionId: PARENT, cwd: WORK, cols: 100, rows: 30 }),
+    });
+    await new Promise((r) => setTimeout(r, 1_200));
+
+    const termsAfter = (await (await fetch(`${BASE}/api/terms`)).json()).terms
+      .filter((t: any) => !t.exited).length;
+    check('reopening the parent actually starts a terminal',
+      termsAfter === termsBefore + 1, `${termsBefore} -> ${termsAfter}`);
+
+    payload = await sessions();
+    check('  the parent is attached again', by(PARENT)?.attached === true,
+      JSON.stringify(by(PARENT)?.attached));
+    check('  in its own terminal, not the branch\'s',
+      !!by(PARENT)?.termId && by(PARENT)?.termId !== by(BRANCHED)?.termId,
+      JSON.stringify({ parent: by(PARENT)?.termId, branch: by(BRANCHED)?.termId }));
+    check('  and the branch keeps the terminal it was in',
+      by(BRANCHED)?.attached === true, JSON.stringify(by(BRANCHED)?.attached));
 
     const gone = await fetch(`${BASE}/api/terms/${BRANCHED}/command`, {
       method: 'POST',

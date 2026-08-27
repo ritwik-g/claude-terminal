@@ -77,11 +77,18 @@ and both show when they are.
 
 **Active only, by default.** The list opens showing just the sessions Claude
 is actually running right now — live in `~/.claude/sessions`, or attached to a
-terminal here. Here that is 5 of 129. Attached counts as active on its own
+terminal here. Here that is 10 of 129. Attached counts as active on its own
 because a session you have just opened takes a second or two to register
 itself as live, and the row would otherwise vanish at the moment you opened
-it. Snoozing outranks running: a session you set aside stays set aside even
-while it works, which is how the rest of the app already treats snooze.
+it. Snoozed sessions are included when they are running — a session still
+working has not really been set aside, and three of the four snoozed ones
+here had terminals open in them.
+
+While the filter is applying, groups are not collapsed. Quiet and Snoozed
+start collapsed, so a running session in either was counted and then hidden
+behind a group header — the toggle read 8 with five rows on screen. Having
+asked for only the handful that are running, there is nothing left to
+collapse away; the count and the rows always agree.
 
 It is one click to turn off, and it is a default rather than a constraint:
 searching, or clicking one of the bucket counts along the top, overrides it,

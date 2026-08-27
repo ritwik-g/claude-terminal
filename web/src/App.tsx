@@ -48,15 +48,7 @@ const SHORTCUTS: { keys: string; what: string }[] = [
  * without this the row would vanish from under you at the exact moment you
  * opened it.
  */
-const isActive = (s: Session, now: number): boolean => {
-  // Snoozing outranks running. You set the session aside on purpose, and the
-  // app already works this way everywhere else — bucketOf() files a snoozed
-  // session under Snoozed even when it is actively working. Counting them here
-  // put three live-but-snoozed sessions behind a collapsed group header, so
-  // the toggle read "8" while five rows were on screen.
-  if (bucketOf(s, now) === 'snoozed') return false;
-  return !!s.live || s.attached;
-};
+const isActive = (s: Session): boolean => !!s.live || s.attached;
 
 const SIDEBAR_DEFAULT = 380;
 const SIDEBAR_MIN = 260;
@@ -287,8 +279,8 @@ export function App() {
   const activeApplies = activeOnly && !query.trim() && !bucketFilter;
 
   const visible = useMemo(
-    () => (activeApplies ? baseVisible.filter((s) => isActive(s, now)) : baseVisible),
-    [baseVisible, activeApplies, now],
+    () => (activeApplies ? baseVisible.filter(isActive) : baseVisible),
+    [baseVisible, activeApplies],
   );
 
   /**
@@ -302,7 +294,7 @@ export function App() {
     for (const s of baseVisible) c[bucketOf(s, now)]++;
     return c;
   }, [baseVisible, now]);
-  const activeCount = baseVisible.filter((s) => isActive(s, now)).length;
+  const activeCount = baseVisible.filter(isActive).length;
 
   /**
    * Freeze the DISPLAY order while the pointer is over the list.
@@ -335,15 +327,23 @@ export function App() {
     return m;
   }, [ordered, now]);
 
+  /**
+   * Collapsing is ignored while "active only" is narrowing the list. Quiet and
+   * Snoozed start collapsed, so a running session in either of them was
+   * counted and then hidden behind a group header — the toggle said 8 with
+   * five rows on screen. Having asked for just the handful that are running,
+   * there is nothing left to collapse away.
+   */
+  const showCollapsed = activeApplies;
   const flat = useMemo(() => {
     const out: Session[] = [];
     for (const b of BUCKET_ORDER) {
       if (bucketFilter && b !== bucketFilter) continue;
-      if (collapsed.has(b)) continue;
+      if (!showCollapsed && collapsed.has(b)) continue;
       out.push(...(groups.get(b) ?? []));
     }
     return out;
-  }, [groups, collapsed, bucketFilter]);
+  }, [groups, collapsed, bucketFilter, showCollapsed]);
 
   const cursor = useMemo(() => {
     const i = flat.findIndex((s) => s.id === cursorId);
@@ -372,7 +372,7 @@ export function App() {
       if (showArchived ? !s.user.archived : s.user.archived) continue;
       if (tagFilter && !s.user.tags.includes(tagFilter)) continue;
       if (bucketFilter && bucketOf(s, now) !== bucketFilter) continue;
-      if (activeApplies && !isActive(s, now)) continue;
+      if (activeApplies && !isActive(s)) continue;
       if (!matches(s, query)) continue;
       c[s.shape]++;
     }
@@ -871,7 +871,7 @@ export function App() {
               title={
                 activeOnly
                   ? (activeApplies
-                      ? 'Showing only sessions with Claude running right now. Click to show every session.'
+                      ? 'Showing only sessions with Claude running right now, snoozed ones included. Click to show every session.'
                       : `Active only is on, but ${query.trim() ? 'a search' : 'a bucket filter'} overrides it so nothing is hidden right now.`)
                   : 'Showing every session. Click to show only the ones running right now.'
               }
@@ -944,7 +944,7 @@ export function App() {
             const list = groups.get(b) ?? [];
             if (!list.length) return null;
             if (bucketFilter && b !== bucketFilter) return null;
-            const isCollapsed = collapsed.has(b);
+            const isCollapsed = collapsed.has(b) && !showCollapsed;
             return (
               <div key={b}>
                 <button
@@ -1397,8 +1397,9 @@ export function App() {
               </li>
               <li>
                 <strong>Active only</strong> is on by default and shows just the sessions with
-                Claude running right now. Searching, or clicking one of the counts at the top,
-                overrides it — so you can always reach a session it is hiding.
+                Claude running right now — including snoozed ones, because a session that is
+                still running has not really been set aside. Searching, or clicking one of the
+                counts at the top, overrides it, so you can always reach a session it hides.
               </li>
               <li>
                 Drag the edge of the list to resize it; double-click that edge to reset it.
