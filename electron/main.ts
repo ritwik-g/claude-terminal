@@ -77,6 +77,18 @@ async function createWindow(): Promise<void> {
   // a PR link should not navigate the app away from itself.
   const external = (url: string) => {
     if (handle && url.startsWith(handle.url)) return false;
+    // Hand the OS only what a browser would take. A terminal prints whatever
+    // it likes and shell.openExternal will dutifully dispatch any scheme to
+    // whatever claims it, so anything that is not plain http(s) — 'about:blank'
+    // from a blank popup, a file:// path, some app's custom scheme — is
+    // swallowed here rather than turned into a system dialog or an app launch.
+    let scheme: string;
+    try {
+      scheme = new URL(url).protocol;
+    } catch {
+      return true;
+    }
+    if (scheme !== 'http:' && scheme !== 'https:') return true;
     void shell.openExternal(url);
     return true;
   };

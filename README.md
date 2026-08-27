@@ -270,6 +270,25 @@ buried in the middle. That case is the reason the module exists: swap the
 whole-file read for head-only sampling and every other check in the file still
 passes.
 
+## The icon
+
+`npm run icon` regenerates `build/icon.png`, `build/icon.icns` and the DMG
+background from `scripts/icon-designs.mjs`, which holds every design that was
+considered — `make-icon.mjs` only names the one that ships. There are no image
+dependencies: the artwork is rasterised from geometric predicates and the PNG
+is written by hand, so the options you preview are pixel-identical to what gets
+packaged, with no SVG-to-raster step in between where they could diverge.
+
+```bash
+node scripts/icon-designs.mjs sheet   # contact sheet of every option, at 160px and 32px
+```
+
+Each `.icns` representation is rendered at its own resolution rather than
+downscaled from the 1024 master: the stroke is a fraction of the icon size, so
+rendering at 16px gives a crisp two-pixel stroke where a downscale gives a grey
+smear — and 16px is what Finder's list view actually uses. That step needs
+`iconutil`, so it is skipped off macOS and the committed `.icns` is kept.
+
 ## Where state lives
 
 Everything this tool owns is under `~/.claude-terminal/` — `state.json` (tags,

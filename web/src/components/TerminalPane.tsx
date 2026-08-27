@@ -66,7 +66,17 @@ export function TerminalPane({ termId, onExit, onIdentified }: Props) {
     const search = new SearchAddon();
     term.loadAddon(fit);
     term.loadAddon(search);
-    term.loadAddon(new WebLinksAddon());
+    // Always pass an explicit handler. The addon's default one calls
+    // `window.open()` with NO url and then assigns `location.href` on the
+    // window it gets back, to null the opener. Electron's window-open handler
+    // therefore sees 'about:blank' rather than the link, and since we deny the
+    // popup there is no window left to assign the real url to — so macOS put
+    // up "There is no application set to open the URL about:blank" and the
+    // link was lost. Opening the uri directly with noopener does the same
+    // security job in one step.
+    term.loadAddon(new WebLinksAddon((_event, uri) => {
+      window.open(uri, '_blank', 'noopener,noreferrer');
+    }));
     term.open(host);
     termRef.current = term;
     searchRef.current = search;
