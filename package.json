@@ -1,6 +1,6 @@
 {
   "name": "claude-terminal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Attention-ranked workspace for Claude Code sessions, with embedded terminals",
