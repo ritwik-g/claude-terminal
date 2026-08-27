@@ -1,4 +1,4 @@
-import type { Session, UserState } from '../../server/types';
+import type { RestoreCandidate, Session, UserState } from '../../server/types';
 
 export interface SessionsPayload {
   sessions: Session[];
@@ -7,6 +7,7 @@ export interface SessionsPayload {
   scannedAt: number;
   scanMs: number;
   storeReadOnly: boolean;
+  restore: RestoreCandidate[];
 }
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
@@ -32,6 +33,8 @@ export const api = {
 
   startTerm: (body: { id: string; sessionId: string | null; cwd: string; cols: number; rows: number }) =>
     json<{ term: unknown }>('/api/terms', { method: 'POST', body: JSON.stringify(body) }),
+
+  clearRestore: () => json<{ ok: boolean }>('/api/restore', { method: 'DELETE' }),
 
   killTerm: (id: string, hard = false) =>
     json<{ ok: boolean }>(`/api/terms/${encodeURIComponent(id)}${hard ? '?hard=1' : ''}`, {

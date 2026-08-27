@@ -55,10 +55,34 @@ input  { font-family: inherit; font-size: inherit; }
 .app {
   display: grid;
   grid-template-columns: 380px 1fr;
-  grid-template-rows: 44px 1fr;
-  grid-template-areas: "topbar topbar" "sidebar main";
+  /* The restore row is `auto`, so it takes no height at all on the ordinary
+     launch where there is nothing to reopen. */
+  grid-template-rows: 44px auto 1fr;
+  grid-template-areas: "topbar topbar" "restore restore" "sidebar main";
   height: 100%;
 }
+
+/* Spans both columns: it is about the whole app, not the list, and squeezing
+   it into the sidebar would truncate the very names that make it useful. */
+.restore-bar {
+  grid-area: restore;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-raised));
+  border-bottom: 1px solid var(--accent-dim);
+}
+.restore-icon { color: var(--accent); font-size: 14px; flex: none; }
+.restore-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.restore-text strong { font-size: 12px; font-weight: 600; color: var(--fg); }
+.restore-names {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.restore-actions { margin-left: auto; display: flex; gap: 6px; flex: none; }
 
 .topbar {
   grid-area: topbar;

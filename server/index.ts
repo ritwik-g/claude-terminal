@@ -14,6 +14,9 @@ import {
   readScrollback, listTerms, getTerm, ptyEvents, shutdownAll,
   isValidTermId, reapExited, livePids, setTermSessionId,
 } from './pty.js';
+import {
+  initRestore, captureWorkingSet, captureAndFreeze, clearRestore,
+} from './restore.js';
 import type { Priority, UserState } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -210,10 +213,22 @@ app.post('/api/terms', async (req, res) => {
       cols: clampDim(cols, 120),
       rows: clampDim(rows, 32),
     });
+    captureWorkingSet();
     res.json({ term: info });
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message ?? err) });
   }
+});
+
+/**
+ * The restore offer has been taken or waved away. Separate from the terminals
+ * themselves: the client reopens them through the ordinary POST /api/terms
+ * path, so restoring reuses exactly the code an ordinary Open terminal runs,
+ * validation included, rather than a second lightly-tested spawn route.
+ */
+app.delete('/api/restore', (_req, res) => {
+  clearRestore();
+  res.json({ ok: true });
 });
 
 app.delete('/api/terms/:id', (req, res) => {
@@ -221,6 +236,7 @@ app.delete('/api/terms/:id', (req, res) => {
   const hard = req.query.hard === '1';
   if (hard) disposeTerm(req.params.id);
   else killTerm(req.params.id);
+  captureWorkingSet();
   res.json({ ok: true });
 });
 
@@ -403,11 +419,18 @@ export async function startServer(opts: {
 
   initSessions();
   loadStore();
+  // Must follow loadStore and precede the housekeeping tick below, which is
+  // what starts overwriting the persisted set with the live one.
+  initRestore();
   serveStatic(opts.staticDir ?? path.join(__dirname, '..', 'dist'));
 
   houseKeeping = setInterval(() => {
     resolveNewSessionIds();
     reapExited();
+    // Covers every way the live set can change — opened, exited, killed, or a
+    // fresh session finally learning its id — in one place. The store ignores
+    // an unchanged set, so this is free when nothing has happened.
+    captureWorkingSet();
   }, 2000);
   houseKeeping.unref();
 
@@ -436,7 +459,9 @@ export async function startServer(opts: {
       if (closing) return closing;
       closing = (async () => {
         if (houseKeeping) { clearInterval(houseKeeping); houseKeeping = null; }
-        // Persist before killing anything, so a quit never costs tag edits.
+        // Persist before killing anything, so a quit never costs tag edits —
+        // and record the working set before shutdownAll() empties it.
+        captureAndFreeze();
         flushStore();
         saveCache({ force: true });
         shutdownAll();

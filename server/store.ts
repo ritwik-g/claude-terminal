@@ -1,11 +1,20 @@
 import fs from 'node:fs';
 import { APP_DIR, STATE_FILE } from './paths.js';
-import { EMPTY_USER_STATE, type UserState } from './types.js';
+import { EMPTY_USER_STATE, type UserState, type WorkingSetEntry } from './types.js';
 
 interface StoreShape {
   version: number;
   sessions: Record<string, Partial<UserState>>;
+  /** Terminals that were open, so quitting does not cost you your working set. */
+  workingSet: WorkingSetEntry[];
 }
+
+/**
+ * A ceiling on what we will ever offer to reopen. Every entry becomes a real
+ * `claude --resume` process, so a corrupt or hand-edited file must not be able
+ * to make one click spawn hundreds of them.
+ */
+const MAX_WORKING_SET = 32;
 
 /**
  * Null-prototype, because session ids are attacker-shaped keys as far as this
@@ -16,7 +25,7 @@ interface StoreShape {
  */
 const emptySessions = (): Record<string, Partial<UserState>> => Object.create(null);
 
-let data: StoreShape = { version: 1, sessions: emptySessions() };
+let data: StoreShape = { version: 1, sessions: emptySessions(), workingSet: [] };
 let dirty = false;
 /**
  * Set when state.json exists but could not be read or parsed. Every flush is a
@@ -46,9 +55,9 @@ export function loadStore(): void {
         sessions[k] = row;
       }
     }
-    data = { version: 1, sessions };
+    data = { version: 1, sessions, workingSet: parseWorkingSet(parsed?.workingSet) };
   } catch (err: any) {
-    data = { version: 1, sessions: emptySessions() };
+    data = { version: 1, sessions: emptySessions(), workingSet: [] };
     if (err?.code !== 'ENOENT') {
       loadFailed = true;
       console.error(
@@ -124,6 +133,43 @@ export function allTags(known?: Set<string>): string[] {
 /** True when we hold any state for this id, present in the index or not. */
 export function hasUserState(id: string): boolean {
   return Object.prototype.hasOwnProperty.call(data.sessions, id);
+}
+
+/** Nothing here is trusted: the file is user-editable and survives upgrades. */
+function parseWorkingSet(raw: unknown): WorkingSetEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WorkingSetEntry[] = [];
+  for (const e of raw) {
+    if (!e || typeof e !== 'object') continue;
+    const { sessionId, cwd } = e as Partial<WorkingSetEntry>;
+    if (typeof sessionId !== 'string' || !sessionId || !isSafeKey(sessionId)) continue;
+    if (typeof cwd !== 'string' || !cwd) continue;
+    out.push({ sessionId, cwd });
+    if (out.length >= MAX_WORKING_SET) break;
+  }
+  return out;
+}
+
+export function getWorkingSet(): WorkingSetEntry[] {
+  return data.workingSet.map((e) => ({ ...e }));
+}
+
+/**
+ * Records the terminals open right now.
+ *
+ * The diff is not an optimisation. This is called from the 2s housekeeping
+ * tick, so without it every tick would dirty the store and rewrite state.json
+ * forever — a whole-file write-and-rename twice a minute for no change.
+ */
+export function setWorkingSet(entries: WorkingSetEntry[]): void {
+  const next = entries.slice(0, MAX_WORKING_SET);
+  const same =
+    next.length === data.workingSet.length &&
+    next.every((e, i) => e.sessionId === data.workingSet[i].sessionId && e.cwd === data.workingSet[i].cwd);
+  if (same) return;
+  data.workingSet = next;
+  dirty = true;
+  scheduleFlush();
 }
 
 let flushTimer: NodeJS.Timeout | null = null;

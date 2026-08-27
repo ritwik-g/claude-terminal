@@ -94,6 +94,23 @@ export interface Session {
   termId: string | null;
 }
 
+/**
+ * A terminal that was open, recorded so a quit does not cost you your working
+ * set. `cwd` is informational — restoring uses the session's own current cwd —
+ * but it makes state.json legible when something has gone wrong.
+ */
+export interface WorkingSetEntry {
+  sessionId: string;
+  cwd: string;
+}
+
+/** A working-set entry we have checked is still restorable, ready to offer. */
+export interface RestoreCandidate {
+  sessionId: string;
+  cwd: string;
+  title: string;
+}
+
 export const EMPTY_USER_STATE: UserState = {
   tags: [],
   priority: null,

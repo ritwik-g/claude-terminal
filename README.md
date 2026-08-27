@@ -47,6 +47,14 @@ Raw output is logged to `~/.claude-terminal/logs/` so scrollback survives a
 reload. Sessions survive closing the window; they do not survive the daemon
 being killed, which is the deliberate trade for the scrolling.
 
+**Your working set survives a quit.** The terminals you had open are recorded
+as you open and close them, and on the next launch the app offers to reopen
+them in one click — so updating it costs you a click rather than an afternoon
+of remembering which four sessions you were in the middle of. The offer only
+lists what will actually work: the session still exists, its directory is still
+there, and it has not been picked up by a terminal of your own in the meantime.
+Nothing is reopened without you asking, and dismissing it is permanent.
+
 **A dropped connection is not a dropped session.** The socket is closed by a
 laptop sleep or any network gap, but the PTY on the other side is fine — so the
 pane reconnects on its own with backoff and replays its scrollback, and says so
@@ -177,10 +185,24 @@ Both need macOS **Accessibility** (for window bounds) and **Screen Recording**
 (for the capture) granted to the terminal — they are separate toggles in
 System Settings > Privacy & Security.
 
+### Automated checks
+
+| Command | What it covers | Needs |
+|---|---|---|
+| `npm run smoke` | the HTTP surface, including every input that must be *rejected* before it reaches node-pty | a running server |
+| `npm run test:search` | id and text matching against your real session set — that every id is reachable, and that ordinary words do not start matching ids | a running server |
+| `npm run test:restore` | the working-set round trip across two full server lifetimes | nothing |
+
+`test:restore` builds a throwaway `HOME` with synthetic transcripts and a stub
+`claude` on the PATH, because verifying it means opening terminals, quitting and
+reopening — and doing that against your real sessions would resume them for
+real. It never touches `~/.claude` or `~/.claude-terminal`.
+
 ## Where state lives
 
 Everything this tool owns is under `~/.claude-terminal/` — `state.json` (tags,
-priority, pins, snoozes), `index-cache.json`, and `logs/`. It **never writes to
+priority, pins, snoozes, and the working set of open terminals),
+`index-cache.json`, and `logs/`. It **never writes to
 `~/.claude`**; that directory is read-only as far as this tool is concerned.
 
 If `state.json` exists but cannot be read, the server refuses to write over it

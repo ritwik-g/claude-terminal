@@ -61,6 +61,10 @@ export function App() {
   // Which copy button was last pressed, so a click that puts something on the
   // clipboard says so. Without it both copy controls are silent and you press
   // them twice to be sure.
+  // Dismissed locally the instant you act, so the banner cannot flash back
+  // between the click and the next poll clearing it server-side.
+  const [restoreDone, setRestoreDone] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
@@ -283,6 +287,47 @@ export function App() {
     },
     [refresh],
   );
+
+  const restorable = restoreDone ? [] : (payload?.restore ?? []);
+
+  const dismissRestore = useCallback(async () => {
+    setRestoreDone(true);
+    try {
+      await api.clearRestore();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }, []);
+
+  const restoreAll = useCallback(async () => {
+    const list = payload?.restore ?? [];
+    if (!list.length) return;
+    setRestoreDone(true);
+    setRestoring(true);
+    const opened: string[] = [];
+    const failed: string[] = [];
+    for (const r of list) {
+      try {
+        await api.startTerm({ id: r.sessionId, sessionId: r.sessionId, cwd: r.cwd, cols: 120, rows: 32 });
+        opened.push(r.sessionId);
+      } catch (e: any) {
+        // One dead worktree must not cost you the other five terminals.
+        failed.push(`${r.title} (${String(e?.message ?? e)})`);
+      }
+    }
+    try {
+      await api.clearRestore();
+    } catch { /* already dismissed locally; it will not be offered again */ }
+    setRestoring(false);
+    setError(failed.length ? `Could not reopen ${failed.length} of ${list.length}: ${failed.join('; ')}` : null);
+    if (opened[0]) {
+      setSelectedId(opened[0]);
+      setCursorId(opened[0]);
+      setExitedFor(null);
+      setRestartNonce((n) => n + 1);
+    }
+    await refresh(true);
+  }, [payload, refresh]);
 
   const restart = useCallback(
     async (s: Session) => {
@@ -552,6 +597,28 @@ export function App() {
           </>
         )}
       </div>
+
+      {restorable.length > 0 && (
+        <div className="restore-bar" role="status">
+          <span className="restore-icon" aria-hidden>⟳</span>
+          <div className="restore-text">
+            <strong>
+              {restorable.length} terminal{restorable.length === 1 ? ' was' : 's were'} open when you last quit.
+            </strong>
+            <span className="restore-names">
+              {restorable.map((r) => r.title).join(' · ')}
+            </span>
+          </div>
+          <div className="restore-actions">
+            <button className="btn primary" disabled={restoring} onClick={() => void restoreAll()}>
+              {restoring ? 'Reopening…' : `Reopen all ${restorable.length}`}
+            </button>
+            <button className="btn" disabled={restoring} onClick={() => void dismissRestore()}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="sidebar" onPointerEnter={() => setAiming(true)} onPointerLeave={() => setAiming(false)}>
         {payload?.storeReadOnly && (

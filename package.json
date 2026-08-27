@@ -22,6 +22,7 @@
     "doctor": "tsx scripts/doctor.ts",
     "smoke": "tsx scripts/smoke.ts",
     "test:search": "tsx scripts/test-search.ts",
+    "test:restore": "tsx scripts/test-restore.ts",
     "app:cli": "bash bin/claude-terminal"
   },
   "dependencies": {

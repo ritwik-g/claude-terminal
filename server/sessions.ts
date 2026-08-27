@@ -4,7 +4,8 @@ import { gitInfoForAll } from './git.js';
 import { getUserState, allTags, isReadOnly } from './store.js';
 import { score, bucketOf, classifyShape } from './rank.js';
 import { listTerms } from './pty.js';
-import type { Session } from './types.js';
+import { pendingRestore, dropPending, cwdUsable } from './restore.js';
+import type { RestoreCandidate, Session } from './types.js';
 
 export interface SessionsPayload {
   sessions: Session[];
@@ -14,6 +15,8 @@ export interface SessionsPayload {
   scanMs: number;
   /** state.json is unreadable; tags/priority/pin/snooze cannot be saved. */
   storeReadOnly: boolean;
+  /** Terminals open when the app last stopped, still reopenable. */
+  restore: RestoreCandidate[];
 }
 
 let inflight: Promise<SessionsPayload> | null = null;
@@ -126,6 +129,28 @@ async function build(): Promise<SessionsPayload> {
     else counts[bucketOf(s, now)]++;
   }
 
+  // Only offer what will actually work — an offer that fails on click is worse
+  // than no offer — and settle the rest, so the file does not accumulate
+  // entries that can never be shown.
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const restore: RestoreCandidate[] = [];
+  const settled: string[] = [];
+  for (const entry of pendingRestore()) {
+    const s = byId.get(entry.sessionId);
+    // Gone for good: the transcript was deleted, or the directory it ran in.
+    if (!s || !cwdUsable(s.cwd)) { settled.push(entry.sessionId); continue; }
+    // Already dealt with, whether by Reopen all or by you opening it yourself.
+    // Dropping it here is what stops closing that terminal later from
+    // resurrecting the banner for it.
+    if (s.attached) { settled.push(entry.sessionId); continue; }
+    // Running in a terminal of your own right now: resuming it a second time
+    // would put two clients on one transcript. Still yours, so keep offering
+    // it once that terminal goes away.
+    if (s.live) continue;
+    restore.push({ sessionId: s.id, cwd: s.cwd, title: s.title });
+  }
+  dropPending(settled);
+
   const payload: SessionsPayload = {
     sessions,
     tags: allTags(new Set(sessions.map((s) => s.id))),
@@ -133,6 +158,7 @@ async function build(): Promise<SessionsPayload> {
     scannedAt: now,
     scanMs: Date.now() - t0,
     storeReadOnly: isReadOnly(),
+    restore,
   };
   last = payload;
   lastAt = Date.now();
