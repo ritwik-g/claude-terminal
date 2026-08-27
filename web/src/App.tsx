@@ -38,6 +38,13 @@ const SHORTCUTS: { keys: string; what: string }[] = [
   { keys: '\u2318F', what: 'find inside the terminal (Ctrl+F on Linux)' },
 ];
 
+/**
+ * What "active" means: everything with something still outstanding. Quiet
+ * sessions have nothing pending and snoozed ones were deliberately set aside,
+ * so both are the tail this hides — on this machine that is 82 of 128.
+ */
+const ACTIVE_BUCKETS: Bucket[] = ['attention', 'working', 'parked'];
+
 const SIDEBAR_DEFAULT = 380;
 const SIDEBAR_MIN = 260;
 const SIDEBAR_MAX = 640;
@@ -69,6 +76,9 @@ export function App() {
   const [shapeFilter, setShapeFilter] = useState<SessionShape | null>(null);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [activeOnly, setActiveOnly] = useState(
+    () => { try { return localStorage.getItem('ct.activeOnly') !== '0'; } catch { return true; } },
+  );
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
   const [newTermId, setNewTermId] = useState<string | null>(null);
@@ -184,6 +194,9 @@ export function App() {
   useEffect(() => {
     try { localStorage.setItem('ct.sidebarOpen', sidebarOpen ? '1' : '0'); } catch { /* private mode */ }
   }, [sidebarOpen]);
+  useEffect(() => {
+    try { localStorage.setItem('ct.activeOnly', activeOnly ? '1' : '0'); } catch { /* private mode */ }
+  }, [activeOnly]);
 
   /**
    * Drag on the window rather than the handle, so a pointer that outruns the
@@ -236,7 +249,8 @@ export function App() {
 
   const sessions = payload?.sessions ?? [];
 
-  const visible = useMemo(
+  /** Everything the explicit filters allow, before "active only" narrows it. */
+  const baseVisible = useMemo(
     () =>
       sessions.filter(
         (s) =>
@@ -247,6 +261,34 @@ export function App() {
       ),
     [sessions, query, shapeFilter, tagFilter, showArchived],
   );
+
+  /**
+   * "Active only" is a default view, not a constraint — so anything you ask
+   * for explicitly outranks it. Searching would otherwise be unable to reach
+   * the quiet sessions, which is most of what you search FOR; and clicking the
+   * Quiet chip would filter to a bucket this hides and show an empty list.
+   */
+  const activeApplies = activeOnly && !query.trim() && !bucketFilter;
+
+  const visible = useMemo(
+    () => (activeApplies
+      ? baseVisible.filter((s) => ACTIVE_BUCKETS.includes(bucketOf(s, now)))
+      : baseVisible),
+    [baseVisible, activeApplies, now],
+  );
+
+  /**
+   * Bucket counts for the top bar, taken from BEFORE the active filter. With
+   * it on, counting after would show "Quiet 0" and leave no way to discover
+   * the 78 sessions sitting there, or any reason to click through to them.
+   */
+  const bucketCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const b of BUCKET_ORDER) c[b] = 0;
+    for (const s of baseVisible) c[bucketOf(s, now)]++;
+    return c;
+  }, [baseVisible, now]);
+  const activeCount = ACTIVE_BUCKETS.reduce((n, b) => n + (bucketCounts[b] ?? 0), 0);
 
   /**
    * Freeze the DISPLAY order while the pointer is over the list.
@@ -299,7 +341,7 @@ export function App() {
   useEffect(() => {
     setCursorId(flat[0]?.id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, shapeFilter, tagFilter, bucketFilter, showArchived]);
+  }, [query, shapeFilter, tagFilter, bucketFilter, showArchived, activeOnly]);
 
   // If the last use of a tag is removed, its chip disappears — leaving the
   // filter stuck on with no control to clear it and a permanently empty list.
@@ -316,11 +358,12 @@ export function App() {
       if (showArchived ? !s.user.archived : s.user.archived) continue;
       if (tagFilter && !s.user.tags.includes(tagFilter)) continue;
       if (bucketFilter && bucketOf(s, now) !== bucketFilter) continue;
+      if (activeApplies && !ACTIVE_BUCKETS.includes(bucketOf(s, now))) continue;
       if (!matches(s, query)) continue;
       c[s.shape]++;
     }
     return c;
-  }, [sessions, query, tagFilter, showArchived, bucketFilter, now]);
+  }, [sessions, query, tagFilter, showArchived, bucketFilter, now, activeApplies]);
 
   const selected = useMemo(
     () => sessions.find((s) => s.id === selectedId) ?? null,
@@ -668,7 +711,7 @@ export function App() {
         </div>
         <div className="counts">
           {BUCKET_ORDER.map((b) => {
-            const n = groups.get(b)?.length ?? 0;
+            const n = bucketCounts[b] ?? 0;
             return (
               <button
                 key={b}
@@ -780,6 +823,24 @@ export function App() {
         {error && <div className="banner err">{error}</div>}
 
         <div className="filters">
+          <div className="filter-row">
+            <button
+              className={`btn sm${activeOnly ? ' on' : ''}`}
+              aria-pressed={activeOnly}
+              onClick={() => setActiveOnly((v) => !v)}
+              title={
+                activeOnly
+                  ? (activeApplies
+                      ? 'Showing only sessions with something outstanding — needs you, working, or parked. Click to show every session.'
+                      : `Active only is on, but ${query.trim() ? 'a search' : 'a bucket filter'} overrides it so nothing is hidden right now.`)
+                  : 'Showing every session. Click to hide the quiet and snoozed ones.'
+              }
+            >
+              {/* Filled only when it is actually narrowing the list, so an
+                  overridden toggle does not claim to be doing something. */}
+              {activeApplies ? '\u25cf' : '\u25cb'} Active only {activeCount}
+            </button>
+          </div>
           <div className="filter-row">
             {SHAPE_ORDER.map((sh) => (
               <button
@@ -1228,6 +1289,11 @@ export function App() {
               <li>
                 Terminals you leave open are offered back the next time you launch, so quitting to
                 update costs you nothing.
+              </li>
+              <li>
+                <strong>Active only</strong> is on by default and hides the quiet and snoozed
+                tail. Searching, or clicking one of the counts at the top, overrides it — so
+                you can always reach a session it is hiding.
               </li>
               <li>
                 Drag the edge of the list to resize it; double-click that edge to reset it.
