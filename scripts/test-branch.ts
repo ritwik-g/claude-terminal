@@ -172,6 +172,16 @@ const main = async () => {
       t2.terms.find((t: any) => t.id === PARENT)?.sessionId === BRANCHED,
       t2.terms.find((t: any) => t.id === PARENT)?.sessionId);
 
+    // The two facts the "Active only" filter consumes. Before the fix the
+    // parent held the terminal while looking dormant, and the branch — the
+    // session actually running — was the one disowned.
+    check('the branch counts as active (live or attached)',
+      !!by(BRANCHED)?.live || by(BRANCHED)?.attached === true,
+      JSON.stringify({ live: !!by(BRANCHED)?.live, attached: by(BRANCHED)?.attached }));
+    check('the parent no longer counts as active',
+      !by(PARENT)?.live && by(PARENT)?.attached === false,
+      JSON.stringify({ live: !!by(PARENT)?.live, attached: by(PARENT)?.attached }));
+
     // Re-reading an unchanged registry must not thrash the mapping.
     await new Promise((r) => setTimeout(r, 3_000));
     payload = await sessions();
