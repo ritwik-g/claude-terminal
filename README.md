@@ -63,32 +63,63 @@ process.
 
 ## Install
 
-**macOS** — grab the `.dmg` for your chip from
-[Releases](https://github.com/ritwik-g/claude-terminal/releases)
-(`mac-arm64` for Apple Silicon, `mac-x64` for Intel), open it, and drag
-**Claude Terminal** to Applications. It is **not code-signed**, so Gatekeeper
-will refuse the first launch. Either right-click the app and choose *Open*, or:
+There are two ways in, and the difference is only about Gatekeeper.
+
+### Build it yourself — no Gatekeeper at all
+
+An app you build on your own machine is never quarantined, so it just opens.
+For a personal tool this is the path of least friction:
 
 ```bash
-xattr -cr "/Applications/Claude Terminal.app"
-```
-
-Quitting the app (⌘Q) stops the server and closes every terminal it started —
-it asks first if any are still running. Sessions in your own terminals are never
-affected.
-
-**Build it yourself:**
-
-```bash
+git clone git@github.com:ritwik-g/claude-terminal.git && cd claude-terminal
 npm install
 npm run dist:mac     # -> release/*.dmg and release/*.zip (host architecture)
-npm run app          # run the desktop app from source
 ```
 
-**Cutting a release.** `.github/workflows/release.yml` builds macOS arm64,
-macOS x64 and a Linux AppImage on their own native runners — one per
-architecture, which is far more reliable for a native module than
-cross-compiling — and attaches every installer to a GitHub Release:
+Then drag **Claude Terminal** out of `release/` into Applications. Or skip
+packaging entirely and run it from source with `npm run app`.
+
+### Download a release — one command afterwards
+
+Grab the `.dmg` for your chip from
+[Releases](https://github.com/ritwik-g/claude-terminal/releases)
+(`mac-arm64` for Apple Silicon, `mac-x64` for Intel), open it, drag
+**Claude Terminal** to Applications, and then:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Claude Terminal.app"
+```
+
+**You need that command, and without it macOS will tell you the app is
+damaged.** It is not damaged. These builds are ad-hoc signed rather than signed
+with an Apple Developer ID, because that requires a paid Developer Program
+membership ($99/yr) that this project does not have. Your browser attaches
+`com.apple.quarantine` to anything it downloads, and for a quarantined app
+without a Developer ID signature, Gatekeeper on Apple Silicon reports
+*"is damaged and can't be opened. You should move it to the Bin"* — which is
+alarming, wrong, and offers no way past it.
+
+Do **not** move it to the Bin. Run the command above, which strips the
+quarantine flag from that one app, and it will open normally from then on. You
+need it once per download, so it applies again after every update.
+
+Two things that do *not* work here, though both are the usual advice:
+**right-click → Open** (that path exists for apps that are signed but not
+notarized — this one has no Open option at all), and a free Apple developer
+account (its certificates cannot notarize, so they change nothing here).
+
+Deleting the app bundle is harmless either way: everything the tool remembers
+lives in `~/.claude-terminal/`, not in the bundle.
+
+### Either way
+
+Quitting the app (⌘Q) stops the server and closes every terminal it started —
+it asks first if any are still running, and offers to reopen them next launch.
+Sessions in your own terminals are never affected.
+
+**Cutting a release.** `.github/workflows/release.yml` builds both macOS
+architectures on one Apple Silicon runner and a Linux AppImage on its own, then
+attaches every installer to a GitHub Release:
 
 ```bash
 npm version patch          # or edit package.json
@@ -100,8 +131,9 @@ moving a tag.
 
 ### Headless / Linux
 
-There is no packaged Linux app yet (`npm run dist:linux` builds an AppImage but
-is untested). The server runs fine without Electron — use your own browser:
+Releases carry an `x86_64.AppImage`, but it has only ever been *built* — never
+run — so treat it as untested. The server runs fine without Electron either
+way; use your own browser:
 
 ```bash
 npm install                 # postinstall repairs node-pty's broken arm64 prebuild
