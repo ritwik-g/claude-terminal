@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 
-import { initSessions, getSessions } from './sessions.js';
+import { initSessions, getSessions, fileForSession } from './sessions.js';
+import { readArtifacts } from './artifacts.js';
 import { saveCache } from './scan.js';
 import { loadStore, setUserState, flushStore, isSafeKey, hasUserState, isReadOnly } from './store.js';
 import { readLiveSessions } from './live.js';
@@ -74,6 +75,28 @@ app.get('/api/sessions', async (req, res) => {
   try {
     const payload = await getSessions(req.query.force === '1');
     res.json(payload);
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message ?? err) });
+  }
+});
+
+/**
+ * Artifacts are read on demand rather than shipped with every session in the
+ * poll payload: finding them means reading each transcript whole (see
+ * artifacts.ts for why sampling cannot work), which is cheap for the one
+ * session you have selected and wasteful for the other hundred you have not.
+ */
+app.get('/api/sessions/:id/artifacts', async (req, res) => {
+  try {
+    // Resolve through the scan index rather than trusting the id as a path —
+    // it arrives from the URL, and building a filename out of it would let
+    // `..%2f` walk out of the projects directory.
+    const file = fileForSession(req.params.id);
+    if (!file) {
+      res.status(404).json({ error: 'unknown session' });
+      return;
+    }
+    res.json({ artifacts: await readArtifacts(file) });
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message ?? err) });
   }

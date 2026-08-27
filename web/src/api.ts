@@ -1,4 +1,4 @@
-import type { RestoreCandidate, Session, UserState } from '../../server/types';
+import type { Artifact, RestoreCandidate, Session, UserState } from '../../server/types';
 
 export interface SessionsPayload {
   sessions: Session[];
@@ -33,6 +33,9 @@ export const api = {
 
   startTerm: (body: { id: string; sessionId: string | null; cwd: string; cols: number; rows: number }) =>
     json<{ term: unknown }>('/api/terms', { method: 'POST', body: JSON.stringify(body) }),
+
+  artifacts: (id: string) =>
+    json<{ artifacts: Artifact[] }>(`/api/sessions/${encodeURIComponent(id)}/artifacts`),
 
   clearRestore: () => json<{ ok: boolean }>('/api/restore', { method: 'DELETE' }),
 

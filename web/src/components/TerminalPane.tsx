@@ -74,11 +74,21 @@ export function TerminalPane({ termId, onExit, onIdentified }: Props) {
     let closed = false;
     let ws: WebSocket | null = null;
 
-    const sendResize = () => {
+    // Last dimensions the PTY was actually told about. Dragging the sidebar
+    // edge fires the ResizeObserver on every frame, and each send is a SIGWINCH
+    // to a live Claude Code, which redraws its whole TUI on receipt — 60 a
+    // second garbles it. A drag crosses a character-cell boundary a few dozen
+    // times at most, so sending only on a real change is both correct and calm.
+    let sentCols = 0;
+    let sentRows = 0;
+
+    const sendResize = (force = false) => {
       try { fit.fit(); } catch { /* host not laid out yet */ }
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-      }
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!force && term.cols === sentCols && term.rows === sentRows) return;
+      sentCols = term.cols;
+      sentRows = term.rows;
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     };
 
     /**
@@ -98,7 +108,10 @@ export function TerminalPane({ termId, onExit, onIdentified }: Props) {
         attemptsRef.current = 0;
         setConnected(true);
         setReconnecting(false);
-        sendResize();
+        // A new socket is a new PTY as far as sizing goes: tell it the size
+        // unconditionally, or a reconnect at the same dimensions leaves the
+        // far side on whatever default it started with.
+        sendResize(true);
       };
 
       ws.onerror = () => { /* onclose always follows; handled there */ };
@@ -127,7 +140,7 @@ export function TerminalPane({ termId, onExit, onIdentified }: Props) {
           // under a banner still promising it is there.
           if (isRetry && msg.history) term.reset();
           if (msg.history) term.write(msg.history);
-          sendResize();
+          sendResize(true);
         } else if (msg.type === 'data') {
           term.write(msg.data);
         } else if (msg.type === 'exit') {
@@ -180,7 +193,7 @@ export function TerminalPane({ termId, onExit, onIdentified }: Props) {
 
     const ro = new ResizeObserver(() => sendResize());
     ro.observe(host);
-    requestAnimationFrame(sendResize);
+    requestAnimationFrame(() => sendResize(true));
     setTimeout(() => { sendResize(); term.focus(); }, 60);
 
     return () => {

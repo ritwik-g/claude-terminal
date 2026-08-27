@@ -30,6 +30,35 @@ export interface PrLink {
   repository: string;
 }
 
+/**
+ * An artifact this session published, from a `frame-link` transcript record.
+ * `url` is the identity: republishing writes another record at the same URL,
+ * so repeats collapse into one entry with a bumped `revisions`.
+ */
+export interface Artifact {
+  url: string;
+  title: string;
+  /** Local file the page was published from; informational, may be absent. */
+  path: string;
+  createdAt: number;
+  updatedAt: number;
+  /** How many publishes landed on this URL. 1 means never updated. */
+  revisions: number;
+}
+
+/**
+ * This session is reviewing someone's code, inferred from the slash command it
+ * opened with. Purely derived — it is NOT written into UserState, because that
+ * holds the things a human owns and an auto-applied tag there could not be
+ * removed: the next scan would put it straight back.
+ */
+export interface ReviewInfo {
+  /** The command as invoked, e.g. 'pr-review', minus its leading slash. */
+  command: string;
+  /** The PR under review, when the invocation named one. */
+  pr: PrLink | null;
+}
+
 export interface TailInfo {
   /** stop_reason of the last assistant turn: 'end_turn' | 'tool_use' | ... */
   lastStopReason: string | null;
@@ -71,6 +100,8 @@ export interface Session {
   lastPrompt: string;
   recap: string;
   pr: PrLink | null;
+  /** Set when this session was opened to review code. Derived, never stored. */
+  review: ReviewInfo | null;
   startedAt: number;
   lastActivity: number;
   sizeBytes: number;

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { PROJECTS_DIR, INDEX_CACHE, APP_DIR, decodeProjectKey } from './paths.js';
-import type { PrLink, TailInfo } from './types.js';
+import type { PrLink, ReviewInfo, TailInfo } from './types.js';
 
 const HEAD_BYTES = 256 * 1024;
 const TAIL_BYTES = 1024 * 1024;
@@ -12,7 +12,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 export interface ScannedSession {
   id: string;
@@ -25,6 +25,7 @@ export interface ScannedSession {
   lastPrompt: string;
   recap: string;
   pr: PrLink | null;
+  review: ReviewInfo | null;
   startedAt: number;
   lastActivity: number;
   sizeBytes: number;
@@ -227,6 +228,7 @@ function extract(
     lastPrompt: '',
     recap: '',
     pr: null,
+    review: null,
     startedAt: 0,
     lastActivity: 0,
     sizeBytes: st.size,
@@ -286,6 +288,10 @@ function extract(
         break;
       case 'user':
         if (!firstUserText && !rec.isMeta) firstUserText = textOf(rec.message?.content);
+        // Detect a review invocation from the RAW text: textOf() strips the
+        // very slash-command envelope this reads, and cleanPromptText throws
+        // the args away, so this has to run before either of them.
+        if (!s.review) s.review = detectReview(rawTextOf(rec.message?.content));
         break;
     }
   };
@@ -409,4 +415,53 @@ function readTail(lines: string[]): TailInfo {
     return info;
   }
   return info;
+}
+
+/** Raw concatenated text of a message, with Claude Code's markup left intact. */
+function rawTextOf(content: any): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const p of content) {
+    if (p?.type === 'text' && typeof p.text === 'string') parts.push(p.text);
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Commands whose job is reviewing code. Matched on the last colon-separated
+ * segment so plugin-scoped names land too — `pr-review`, `code-review`,
+ * `security-review`, `pr-review-toolkit:review-pr`,
+ * `unstract:standard-review-lite`.
+ */
+const REVIEW_COMMAND = /^(?:[a-z0-9_-]+:)*([a-z0-9-]*review[a-z0-9-]*)$/i;
+const COMMAND_NAME = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/gi;
+const COMMAND_ARGS = /<command-args>([\s\S]*?)<\/command-args>/i;
+/** Only a full PR URL is trusted: a bare "#12" names no repository. */
+const PR_URL = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/i;
+
+function detectReview(raw: string): ReviewInfo | null {
+  if (!raw) return null;
+  COMMAND_NAME.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = COMMAND_NAME.exec(raw)) !== null) {
+    const name = m[1].replace(/^\/+/, '');
+    if (!REVIEW_COMMAND.test(name)) continue;
+    // Args follow their command name, and a message can carry more than one
+    // command, so search forward from this match rather than the whole string.
+    const rest = raw.slice(m.index);
+    const args = COMMAND_ARGS.exec(rest)?.[1] ?? '';
+    return { command: name, pr: parsePrUrl(args) };
+  }
+  return null;
+}
+
+function parsePrUrl(text: string): PrLink | null {
+  const m = PR_URL.exec(text);
+  if (!m) return null;
+  return {
+    number: Number(m[3]),
+    url: `https://github.com/${m[1]}/${m[2]}/pull/${m[3]}`,
+    repository: `${m[1]}/${m[2]}`,
+  };
 }

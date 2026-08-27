@@ -54,7 +54,9 @@ input  { font-family: inherit; font-size: inherit; }
 
 .app {
   display: grid;
-  grid-template-columns: 380px 1fr;
+  /* Driven by an inline custom property so a drag is one style write on one
+     element, rather than a React re-render per pointer event. */
+  grid-template-columns: var(--sidebar-w, 380px) 1fr;
   /* The restore row is `auto`, so it takes no height at all on the ordinary
      launch where there is nothing to reopen. */
   grid-template-rows: 44px auto 1fr;
@@ -186,7 +188,35 @@ input  { font-family: inherit; font-size: inherit; }
 
 /* --------------------------------------------------------------- sidebar */
 
+/* Collapsing to a 0px column rather than display:none on the sidebar alone,
+   so the grid itself has one less thing to disagree about. */
+.app.sidebar-hidden { grid-template-columns: 0 1fr; }
+.sidebar.collapsed { display: none; }
+
+/* Sits ON the border, half in each column, so the whole 1px rule is grabbable
+   without stealing clicks from the rows next to it. */
+.resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  z-index: 5;
+  cursor: col-resize;
+  /* Transparent until you are on it: a permanently visible grab bar next to a
+     dense list is noise. */
+  background: transparent;
+  transition: background .12s ease;
+}
+.resizer:hover, body.resizing .resizer { background: var(--accent-dim); }
+
+/* A drag that crosses into the terminal must not start a text selection there,
+   and must not lose the pointer to the xterm canvas. */
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing .term-wrap { pointer-events: none; }
+
 .sidebar {
+  position: relative;
   grid-area: sidebar;
   background: var(--bg-raised);
   border-right: 1px solid var(--border);
@@ -555,3 +585,120 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .row-dot.pulse { animation: none; }
 }
+
+/* ---------------------------------------------------------------- artifacts */
+
+/* Sits above the title because it answers "what came out of this session?",
+   which is what you are looking for when you come back to one. */
+.artifacts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 7px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.artifact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 300px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.7;
+  text-decoration: none;
+  color: var(--fg-muted);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.artifact:hover { color: var(--fg); border-color: var(--accent-dim); background: var(--bg-hover); }
+.artifact:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.artifact-icon { color: var(--accent); font-size: 10px; flex: none; }
+/* Titles run long and the row must stay one line high, or the detail pane
+   jumps in height every time you select a different session. */
+.artifact-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-rev {
+  flex: none;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-faint);
+  border-left: 1px solid var(--border);
+  padding-left: 5px;
+}
+
+.chip.review { color: var(--p2); border-color: color-mix(in srgb, var(--p2) 42%, transparent); }
+
+/* --------------------------------------------------------------------- help */
+
+.btn.icon {
+  width: 24px;
+  padding: 2px 0;
+  text-align: center;
+  flex: none;
+  font-size: 12px;
+}
+
+.scrim.dim { background: rgba(0, 0, 0, .45); }
+
+.help-modal {
+  position: fixed;
+  z-index: 20;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 48px));
+  /* The window is short in a split-screen layout and this content is not; let
+     it scroll rather than run off the bottom edge. */
+  max-height: min(720px, calc(100vh - 64px));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px 18px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+}
+
+.help-head { display: flex; align-items: center; gap: 10px; }
+.help-head strong { font-size: 13px; }
+.help-head .btn { margin-left: auto; }
+
+.help-note { margin: 0; font-size: 11.5px; line-height: 1.65; color: var(--fg-dim); }
+.help-note code { font-family: var(--mono); color: var(--fg-muted); }
+
+.help-section {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.help-modal .help-grid { gap: 7px 12px; align-items: baseline; }
+.help-modal .help-grid kbd { white-space: nowrap; }
+.help-grid strong { color: var(--fg-muted); font-weight: 600; }
+/* Aligns a colour dot or shape glyph into the same column the keys occupy. */
+.help-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+}
+.help-swatch .dot { width: 7px; height: 7px; border-radius: 50%; }
+
+.help-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--fg-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.help-list strong { color: var(--fg-muted); }

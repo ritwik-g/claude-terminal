@@ -35,6 +35,30 @@ by it. The thresholds come from the real distribution rather than intuition:
 across 134 sessions, span is strongly bimodal at p25 = 28 minutes and
 p75 = 4.75 days.
 
+**What the session produced, above what it is.** Artifacts a session published
+are listed across the top of its detail pane and open on claude.ai in a click.
+Republishing an artifact keeps one entry and bumps its version count, because
+the URL is the artifact's identity — a document you have revised four times is
+one row marked `v4`, not four rows.
+
+These are read from `frame-link` transcript records, and deliberately *not*
+through the shared scanner. That scanner samples the first 256KB and the last
+1MB of each transcript, which is sound for titles and PR links because Claude
+Code re-emits those as they change. A `frame-link` is written once, when you
+publish, and never again: across this corpus 51 of the 71 artifacts in
+transcripts larger than that window fall between the two sampled ranges. So
+artifacts are read whole-file, on demand, for the one session you are looking
+at — about 60ms for a 14MB transcript, cached on its mtime.
+
+**Review sessions name what they are reviewing.** A session opened with a
+review command (`/pr-review`, `/code-review`, a plugin-scoped
+`unstract:standard-review`) is marked as one, and when the invocation named a
+GitHub PR the list links straight to it. This is derived on every scan and
+never written into your tags — an auto-applied tag could not be removed,
+because the next scan would put it straight back. The PR a session is
+*reviewing* stays distinct from the PR it *raised*; they are usually different,
+and both show when they are.
+
 **Manual state is an override, never load-bearing.** Tags, P0/P1/P2, pin and
 snooze all exist, but the tool works fully if you never touch them. Tags become
 filter chips as soon as you create one; priority colours the row's left edge,
@@ -177,6 +201,8 @@ npm run smoke    # 35 black-box API checks; never spawns a real session
 | `t` | add a tag |
 | `s` | snooze 4h |
 | `r` | refresh |
+| `[` | hide / show the session list |
+| `?` | help — every key, what each group means |
 | `Cmd+F` | search inside the terminal |
 
 Keys never fire while the terminal has focus — Escape is the most-pressed key in
@@ -184,6 +210,13 @@ Claude Code, and it belongs to the session, not to this app.
 
 Use **+ New** to start a fresh session in any directory. It runs before Claude
 has registered a session id, and adopts itself into the list once it does.
+
+The list can also be dragged wider or narrower by its right edge (double-click
+that edge to reset it), and hidden entirely when you want the terminal full
+width. Both the width and the hidden state persist. Resizing tells the PTY its
+new size only when the character grid actually changes — a drag crosses a cell
+boundary a few dozen times, and sending a `SIGWINCH` per animation frame
+instead would make Claude Code redraw its whole interface 60 times a second.
 
 ## Testing conventions
 
@@ -224,11 +257,18 @@ System Settings > Privacy & Security.
 | `npm run smoke` | the HTTP surface, including every input that must be *rejected* before it reaches node-pty | a running server |
 | `npm run test:search` | id and text matching against your real session set — that every id is reachable, and that ordinary words do not start matching ids | a running server |
 | `npm run test:restore` | the working-set round trip across two full server lifetimes | nothing |
+| `npm run test:artifacts` | artifact extraction and review detection, including an artifact stranded mid-file where the sampled scanner is blind | nothing |
 
 `test:restore` builds a throwaway `HOME` with synthetic transcripts and a stub
 `claude` on the PATH, because verifying it means opening terminals, quitting and
 reopening — and doing that against your real sessions would resume them for
 real. It never touches `~/.claude` or `~/.claude-terminal`.
+
+`test:artifacts` builds a throwaway `HOME` too, including a transcript
+deliberately larger than the scanner's sampling window with its only artifact
+buried in the middle. That case is the reason the module exists: swap the
+whole-file read for head-only sampling and every other check in the file still
+passes.
 
 ## Where state lives
 

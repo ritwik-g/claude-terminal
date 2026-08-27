@@ -48,6 +48,15 @@ export const BUCKET_LABEL: Record<Bucket, string> = {
   snoozed: 'Snoozed',
 };
 
+/** What each group actually means, for the help dialog. */
+export const BUCKET_HELP: Record<Bucket, string> = {
+  attention: 'Claude finished its turn and is waiting on you, or it stopped mid tool-call',
+  working: 'running right now',
+  parked: 'idle, but with uncommitted changes or an open PR left behind',
+  quiet: 'nothing pending',
+  snoozed: 'set aside until the snooze runs out',
+};
+
 export const BUCKET_COLOR: Record<Bucket, string> = {
   attention: 'var(--st-needs)',
   working: 'var(--st-working)',
@@ -127,6 +136,11 @@ export function matches(s: Session, q: string): boolean {
     s.title, s.lastPrompt, s.recap, s.branch, s.cwd,
     s.user.tags.join(' '), s.user.note,
     s.pr ? `pr #${s.pr.number} ${s.pr.repository}` : '',
+    // The derived review marker is searchable by the command that produced it,
+    // so 'pr-review' finds the review sessions without anyone having to tag
+    // them by hand — and the PR under review is findable by number too.
+    s.review ? `${s.review.command} review` : '',
+    s.review?.pr ? `pr #${s.review.pr.number} ${s.review.pr.repository}` : '',
     s.user.priority ?? '',
     s.shape,
   ].join(' ').toLowerCase();

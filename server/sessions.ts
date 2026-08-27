@@ -170,6 +170,15 @@ export function initSessions(): void {
 }
 
 /**
+ * The transcript path for a session id, or null if we have never seen it.
+ * Served from the last built payload rather than re-scanning: the caller
+ * (the artifacts route) is always acting on a session the UI has in hand.
+ */
+export function fileForSession(id: string): string | null {
+  return last?.sessions.find((s) => s.id === id)?.file ?? null;
+}
+
+/**
  * A live session's own name usually beats a stale transcript title — but when
  * the user never named it, Claude Code falls back to '<dirname>-<2 hex>'
  * ('unstract-repos-c3'), which is strictly worse than the AI-generated title

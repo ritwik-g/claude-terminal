@@ -68,7 +68,16 @@ export const SessionRow = React.memo(function SessionRow({ s, selected, atCursor
           {s.user.pinned && <span className="chip pin">pin</span>}
           {s.user.priority && <span className={`chip pri ${s.user.priority}`}>{s.user.priority.toUpperCase()}</span>}
           {s.attached && <span className="chip live">term</span>}
-          {s.pr && <span className="chip pr">#{s.pr.number}</span>}
+          {/* Derived, so it costs no tag slot and cannot be removed by hand —
+              it says what the session IS, not what someone filed it under. */}
+          {s.review && (
+            <span className="chip review" title={`Opened with /${s.review.command}`}>review</span>
+          )}
+          {/* The PR being reviewed stands in when the session raised none of
+              its own, which is the usual case when reviewing someone else. */}
+          {(s.pr ?? s.review?.pr) && (
+            <span className="chip pr">#{(s.pr ?? s.review!.pr)!.number}</span>
+          )}
           {s.user.tags.slice(0, 1).map((t) => (
             <span className="chip tag" key={t}>{t}</span>
           ))}

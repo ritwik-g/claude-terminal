@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Session, Priority, SessionShape, UserState } from '../../server/types';
+import type { Artifact, Session, Priority, SessionShape, UserState } from '../../server/types';
 import { api, type SessionsPayload } from './api';
 import {
-  BUCKET_COLOR, BUCKET_LABEL, BUCKET_ORDER, STATE_COLOR, STATE_LABEL,
+  BUCKET_COLOR, BUCKET_HELP, BUCKET_LABEL, BUCKET_ORDER, STATE_COLOR, STATE_LABEL,
   SHAPE_GLYPH, SHAPE_HINT, SHAPE_LABEL, SHAPE_ORDER,
   bucketOf, matches, relTime, shortPath, type Bucket,
 } from './util';
@@ -10,6 +10,43 @@ import { SessionRow } from './components/SessionRow';
 import { TerminalPane } from './components/TerminalPane';
 
 const POLL_MS = 2500;
+/**
+ * Artifacts are re-read on their own, much slower clock. The server caches on
+ * the transcript's mtime, so asking again costs nothing while a session is
+ * idle — but a LIVE session's transcript grows on every poll, and at POLL_MS
+ * that would mean re-reading a 14MB file every 2.5 seconds to look for a
+ * record that appears a handful of times a day.
+ */
+const ARTIFACT_POLL_MS = 15_000;
+/**
+ * One list, rendered both in the help dialog and in the empty state. They used
+ * to be separate and would have drifted the moment a key changed.
+ */
+const SHORTCUTS: { keys: string; what: string }[] = [
+  { keys: 'j / \u2193', what: 'move down the list' },
+  { keys: 'k / \u2191', what: 'move up the list' },
+  { keys: 'Enter', what: 'open the session under the cursor in a terminal' },
+  { keys: '/', what: 'search titles, session ids, prompts, tags, branches and PRs' },
+  { keys: 'Esc', what: 'clear the search, then leave it \u2014 or close a dialog' },
+  { keys: 'p', what: 'cycle priority \u2014 p0, p1, p2, none' },
+  { keys: 'x', what: 'pin or unpin' },
+  { keys: 't', what: 'add a tag' },
+  { keys: 's', what: 'snooze for 4 hours' },
+  { keys: 'r', what: 'refresh now' },
+  { keys: '[', what: 'hide or show the session list' },
+  { keys: '?', what: 'this help' },
+  { keys: '\u2318F', what: 'find inside the terminal (Ctrl+F on Linux)' },
+];
+
+const SIDEBAR_DEFAULT = 380;
+const SIDEBAR_MIN = 260;
+const SIDEBAR_MAX = 640;
+
+function clampSidebar(px: number): number {
+  if (!Number.isFinite(px)) return SIDEBAR_DEFAULT;
+  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Math.round(px)));
+}
+
 const SNOOZE_OPTIONS: [string, number][] = [
   ['1h', 3600_000],
   ['4h', 4 * 3600_000],
@@ -66,6 +103,19 @@ export function App() {
   const [restoreDone, setRestoreDone] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  // Artifacts are fetched per selected session rather than arriving with the
+  // poll payload, because finding them means reading a transcript whole.
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const artifactSeq = useRef(0);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => { try { return localStorage.getItem('ct.sidebarOpen') !== '0'; } catch { return true; } },
+  );
+  const [sidebarW, setSidebarW] = useState(() => {
+    try { return clampSidebar(Number(localStorage.getItem('ct.sidebarW')) || SIDEBAR_DEFAULT); }
+    catch { return SIDEBAR_DEFAULT; }
+  });
+  const dragRef = useRef(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
   const copy = useCallback((what: string, text: string) => {
@@ -101,6 +151,61 @@ export function App() {
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
+  }, []);
+
+  // --------------------------------------------------------------- artifacts
+  useEffect(() => {
+    if (!selectedId) { setArtifacts([]); return; }
+    let stop = false;
+    const load = async () => {
+      const seq = ++artifactSeq.current;
+      try {
+        const { artifacts: got } = await api.artifacts(selectedId);
+        // A slow response for the session you just navigated away from must
+        // not paint its artifacts over the one you are now looking at.
+        if (stop || seq !== artifactSeq.current) return;
+        setArtifacts(got);
+      } catch {
+        if (stop || seq !== artifactSeq.current) return;
+        // A session with no transcript yet (a brand-new one) 404s here. That
+        // is not an error worth a banner — it just has nothing to show.
+        setArtifacts([]);
+      }
+    };
+    void load();
+    const t = setInterval(() => void load(), ARTIFACT_POLL_MS);
+    return () => { stop = true; clearInterval(t); };
+  }, [selectedId]);
+
+  // ----------------------------------------------------------------- sidebar
+  useEffect(() => {
+    try { localStorage.setItem('ct.sidebarW', String(sidebarW)); } catch { /* private mode */ }
+  }, [sidebarW]);
+  useEffect(() => {
+    try { localStorage.setItem('ct.sidebarOpen', sidebarOpen ? '1' : '0'); } catch { /* private mode */ }
+  }, [sidebarOpen]);
+
+  /**
+   * Drag on the window rather than the handle, so a pointer that outruns the
+   * element mid-drag keeps resizing instead of dropping it. `dragRef` also
+   * disables the terminal's pointer events for the duration — without it the
+   * drag ends inside the xterm canvas and starts a text selection there.
+   */
+  const startDrag = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    dragRef.current = true;
+    document.body.classList.add('resizing');
+    const onMove = (ev: PointerEvent) => setSidebarW(clampSidebar(ev.clientX));
+    const onUp = () => {
+      dragRef.current = false;
+      document.body.classList.remove('resizing');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   }, []);
 
   /**
@@ -431,6 +536,7 @@ export function App() {
         !!el && (el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'SELECT');
 
       if (e.key === 'Escape') {
+        if (helpOpen) { setHelpOpen(false); e.preventDefault(); return; }
         if (newOpen) { setNewOpen(false); e.preventDefault(); return; }
         if (typing) { (el as HTMLInputElement).blur(); e.preventDefault(); }
         return;
@@ -448,6 +554,19 @@ export function App() {
         searchRef.current?.select();
         return;
       }
+
+      // '?' is Shift+/ on most layouts, so it has to be tested before the
+      // row shortcuts and by character rather than by physical key.
+      if (e.key === '?') { e.preventDefault(); setHelpOpen((v) => !v); return; }
+      if (e.key === '[') { e.preventDefault(); setSidebarOpen((v) => !v); return; }
+      // Refresh belongs here, above the guard: it acts on the whole list, not
+      // on the cursor, so it stays useful with the list hidden.
+      if (e.key === 'r') { e.preventDefault(); void refresh(true); return; }
+
+      // Everything below acts on the row under the cursor, which is in the
+      // sidebar. With it hidden there is no cursor to see moving, so a
+      // keystroke would silently snooze or pin something off-screen.
+      if (!sidebarOpen) return;
 
       const move = (delta: number) => {
         e.preventDefault();
@@ -477,11 +596,10 @@ export function App() {
         advanceCursorPast(s.id);
         void patch(s.id, { snoozedUntil: Date.now() + 4 * 3600_000 });
       }
-      else if (e.key === 'r') { e.preventDefault(); void refresh(true); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flat, cursor, attach, patch, cyclePriority, refresh, newOpen]);
+  }, [flat, cursor, attach, patch, cyclePriority, refresh, newOpen, helpOpen, sidebarOpen]);
 
   // ------------------------------------------------------------------ view
   const termId = selected?.termId ?? selected?.id ?? null;
@@ -495,8 +613,20 @@ export function App() {
   const hiddenCount = sessions.length - visible.length;
 
   return (
-    <div className="app">
+    <div
+      className={`app${sidebarOpen ? '' : ' sidebar-hidden'}`}
+      style={{ ['--sidebar-w' as string]: `${sidebarW}px` } as React.CSSProperties}
+    >
       <div className="topbar">
+        <button
+          className="btn sm icon"
+          onClick={() => setSidebarOpen((v) => !v)}
+          title={`${sidebarOpen ? 'Hide' : 'Show'} the session list  [`}
+          aria-label={`${sidebarOpen ? 'Hide' : 'Show'} the session list`}
+          aria-expanded={sidebarOpen}
+        >
+          {sidebarOpen ? '\u25e7' : '\u25a1'}
+        </button>
         <div className="brand"><span className="brand-dot" /> Claude Terminal</div>
         <div className="search-wrap">
           <input
@@ -563,6 +693,14 @@ export function App() {
         >
           + New
         </button>
+        <button
+          className="btn sm icon"
+          onClick={() => setHelpOpen(true)}
+          title="Keyboard shortcuts and help  ?"
+          aria-label="Keyboard shortcuts and help"
+        >
+          ?
+        </button>
         <span className="scan-meta">
           {hiddenCount > 0 ? `${hiddenCount} hidden` : `${sessions.length} sessions`}
         </span>
@@ -620,7 +758,19 @@ export function App() {
         </div>
       )}
 
-      <div className="sidebar" onPointerEnter={() => setAiming(true)} onPointerLeave={() => setAiming(false)}>
+      <div
+        className={`sidebar${sidebarOpen ? '' : ' collapsed'}`}
+        onPointerEnter={() => setAiming(true)}
+        onPointerLeave={() => setAiming(false)}
+      >
+        <div
+          className="resizer"
+          onPointerDown={startDrag}
+          onDoubleClick={() => setSidebarW(SIDEBAR_DEFAULT)}
+          title="Drag to resize · double-click to reset"
+          role="separator"
+          aria-orientation="vertical"
+        />
         {payload?.storeReadOnly && (
           <div className="banner err">
             <strong>Read-only:</strong> <code>~/.claude-terminal/state.json</code> could not be read,
@@ -800,6 +950,33 @@ export function App() {
         ) : selected ? (
           <>
             <div className="detail">
+              {artifacts.length > 0 && (
+                <div className="artifacts" aria-label="Artifacts published by this session">
+                  <span className="detail-label">Artifacts</span>
+                  {artifacts.map((a) => (
+                    <a
+                      key={a.url}
+                      className="artifact"
+                      href={a.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={[
+                        a.title,
+                        a.url,
+                        `updated ${relTime(a.updatedAt, now)} ago`,
+                        a.revisions > 1 ? `${a.revisions} versions` : '',
+                      ].filter(Boolean).join('\n')}
+                    >
+                      <span className="artifact-icon" aria-hidden>&#9635;</span>
+                      <span className="artifact-title">{a.title}</span>
+                      {/* Republishing lands on the same URL, so the count is
+                          the only thing distinguishing a living document from
+                          a one-off. */}
+                      {a.revisions > 1 && <span className="artifact-rev">v{a.revisions}</span>}
+                    </a>
+                  ))}
+                </div>
+              )}
               <div className="detail-top">
                 <span className="row-dot" style={{ background: STATE_COLOR[selected.state], marginTop: 0 }}
                       title={STATE_LABEL[selected.state]} />
@@ -819,6 +996,24 @@ export function App() {
                   {` · ${relTime(selected.lastActivity, now)} ago`}
                 </span>
                 <div className="detail-actions">
+                  {selected.review && (
+                    <span
+                      className="chip review"
+                      title={`This session was opened with /${selected.review.command}`}
+                    >
+                      /{selected.review.command}
+                    </span>
+                  )}
+                  {/* The PR under review is a different thing from the PR this
+                      session RAISED, and only usually the same one — reviewing
+                      your own draft is the common case, and then showing both
+                      buttons would just be the same link twice. */}
+                  {selected.review?.pr && selected.review.pr.url !== selected.pr?.url && (
+                    <a className="btn" href={selected.review.pr.url} target="_blank" rel="noreferrer"
+                       title={`Reviewing ${selected.review.pr.repository} #${selected.review.pr.number}`}>
+                      Reviewing #{selected.review.pr.number}
+                    </a>
+                  )}
                   {selected.pr && (
                     <a className="btn" href={selected.pr.url} target="_blank" rel="noreferrer"
                        title={`${selected.pr.repository} #${selected.pr.number}`}>
@@ -965,20 +1160,82 @@ export function App() {
               <h3>Pick a session</h3>
               <p>Sessions are ranked by what needs you, not by when you last touched them.</p>
               <div className="help-grid">
-                <kbd>j</kbd><span>down</span>
-                <kbd>k</kbd><span>up</span>
-                <kbd>Enter</kbd><span>open terminal</span>
-                <kbd>/</kbd><span>search titles, session ids, prompts, tags — Enter opens the top match</span>
-                <kbd>p</kbd><span>cycle priority</span>
-                <kbd>x</kbd><span>pin</span>
-                <kbd>t</kbd><span>add tag</span>
-                <kbd>s</kbd><span>snooze 4h</span>
-                <kbd>r</kbd><span>refresh</span>
+                {SHORTCUTS.map((k) => (
+                  <React.Fragment key={k.keys}>
+                    <kbd>{k.keys}</kbd><span>{k.what}</span>
+                  </React.Fragment>
+                ))}
               </div>
             </div>
           </div>
         )}
       </div>
+
+      {helpOpen && (
+        <>
+          <div className="scrim dim" onClick={() => setHelpOpen(false)} />
+          <div className="help-modal" role="dialog" aria-modal="true" aria-label="Help">
+            <div className="help-head">
+              <strong>Claude Terminal</strong>
+              <button className="btn sm" onClick={() => setHelpOpen(false)} title="Close (Esc)">✕</button>
+            </div>
+
+            <p className="help-note">
+              Every Claude Code session on this machine, ranked by what needs you rather than by
+              when you last touched it. Open one and its terminal runs right here — the same
+              <code> claude --resume</code> you would have typed.
+            </p>
+
+            <div className="help-section">Keyboard</div>
+            <div className="help-grid">
+              {SHORTCUTS.map((k) => (
+                <React.Fragment key={k.keys}>
+                  <kbd>{k.keys}</kbd><span>{k.what}</span>
+                </React.Fragment>
+              ))}
+            </div>
+
+            <div className="help-section">Reading the list</div>
+            <div className="help-grid">
+              {BUCKET_ORDER.map((b) => (
+                <React.Fragment key={b}>
+                  <span className="help-swatch"><span className="dot" style={{ background: BUCKET_COLOR[b] }} /></span>
+                  <span><strong>{BUCKET_LABEL[b]}</strong> — {BUCKET_HELP[b]}</span>
+                </React.Fragment>
+              ))}
+              {SHAPE_ORDER.map((sh) => (
+                <React.Fragment key={sh}>
+                  <span className="help-swatch"><span className={`shape ${sh}`}>{SHAPE_GLYPH[sh]}</span></span>
+                  <span><strong>{SHAPE_LABEL[sh]}</strong> — {SHAPE_HINT[sh]}</span>
+                </React.Fragment>
+              ))}
+            </div>
+
+            <div className="help-section">Good to know</div>
+            <ul className="help-list">
+              <li>
+                Ranking pauses while your pointer is over the list, so a row never moves out
+                from under a click.
+              </li>
+              <li>
+                <strong>Artifacts</strong> published by a session appear above its title. They open
+                on claude.ai; republishing keeps one entry and bumps its version.
+              </li>
+              <li>
+                A session opened with a review command is marked with that command, and links to
+                the PR it is reviewing when the invocation named one.
+              </li>
+              <li>
+                Terminals you leave open are offered back the next time you launch, so quitting to
+                update costs you nothing.
+              </li>
+              <li>
+                Drag the edge of the list to resize it; double-click that edge to reset it.
+              </li>
+            </ul>
+          </div>
+        </>
+      )}
     </div>
   );
 }

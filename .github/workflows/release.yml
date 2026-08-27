@@ -147,12 +147,22 @@ jobs:
             (`arm64` for Apple Silicon, `x64` for Intel), open it, and drag
             **Claude Terminal** to Applications.
 
-            These builds are **not code-signed**, so Gatekeeper blocks the first
-            launch. Either right-click the app and choose *Open*, or run:
+            Then run this — you need it, once per download:
 
             ```bash
-            xattr -cr "/Applications/Claude Terminal.app"
+            xattr -dr com.apple.quarantine "/Applications/Claude Terminal.app"
             ```
+
+            Without it macOS says the app **"is damaged and can't be opened"**
+            and offers only *Move to Bin*. It is not damaged: these builds are
+            ad-hoc signed rather than signed with an Apple Developer ID, and
+            Gatekeeper reports that as damage. Do **not** move it to the Bin —
+            run the command, and it opens normally from then on.
+
+            Right-click - *Open* does **not** help here; that path exists for
+            apps signed but not notarized, and this one has no *Open* option at
+            all. Building from source avoids the whole problem, because an app
+            you build yourself is never quarantined - see the README.
 
             **Linux** — download the `.AppImage`, `chmod +x` it, and run it.
             Untested; the headless server (`npm start`) is the supported path.
