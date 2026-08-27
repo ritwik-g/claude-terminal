@@ -31,10 +31,17 @@ jobs:
           # indefinitely rather than failing.
           - os: macos-14
             label: macOS (arm64 + x64)
-            platform: --mac --arm64 --x64
+            # Two invocations, NOT one `--mac --arm64 --x64`. electron-builder
+            # builds the two DMGs in parallel and both mount a volume named
+            # `Claude Terminal`, so `hdiutil detach /Volumes/Claude Terminal`
+            # races and the build fails — intermittently, which is worse: the
+            # first two releases happened to win the race.
+            platform: --mac --arm64
+            platform_extra: --mac --x64
           - os: ubuntu-latest
             label: Linux x64
             platform: --linux
+            platform_extra: ''
 
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +87,12 @@ jobs:
       # electron-builder rebuilds node-pty for Electron's ABI itself, and
       # builds for the host architecture (see electron-builder.yml).
       - name: Package
-        run: npx electron-builder ${{ matrix.platform }} --publish never
+        shell: bash
+        run: |
+          npx electron-builder ${{ matrix.platform }} --publish never
+          if [ -n "${{ matrix.platform_extra }}" ]; then
+            npx electron-builder ${{ matrix.platform_extra }} --publish never
+          fi
         env:
           # Unsigned build: no Developer ID secret is configured. Tell
           # electron-builder not to go looking for one.
