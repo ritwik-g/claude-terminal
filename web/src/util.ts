@@ -109,7 +109,7 @@ export function shortId(id: string): string {
 /**
  * A term that is really a transcript path or filename means the session that
  * owns it: `…/b0b0bcc6-….jsonl` should find b0b0bcc6. Anything else is left
- * exactly as typed, so searching a cwd like `~/unstract-repos` still works.
+ * exactly as typed, so searching a cwd like `~/my-project` still works.
  */
 function normalizeTerm(t: string): string {
   if (!t.endsWith('.jsonl')) return t;

@@ -35,7 +35,18 @@ export async function gitInfo(cwd: string): Promise<GitInfo | null> {
     // in a single call, which keeps this to one process per directory.
     const { stdout } = await exec(
       'git',
-      ['status', '--porcelain=v2', '--branch', '--untracked-files=no'],
+      [
+        // `git status` honours the repository's own config, and core.fsmonitor
+        // names a command git executes. This polls every cwd a transcript ever
+        // mentioned — including trees the user only extracted from a bug report
+        // — so a hostile .git/config would get code execution without the user
+        // running git at all. Command-line -c outranks repo config, which is
+        // what makes these two neutralising.
+        '-c', 'core.fsmonitor=',
+        '-c', 'core.hooksPath=/dev/null',
+        '--no-optional-locks',
+        'status', '--porcelain=v2', '--branch', '--untracked-files=no',
+      ],
       { cwd, timeout: 5000, maxBuffer: 8 * 1024 * 1024 },
     );
     for (const line of stdout.split('\n')) {

@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Electron reached end-of-life eleven majors deep before anyone noticed, which
+  # is exactly what this exists to prevent.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+
+  # Actions are pinned to commit SHAs, so this is what moves them.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

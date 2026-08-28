@@ -76,19 +76,22 @@ async function createWindow(): Promise<void> {
   // Anything that is not our own origin belongs in the user's real browser —
   // a PR link should not navigate the app away from itself.
   const external = (url: string) => {
-    if (handle && url.startsWith(handle.url)) return false;
+    // Parse before comparing. A prefix test treats
+    // 'http://127.0.0.1:7777@evil.com/x' as internal — the userinfo trick — and
+    // lets the top-level window navigate away to attacker content.
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return true;
+    }
+    if (handle && parsed.origin === new URL(handle.url).origin) return false;
     // Hand the OS only what a browser would take. A terminal prints whatever
     // it likes and shell.openExternal will dutifully dispatch any scheme to
     // whatever claims it, so anything that is not plain http(s) — 'about:blank'
     // from a blank popup, a file:// path, some app's custom scheme — is
     // swallowed here rather than turned into a system dialog or an app launch.
-    let scheme: string;
-    try {
-      scheme = new URL(url).protocol;
-    } catch {
-      return true;
-    }
-    if (scheme !== 'http:' && scheme !== 'https:') return true;
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
     void shell.openExternal(url);
     return true;
   };
@@ -99,8 +102,13 @@ async function createWindow(): Promise<void> {
   win.webContents.on('will-navigate', (e, url) => {
     if (external(url)) e.preventDefault();
   });
+  // A same-origin URL that redirects off-origin never fires will-navigate.
+  win.webContents.on('will-redirect', (e, url) => {
+    if (external(url)) e.preventDefault();
+  });
 
-  await win.loadURL(handle.url);
+  // clientUrl carries the per-run token; the page strips it from the address bar.
+  await win.loadURL(handle.clientUrl);
 }
 
 function buildMenu(): void {

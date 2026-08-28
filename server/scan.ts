@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { PROJECTS_DIR, INDEX_CACHE, APP_DIR, decodeProjectKey } from './paths.js';
+import { PROJECTS_DIR, INDEX_CACHE, APP_DIR, FILE_MODE, ensurePrivateDir, decodeProjectKey } from './paths.js';
 import type { PrLink, ReviewInfo, TailInfo } from './types.js';
 
 const HEAD_BYTES = 256 * 1024;
@@ -70,10 +70,11 @@ export function saveCache(opts: { force?: boolean } = {}): void {
   if (!opts.force && Date.now() - lastCacheWrite < CACHE_WRITE_INTERVAL_MS) return;
   lastCacheWrite = Date.now();
   try {
-    fs.mkdirSync(APP_DIR, { recursive: true });
+    ensurePrivateDir(APP_DIR);
     fs.writeFileSync(
       INDEX_CACHE,
       JSON.stringify({ version: CACHE_VERSION, entries: [...cache.values()] }),
+      { mode: FILE_MODE },
     );
     // Cleared only on success, so a failed write is retried rather than lost.
     cacheDirty = false;
@@ -379,11 +380,17 @@ function textOf(content: any): string {
 /**
  * A first user message is often wrapped in Claude Code's own markup — slash
  * command envelopes, injected reminders, task notifications. Left in, these
- * become titles like '<command-message>unstract:standar', so strip the
+ * become titles like '<command-message>team:standard-rev', so strip the
  * machinery and keep whatever prose is left.
  */
 function cleanPromptText(raw: string): string {
   let t = raw;
+  // Each pattern below is <opener> + lazy [\s\S]*? + a REQUIRED closer, which
+  // rescans to end-of-string at every opener when the closer never arrives —
+  // O(n^2) on hostile pasted text. A transcript line is unbounded up to the
+  // 256KB head window and this runs synchronously, so bound the input first.
+  // The result is truncated to a title anyway, so nothing useful is lost.
+  if (t.length > 8192) t = t.slice(0, 8192);
   t = t.replace(/<command-message>[\s\S]*?<\/command-message>/g, ' ');
   t = t.replace(/<command-args>[\s\S]*?<\/command-args>/g, ' ');
   t = t.replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, ' ');
@@ -459,7 +466,7 @@ function rawTextOf(content: any): string {
  * review tool works without any change here as long as its name says what it
  * does.
  *
- * `remediation` earns its place because unstract's remediation skills ARE
+ * `remediation` earns its place because remediation skills ARE
  * review loops — they run the standard review repeatedly and fix what it
  * finds — and none of their names contain "review".
  *

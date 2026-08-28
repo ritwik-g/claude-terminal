@@ -20,7 +20,10 @@ const handle = await startServer().catch((err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
+// The bare URL loads the page but every API call from it is unauthorized, so
+// print the one that carries the token — that is the link to actually open.
 console.log(`claude-terminal server  ${handle.url}`);
+console.log(`open in a browser       ${handle.clientUrl}`);
 
 // Losing debounced tag edits because a terminal window closed is not acceptable,
 // so every ordinary termination path flushes first.

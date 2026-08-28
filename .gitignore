@@ -4,3 +4,25 @@ dist-electron/
 release/
 *.log
 .DS_Store
+
+# Local Claude Code state. Everyone who works on this repo runs Claude Code
+# inside it, and settings.local.json carries absolute home paths, MCP server
+# names and permission allowlists. Do not rely on a machine-global ignore for
+# this — a fresh clone does not have one.
+.claude/
+
+# Secrets and signing material.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.cer
+*.key
+*.mobileprovision
+
+# Editors and tooling output.
+.vscode/
+.idea/
+coverage/
+*.tsbuildinfo

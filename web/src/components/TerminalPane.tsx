@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { wsTokenParam } from '../token';
 
 const THEME = {
   background: '#0a0c0f',
@@ -112,7 +113,7 @@ export function TerminalPane({ termId, onExit, onIdentified }: Props) {
       if (closed) return;
       setReconnecting(isRetry);
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${proto}//${location.host}/ws/term?id=${encodeURIComponent(termId)}`);
+      ws = new WebSocket(`${proto}//${location.host}/ws/term?id=${encodeURIComponent(termId)}${wsTokenParam()}`);
 
       ws.onopen = () => {
         attemptsRef.current = 0;

@@ -25,6 +25,26 @@ const WORK = path.join(ROOT, 'work');
 const PORT = 7793;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+/**
+ * Every /api call is token-gated, so this harness reads the token the server
+ * wrote and attaches it. Shadowing `fetch` keeps the token out of the call
+ * sites, which are about behaviour under test, not authentication.
+ */
+const TOKEN_FILE = path.join(FAKE_HOME, '.claude-terminal', 'token');
+function ctToken(): string {
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+const fetch = (url: string, init: RequestInit = {}): Promise<Response> =>
+  globalThis.fetch(url, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'x-ct-token': ctToken() },
+  });
+
+
 let pass = 0;
 let fail = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -135,21 +155,21 @@ function scaffold(): void {
 
   write(S.review, [
     ...base(900_000),
-    command('pr-review', 'https://github.com/Zipstack/unstract-cloud/pull/1703 keep it lite', 890_000),
+    command('pr-review', 'https://github.com/acme/widgets/pull/1703 keep it lite', 890_000),
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
   ]);
 
   // A plugin-scoped review command, invoked with no PR to point at.
   write(S.reviewNoPr, [
     ...base(900_000),
-    command('unstract:standard-review-lite', 'the current diff', 890_000),
+    command('acme:standard-review-lite', 'the current diff', 890_000),
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
   ]);
 
   // A remediation skill is a review loop whose name contains no "review".
   write(S.remediation, [
     ...base(900_000),
-    command('unstract:max-remediation', 'https://github.com/Zipstack/unstract/pull/2135', 890_000),
+    command('acme:max-remediation', 'https://github.com/acme/toolkit/pull/2135', 890_000),
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
   ]);
 
@@ -160,7 +180,7 @@ function scaffold(): void {
       type: 'user',
       cwd: WORK,
       timestamp: at(880_000),
-      message: { role: 'user', content: [{ type: 'text', text: 'look at https://github.com/Zipstack/unstract-cloud/pull/1706 with me' }] },
+      message: { role: 'user', content: [{ type: 'text', text: 'look at https://github.com/acme/widgets/pull/1706 with me' }] },
     },
     command('pr-review', 'keep it lite', 870_000),
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
@@ -184,7 +204,7 @@ function scaffold(): void {
         role: 'user',
         content: [
           { type: 'tool_result', tool_use_id: 't1', content: 'ok' },
-          { type: 'text', text: 'gh output: https://github.com/Zipstack/unstract/pull/9999' },
+          { type: 'text', text: 'gh output: https://github.com/acme/toolkit/pull/9999' },
         ],
       },
     },
@@ -194,7 +214,7 @@ function scaffold(): void {
   // Names a PR but is not a review; must not be marked as one.
   write(S.notReview, [
     ...base(900_000),
-    command('compact', 'https://github.com/Zipstack/unstract-cloud/pull/999', 890_000),
+    command('compact', 'https://github.com/acme/widgets/pull/999', 890_000),
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
   ]);
 }
@@ -268,17 +288,17 @@ const main = async () => {
       JSON.stringify(by(S.review)?.review));
     check('  and the PR it names is extracted',
       by(S.review)?.review?.pr?.number === 1703 &&
-      by(S.review)?.review?.pr?.repository === 'Zipstack/unstract-cloud',
+      by(S.review)?.review?.pr?.repository === 'acme/widgets',
       JSON.stringify(by(S.review)?.review?.pr));
     check('a plugin-scoped review command counts too',
-      by(S.reviewNoPr)?.review?.command === 'unstract:standard-review-lite',
+      by(S.reviewNoPr)?.review?.command === 'acme:standard-review-lite',
       JSON.stringify(by(S.reviewNoPr)?.review));
     check('  with no PR when none was named', by(S.reviewNoPr)?.review?.pr === null);
     check('a non-review command is not a review even when it names a PR',
       by(S.notReview)?.review === null, JSON.stringify(by(S.notReview)?.review));
     check('a session with no command at all is not a review', by(S.none)?.review === null);
     check('a remediation skill counts as a review, despite its name',
-      by(S.remediation)?.review?.command === 'unstract:max-remediation',
+      by(S.remediation)?.review?.command === 'acme:max-remediation',
       JSON.stringify(by(S.remediation)?.review));
     check('  and its PR is read the same way', by(S.remediation)?.review?.pr?.number === 2135);
     check('a bare review falls back to the PR the person typed earlier',

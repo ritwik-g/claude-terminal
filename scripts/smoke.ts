@@ -5,7 +5,31 @@
  * is one that must be REJECTED before reaching node-pty. Run it after any
  * change to the server:  npm run smoke
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 const BASE = process.env.CT_BASE ?? 'http://127.0.0.1:7777';
+
+/**
+ * Every /api call is token-gated, so this harness reads the token the server
+ * wrote and attaches it. Shadowing `fetch` keeps the token out of the call
+ * sites, which are about behaviour under test, not authentication.
+ */
+const TOKEN_FILE = path.join(os.homedir(), '.claude-terminal', 'token');
+function ctToken(): string {
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+const fetch = (url: string, init: RequestInit = {}): Promise<Response> =>
+  globalThis.fetch(url, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'x-ct-token': ctToken() },
+  });
+
 
 let pass = 0;
 let fail = 0;

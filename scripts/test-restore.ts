@@ -28,6 +28,26 @@ const STATE = path.join(FAKE_HOME, '.claude-terminal', 'state.json');
 const PORT = 7791;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+/**
+ * Every /api call is token-gated, so this harness reads the token the server
+ * wrote and attaches it. Shadowing `fetch` keeps the token out of the call
+ * sites, which are about behaviour under test, not authentication.
+ */
+const TOKEN_FILE = path.join(FAKE_HOME, '.claude-terminal', 'token');
+function ctToken(): string {
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+const fetch = (url: string, init: RequestInit = {}): Promise<Response> =>
+  globalThis.fetch(url, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'x-ct-token': ctToken() },
+  });
+
+
 let pass = 0;
 let fail = 0;
 function check(name: string, ok: boolean, detail = '') {

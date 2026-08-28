@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import * as nodePty from 'node-pty';
-import { LOG_DIR } from './paths.js';
+import { LOG_DIR, FILE_MODE, ensurePrivateDir } from './paths.js';
 import { resolveShellEnv, fallbackPathEntries } from './shell-env.js';
 
 /** Keep this much replayable history per terminal, and trim above the cap. */
@@ -215,7 +215,7 @@ export function startTerm(opts: {
   // Guarded: an throw here escapes before terms.set() below, orphaning the
   // process we just spawned with no map entry and no way to kill it via the API.
   try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
+    ensurePrivateDir(LOG_DIR);
   } catch (err) {
     console.error('[claude-terminal] could not create log dir:', err);
   }
@@ -223,7 +223,7 @@ export function startTerm(opts: {
   // A fresh terminal starts a fresh scrollback.
   let logFd: number | null = null;
   try {
-    logFd = fs.openSync(logPath, 'w');
+    logFd = fs.openSync(logPath, 'w', FILE_MODE);
   } catch {
     logFd = null;
   }
@@ -312,7 +312,7 @@ function trimLog(term: Term) {
     console.error(`[claude-terminal] log trim failed for ${term.info.id}:`, err);
   }
   try {
-    term.logFd = fs.openSync(term.logPath, 'a');
+    term.logFd = fs.openSync(term.logPath, 'a', FILE_MODE);
   } catch {
     term.logFd = null;
     console.error(`[claude-terminal] scrollback recording stopped for ${term.info.id}`);

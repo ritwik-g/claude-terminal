@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { APP_DIR, STATE_FILE } from './paths.js';
+import { APP_DIR, STATE_FILE, FILE_MODE, ensurePrivateDir } from './paths.js';
 import { EMPTY_USER_STATE, type UserState, type WorkingSetEntry } from './types.js';
 
 interface StoreShape {
@@ -185,10 +185,10 @@ export function flushStore(): void {
   if (!dirty) return;
   if (loadFailed) return;
   try {
-    fs.mkdirSync(APP_DIR, { recursive: true });
+    ensurePrivateDir(APP_DIR);
     // Write-then-rename so a crash mid-write cannot truncate your tags.
     const tmp = `${STATE_FILE}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: FILE_MODE });
     fs.renameSync(tmp, STATE_FILE);
     dirty = false;
   } catch (err) {

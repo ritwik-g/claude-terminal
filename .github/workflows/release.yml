@@ -11,13 +11,18 @@ on:
         description: 'Tag to build and release (e.g. v0.1.0)'
         required: true
 
+# Least privilege by default. Each job re-grants only what it needs: the build
+# job runs npm and electron-builder — a token in its .git/config would just be
+# sitting there for any postinstall script to find.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       # One failing architecture should not throw away the others' artifacts.
       fail-fast: false
@@ -44,11 +49,11 @@ jobs:
             platform_extra: ''
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -61,7 +66,7 @@ jobs:
       # vendored dmgbuild — which then fails installing the DMG background and
       # takes the whole package step with it. The runner's own python3 is 3.9
       # and has distutils, and scripts/find-python.mjs already prefers it.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         if: runner.os == 'Linux'
         with:
           python-version: '3.11'
@@ -110,13 +115,24 @@ jobs:
           fi
           printf '  %s\n' "${files[@]}"
 
-      - uses: actions/upload-artifact@v4
+      # These builds are unsigned, so a digest published from the build itself is
+      # the only way a downloader can tell this artifact from any other.
+      - name: Checksum the installers
+        shell: bash
+        run: |
+          cd release
+          shopt -s nullglob
+          shasum -a 256 *.dmg *.zip *.AppImage > "SHA256SUMS-${{ matrix.os }}.txt"
+          cat "SHA256SUMS-${{ matrix.os }}.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installers-${{ matrix.os }}
           path: |
             release/*.dmg
             release/*.zip
             release/*.AppImage
+            release/SHA256SUMS-*.txt
           if-no-files-found: error
           retention-days: 7
 
@@ -124,8 +140,16 @@ jobs:
     name: Publish release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      # Only this job publishes, so only this job can write.
+      contents: write
+      # Signed provenance: proves these artifacts came from this workflow, at
+      # this commit, rather than from someone's laptop. It is what substitutes
+      # for the Developer ID signature this project cannot afford.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           merge-multiple: true
@@ -133,7 +157,15 @@ jobs:
       - name: List what will be published
         run: ls -lh artifacts/
 
-      - uses: softprops/action-gh-release@v2
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            artifacts/*.dmg
+            artifacts/*.zip
+            artifacts/*.AppImage
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
@@ -166,6 +198,22 @@ jobs:
 
             **Linux** — download the `.AppImage`, `chmod +x` it, and run it.
             Untested; the headless server (`npm start`) is the supported path.
+
+            ## Verify what you downloaded
+
+            These builds are unsigned, so verify them rather than trusting the
+            filename. Digests are in `SHA256SUMS-*.txt` attached below:
+
+            ```bash
+            shasum -a 256 -c SHA256SUMS-macos-14.txt
+            ```
+
+            Every installer also carries signed build provenance tying it to
+            this workflow and commit:
+
+            ```bash
+            gh attestation verify <file> --repo ritwik-g/claude-terminal
+            ```
 
             ## Notes
 

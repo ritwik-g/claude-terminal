@@ -185,7 +185,7 @@ export function fileForSession(id: string): string | null {
 /**
  * A live session's own name usually beats a stale transcript title — but when
  * the user never named it, Claude Code falls back to '<dirname>-<2 hex>'
- * ('unstract-repos-c3'), which is strictly worse than the AI-generated title
+ * ('my-project-c3'), which is strictly worse than the AI-generated title
  * sitting in the transcript. Prefer the live name only when it is meaningful.
  */
 function bestTitle(

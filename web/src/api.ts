@@ -1,4 +1,5 @@
 import type { Artifact, RestoreCandidate, Session, UserState } from '../../server/types';
+import { authHeaders } from './token';
 
 export interface SessionsPayload {
   sessions: Session[];
@@ -13,7 +14,7 @@ export interface SessionsPayload {
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');

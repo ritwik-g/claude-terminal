@@ -5,6 +5,29 @@ An attention-ranked workspace for Claude Code sessions, with embedded terminals.
 `clsm` answers *"what sessions do I have?"*. This answers *"which one needs me
 right now, and can I get into it without leaving this window?"*
 
+> **Not affiliated with, endorsed by, or sponsored by Anthropic.** This is an
+> unofficial personal project that works *with* Claude Code. "Claude" is a
+> trademark of Anthropic, used here only to say what this tool is for.
+
+**Runs entirely on your machine.** It makes no network requests of any kind —
+no telemetry, no analytics, no update check. It reads your Claude Code
+transcripts under `~/.claude/` (never writes there) and keeps its own state in
+`~/.claude-terminal/`. Nothing is uploaded anywhere. See
+[SECURITY.md](SECURITY.md) for the full trust model.
+
+## Requirements
+
+| | |
+|---|---|
+| **Claude Code** | Required — this tool reads its transcripts and drives its sessions. It is not useful without it. |
+| **Node.js** | 20 or newer (22 recommended). Needed to run or build from source. |
+| **macOS** | Fully supported. Apple Silicon and Intel; the packaged app is built for both. |
+| **Linux** | The headless server (`npm start`) is supported and used. The AppImage builds but is untested. |
+| **Windows** | Not supported and not tested. |
+
+Building from source compiles `node-pty`, which needs a C++ toolchain — Xcode
+Command Line Tools on macOS, `build-essential` and Python 3.11 on Linux.
+
 ## The problem
 
 Sessions accumulate. Some are ad-hoc and short-lived (a PR review, a customer
@@ -55,8 +78,8 @@ review command is marked as one, and links straight to the PR under review.
 Nothing here is tool-specific: commands are matched by stem — `review`,
 `remediation`, `critique` — on the last colon-separated segment, so
 `/pr-review`, `/code-review`, `/security-review`,
-`/pr-review-toolkit:review-pr`, `/unstract:standard-review-lite` and
-`/unstract:max-remediation` all land, and a new review tool works with no
+`/pr-review-toolkit:review-pr`, `/team:standard-review-lite` and
+`/team:max-remediation` all land, and a new review tool works with no
 change as long as its name says what it does. `remediation` is in that list
 because those skills *are* review loops — they run the review repeatedly and
 fix what it finds — and none of their names contain "review". The list stays
@@ -149,7 +172,7 @@ An app you build on your own machine is never quarantined, so it just opens.
 For a personal tool this is the path of least friction:
 
 ```bash
-git clone git@github.com:ritwik-g/claude-terminal.git && cd claude-terminal
+git clone https://github.com/ritwik-g/claude-terminal.git && cd claude-terminal
 npm install
 npm run dist:mac     # -> release/*.dmg and release/*.zip (host architecture)
 ```
@@ -167,6 +190,19 @@ Grab the `.dmg` for your chip from
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Claude Terminal.app"
 ```
+
+**Verify the download first.** Because these builds are unsigned, the digest is
+how you tell this artifact from any other. Every release attaches
+`SHA256SUMS-*.txt`, and every installer carries signed build provenance:
+
+```bash
+shasum -a 256 -c SHA256SUMS-macos-14.txt
+gh attestation verify "Claude Terminal-0.3.1-arm64.dmg" --repo ritwik-g/claude-terminal
+```
+
+Stripping quarantine turns off Gatekeeper's check for that app permanently, so
+it is worth knowing what you are running before you do it. Building from source
+skips this entirely.
 
 **You need that command, and without it macOS will tell you the app is
 damaged.** It is not damaged. These builds are ad-hoc signed rather than signed
@@ -374,9 +410,19 @@ silently destroys everything you hand-entered.
   genuinely live — scores decay, sessions flip busy/idle, git state changes on
   every save — so without this a row can move between seeing it and clicking it.
   Contents still update; only positions hold still, and only while you're aiming.
-- The server refuses cross-origin requests and non-loopback Hosts. "Bound to
-  localhost" is not a boundary against a *browser*: WebSockets are exempt from
-  CORS, so any page you visit could otherwise have typed into a live session.
+- **The local server is gated two ways.** It refuses non-loopback Hosts and any
+  Origin that is not its own, which stops a *browser*: WebSockets are exempt
+  from CORS, so any page you visit could otherwise have typed into a live
+  session. Headers alone stop nothing else, though — a non-browser client sets
+  them freely — so the API and the socket also require a token minted at
+  startup and written to `~/.claude-terminal/token` (mode 0600). That is what
+  keeps a second account on the machine out. It cannot keep out a process
+  already running as *you*: that process can read the token, exactly as it can
+  read `~/.claude` directly. See [SECURITY.md](SECURITY.md).
+- **This depends on Claude Code internals that are not a public API** —
+  transcript record shapes, `~/.claude/sessions/<pid>.json`. They can change in
+  any Claude Code release and this tool would need updating. That is the deal
+  with a tool like this; it is worth knowing before you rely on it.
 
 ## Prior art
 

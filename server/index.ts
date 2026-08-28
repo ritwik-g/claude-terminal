@@ -1,6 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -18,6 +19,7 @@ import {
 import {
   initRestore, captureWorkingSet, captureAndFreeze, clearRestore,
 } from './restore.js';
+import { APP_DIR, TOKEN_FILE, FILE_MODE, ensurePrivateDir, repairPrivateModes } from './paths.js';
 import type { Priority, UserState } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,13 +31,41 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 
 /**
- * This server binds loopback and has no auth, but "loopback" is not a security
- * boundary against a *browser*: any page the user visits can POST to it, and
- * WebSockets are exempt from CORS entirely — so a hostile page could open
- * /ws/term and type into a live claude shell. Requiring a same-origin Origin
- * and a loopback Host closes that, and closes DNS rebinding with it.
+ * Two independent gates, because they stop two different attackers.
+ *
+ * The Host/Origin pair stops a *browser*: any page the user visits can POST to
+ * loopback, and WebSockets are exempt from CORS entirely, so a hostile page
+ * could otherwise open /ws/term and type into a live claude shell. Requiring a
+ * loopback Host and our own exact Origin closes that, and DNS rebinding with it.
+ *
+ * Those headers stop nothing else, though — any non-browser client sets them
+ * freely, and `Origin` is absent altogether on a same-origin GET, so it cannot
+ * be required. That is what the token is for: it is the only gate that survives
+ * a forged header, and it is what keeps a second account on the machine (or the
+ * LAN, if someone sets HOST) away from an API that spawns shells.
+ *
+ * What neither gate can do is keep out a process already running as you — it
+ * can read the token file, exactly as it can read ~/.claude directly. That is
+ * not a boundary this app can draw; see SECURITY.md.
  */
 const ALLOWED_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+/** Exact origins this server answers to, filled in once the port is known. */
+let SELF_ORIGINS = new Set<string>();
+
+function setSelfOrigins(port: number): void {
+  SELF_ORIGINS = new Set([
+    `http://127.0.0.1:${port}`,
+    `http://localhost:${port}`,
+    `http://[::1]:${port}`,
+  ]);
+}
+
+/** Per-run secret. New on every start, so it cannot be replayed across runs. */
+const AUTH_TOKEN = randomBytes(32).toString('hex');
+export function authToken(): string {
+  return AUTH_TOKEN;
+}
 
 function hostAllowed(hostHeader: string | undefined): boolean {
   if (!hostHeader) return false;
@@ -49,19 +79,48 @@ function hostAllowed(hostHeader: string | undefined): boolean {
 }
 
 function originAllowed(origin: string | undefined): boolean {
-  // Same-origin fetches from our own page send no Origin on GET, and send our
-  // own origin otherwise. Non-browser clients (curl) send none — allowed.
+  // A same-origin GET carries no Origin at all, so absence cannot be rejected.
+  // It is also not evidence of anything — the token is what authenticates.
   if (!origin) return true;
-  try {
-    return ALLOWED_HOSTS.has(new URL(origin).hostname.toLowerCase());
-  } catch {
-    return false;
-  }
+  // Compare the whole origin, not just the hostname: another app on
+  // http://localhost:3000 is a different origin and must not be trusted
+  // merely for being on loopback.
+  return SELF_ORIGINS.has(origin.toLowerCase());
+}
+
+/** Constant-time compare that cannot throw on a length mismatch. */
+function tokenMatches(given: string | undefined): boolean {
+  if (!given) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(AUTH_TOKEN);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+function tokenOf(req: http.IncomingMessage, url?: URL): string | undefined {
+  const header = req.headers['x-ct-token'];
+  if (typeof header === 'string') return header;
+  // Browsers cannot set headers on a WebSocket handshake, so the socket path
+  // carries the token in the query string instead.
+  return url?.searchParams.get('token') ?? undefined;
 }
 
 app.use((req, res, next) => {
+  // Nothing legitimately frames this app, and a subframe load sends no Origin,
+  // so the header gate alone would let a page frame it and clickjack.
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+
   if (!hostAllowed(req.headers.host) || !originAllowed(req.headers.origin)) {
     res.status(403).json({ error: 'forbidden origin' });
+    return;
+  }
+  // The SPA itself must be fetchable without a token — it is what carries the
+  // token to the renderer. Only the API is gated.
+  if (req.path.startsWith('/api/') && !tokenMatches(tokenOf(req))) {
+    res.status(401).json({ error: 'unauthorized' });
     return;
   }
   next();
@@ -357,6 +416,17 @@ function serveStatic(staticDir: string): void {
   app.get('*', (_req, res) => res.sendFile(path.join(staticDir, 'index.html')));
 }
 
+/**
+ * The token deliberately does NOT travel in the served HTML. Serving it there
+ * would hand it to any local process that fetches '/', which is the very thing
+ * it exists to stop. The launcher — which already knows it, because it started
+ * the server — puts it in the URL it opens instead, and the page strips it from
+ * the address bar on load.
+ */
+export function clientUrl(url: string): string {
+  return `${url}/?t=${AUTH_TOKEN}`;
+}
+
 // Express's default handler returns an HTML stack trace with absolute paths.
 // This is a JSON API; malformed input should get a JSON error.
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -391,6 +461,13 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
   if (url.pathname !== '/ws/term') {
+    socket.destroy();
+    return;
+  }
+  // This socket accepts keystrokes for a live shell, so it is gated exactly
+  // like the API. Checked before handleUpgrade so an unauthorized client never
+  // reaches the connection handler.
+  if (!tokenMatches(tokenOf(req, url))) {
     socket.destroy();
     return;
   }
@@ -470,7 +547,10 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 /** What a caller gets back so it can stop us and reason about live work. */
 export interface ServerHandle {
   url: string;
+  /** `url` with the per-run token attached — what a browser should open. */
+  clientUrl: string;
   port: number;
+  token: string;
   /** Terminals still running — quitting will kill these. */
   liveTerminalCount(): number;
   close(): Promise<void>;
@@ -491,6 +571,19 @@ export async function startServer(opts: {
 } = {}): Promise<ServerHandle> {
   const port = opts.port ?? DEFAULT_PORT;
   const host = opts.host ?? DEFAULT_HOST;
+  setSelfOrigins(port);
+
+  // Repair 0755/0644 left by versions that wrote at the default umask, before
+  // anything new is written into those directories.
+  repairPrivateModes();
+  try {
+    ensurePrivateDir(APP_DIR);
+    fs.writeFileSync(TOKEN_FILE, AUTH_TOKEN, { mode: FILE_MODE });
+  } catch (err) {
+    // Not fatal: the token still gates the API, the file is only there so a
+    // CLI in another shell can reach a server this process started.
+    console.error('[claude-terminal] could not write token file:', err);
+  }
 
   initSessions();
   loadStore();
@@ -527,7 +620,9 @@ export async function startServer(opts: {
 
   return {
     url: `http://${host}:${port}`,
+    clientUrl: clientUrl(`http://${host}:${port}`),
     port,
+    token: AUTH_TOKEN,
     liveTerminalCount: () => listTerms().filter((t) => !t.exited).length,
     close() {
       // Idempotent: quit can be triggered from the menu, the dock and a signal.
@@ -540,6 +635,8 @@ export async function startServer(opts: {
         flushStore();
         saveCache({ force: true });
         shutdownAll();
+        // A token file outliving its server would point a CLI at a dead port.
+        try { fs.unlinkSync(TOKEN_FILE); } catch { /* never written, or gone */ }
         for (const ws of wss.clients) {
           try { ws.terminate(); } catch { /* already gone */ }
         }

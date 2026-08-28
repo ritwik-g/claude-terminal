@@ -30,6 +30,26 @@ const PROJECTS = path.join(FAKE_HOME, '.claude', 'projects', '-ct-branch-work');
 const PORT = 7794;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+/**
+ * Every /api call is token-gated, so this harness reads the token the server
+ * wrote and attaches it. Shadowing `fetch` keeps the token out of the call
+ * sites, which are about behaviour under test, not authentication.
+ */
+const TOKEN_FILE = path.join(FAKE_HOME, '.claude-terminal', 'token');
+function ctToken(): string {
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+const fetch = (url: string, init: RequestInit = {}): Promise<Response> =>
+  globalThis.fetch(url, {
+    ...init,
+    headers: { ...(init.headers ?? {}), 'x-ct-token': ctToken() },
+  });
+
+
 const PARENT = 'aaaaaaaa-1111-4111-8111-111111111111';
 const BRANCHED = 'bbbbbbbb-2222-4222-8222-222222222222';
 
