@@ -157,7 +157,13 @@ jobs:
       - name: List what will be published
         run: ls -lh artifacts/
 
+      # Provenance attestation is rejected for user-owned PRIVATE repositories
+      # ("Feature not available … please make this repository public"), which
+      # failed the whole publish step after both builds had succeeded. Skipped
+      # rather than forced: it starts working by itself the moment the repo is
+      # public, and a release that cannot be attested is still a release.
       - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
@@ -208,8 +214,8 @@ jobs:
             shasum -a 256 -c SHA256SUMS-macos-14.txt
             ```
 
-            Every installer also carries signed build provenance tying it to
-            this workflow and commit:
+            Installers built from a public repository also carry signed build
+            provenance tying them to this workflow and commit:
 
             ```bash
             gh attestation verify <file> --repo ritwik-g/claude-terminal
