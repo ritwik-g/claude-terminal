@@ -122,8 +122,17 @@ jobs:
         run: |
           cd release
           shopt -s nullglob
-          shasum -a 256 *.dmg *.zip *.AppImage > "SHA256SUMS-${{ matrix.os }}.txt"
-          cat "SHA256SUMS-${{ matrix.os }}.txt"
+          out="SHA256SUMS-${{ matrix.os }}.txt"
+          : > "$out"
+          for f in *.dmg *.zip *.AppImage; do
+            sum=$(shasum -a 256 "$f" | awk '{print $1}')
+            # The product name contains a space and GitHub replaces spaces with
+            # dots in release asset names, so a digest recorded under the local
+            # filename names a file the downloader does not have and
+            # `shasum -c` fails on every line. Record the downloaded name.
+            printf '%s  %s\n' "$sum" "${f// /.}" >> "$out"
+          done
+          cat "$out"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -218,7 +227,7 @@ jobs:
             provenance tying them to this workflow and commit:
 
             ```bash
-            gh attestation verify <file> --repo ritwik-g/claude-terminal
+            gh attestation verify Claude.Terminal-0.4.0-mac-arm64.dmg --repo ritwik-g/claude-terminal
             ```
 
             ## Notes

@@ -209,7 +209,7 @@ how you tell this artifact from any other. Every release attaches
 
 ```bash
 shasum -a 256 -c SHA256SUMS-macos-14.txt
-gh attestation verify "Claude Terminal-0.3.1-arm64.dmg" --repo ritwik-g/claude-terminal
+gh attestation verify Claude.Terminal-0.4.0-mac-arm64.dmg --repo ritwik-g/claude-terminal
 ```
 
 Stripping quarantine turns off Gatekeeper's check for that app permanently, so
