@@ -8,7 +8,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import { initSessions, getSessions, fileForSession } from './sessions.js';
 import { readArtifacts } from './artifacts.js';
-import { saveCache } from './scan.js';
+import { saveCache, searchIds } from './scan.js';
 import { loadStore, setUserState, flushStore, isSafeKey, hasUserState, isReadOnly } from './store.js';
 import { readLiveSessions } from './live.js';
 import {
@@ -124,6 +124,21 @@ app.use((req, res, next) => {
     return;
   }
   next();
+});
+
+/**
+ * Sessions whose MESSAGES match every term — what was actually said, which the
+ * client cannot answer because that text is deliberately not in the payload.
+ * Returns ids only; the client unions them with its own metadata matching.
+ */
+app.get('/api/search', (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q : '';
+  // Below two characters every session matches and the answer is noise.
+  if (q.trim().length < 2) {
+    res.json({ ids: [], q });
+    return;
+  }
+  res.json({ ids: searchIds(q.slice(0, 200)), q });
 });
 
 app.get('/api/health', (_req, res) => {

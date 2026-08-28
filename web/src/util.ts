@@ -17,24 +17,27 @@ export const STATE_LABEL: Record<SessionState, string> = {
 };
 
 export const SHAPE_LABEL: Record<SessionShape, string> = {
+  review: 'Reviews',
   errand: 'Errands',
   task: 'Tasks',
   thread: 'Threads',
 };
 
 export const SHAPE_GLYPH: Record<SessionShape, string> = {
+  review: '\u2713',
   errand: '\u26a1',
   task: '\u25c6',
   thread: '\u221e',
 };
 
 export const SHAPE_HINT: Record<SessionShape, string> = {
-  errand: 'Short, single-purpose \u2014 a PR review or a quick question',
+  review: 'Opened with a review command \u2014 links the PRs it covers',
+  errand: 'Short, single-purpose \u2014 a quick question or a one-off fix',
   task: 'A normal piece of work',
   thread: 'A long-running exploration carried across days',
 };
 
-export const SHAPE_ORDER: SessionShape[] = ['errand', 'task', 'thread'];
+export const SHAPE_ORDER: SessionShape[] = ['review', 'errand', 'task', 'thread'];
 
 export type Bucket = 'attention' | 'working' | 'parked' | 'quiet' | 'snoozed';
 
@@ -140,7 +143,9 @@ export function matches(s: Session, q: string): boolean {
     // so 'pr-review' finds the review sessions without anyone having to tag
     // them by hand — and the PR under review is findable by number too.
     s.review ? `${s.review.command} review` : '',
-    s.review?.pr ? `pr #${s.review.pr.number} ${s.review.pr.repository}` : '',
+    // Every PR the review covers, not just the first — otherwise searching the
+    // number of the second PR in a two-PR review finds nothing.
+    (s.review?.prs ?? []).map((p) => `pr #${p.number} ${p.repository}`).join(' '),
     s.user.priority ?? '',
     s.shape,
   ].join(' ').toLowerCase();

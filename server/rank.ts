@@ -172,7 +172,12 @@ export function classifyShape(
   startedAt: number,
   lastActivity: number,
   sizeBytes: number,
+  isReview = false,
 ): SessionShape {
+  // What a session is FOR beats how long it ran. A review that turned into a
+  // three-day remediation loop is still a review, and classifying it as a
+  // thread buries it among the explorations you were trying to filter away.
+  if (isReview) return 'review';
   const spanHours = Math.max(0, (lastActivity - startedAt) / HOUR);
   const mb = sizeBytes / (1024 * 1024);
   if (spanHours >= 72 || mb >= 4) return 'thread';

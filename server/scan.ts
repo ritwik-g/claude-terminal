@@ -5,6 +5,18 @@ import { PROJECTS_DIR, INDEX_CACHE, APP_DIR, FILE_MODE, ensurePrivateDir, decode
 import type { PrLink, ReviewInfo, TailInfo } from './types.js';
 
 const HEAD_BYTES = 256 * 1024;
+/**
+ * Per-session caps on indexed message text, split by who said it.
+ *
+ * Split rather than one shared budget because assistant turns are an order of
+ * magnitude longer than yours: a single shared cap is spent on the first few
+ * replies and never reaches a word you typed twenty turns in. Measured on this
+ * corpus, a 2000-char shared budget failed to find terms that were plainly in
+ * the conversation. Your own words get the larger share — they are what you
+ * actually remember and search for.
+ */
+const SEARCH_USER_MAX = 12_000;
+const SEARCH_ASSISTANT_MAX = 8_000;
 const TAIL_BYTES = 1024 * 1024;
 
 /**
@@ -12,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 6;
 
 export interface ScannedSession {
   id: string;
@@ -32,6 +44,14 @@ export interface ScannedSession {
   messages: number;
   version: string;
   tail: TailInfo;
+  /**
+   * Lowercased message text, for searching what was actually said rather than
+   * only the metadata around it. Held server-side and stripped before the
+   * session payload is sent: at ~2KB a session this would add megabytes to
+   * every poll, for a field the client only ever needs to ask questions of.
+   * Searching happens in searchIds() instead.
+   */
+  searchText: string;
 }
 
 interface CacheEntry extends ScannedSession {
@@ -90,6 +110,25 @@ export function saveCache(opts: { force?: boolean } = {}): void {
  * because Claude Code re-emits titles, last-prompt and pr-link entries
  * throughout the file (latest wins, and the tail holds the latest).
  */
+/**
+ * Ids whose message text matches every term in `q`.
+ *
+ * Server-side because searchText is server-side: see ScannedSession. The
+ * client still does its own matching over titles, tags, branches and the rest
+ * — this only answers the question it cannot, "was this said anywhere in the
+ * conversation", and the two results are unioned.
+ */
+export function searchIds(q: string): string[] {
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return [];
+  const out: string[] = [];
+  for (const e of cache.values()) {
+    if (!e.searchText) continue;
+    if (terms.every((t) => e.searchText.includes(t))) out.push(e.id);
+  }
+  return out;
+}
+
 export async function scanAll(): Promise<ScannedSession[]> {
   let projectDirs: string[];
   try {
@@ -230,6 +269,7 @@ function extract(
     recap: '',
     pr: null,
     review: null,
+    searchText: '',
     startedAt: 0,
     lastActivity: 0,
     sizeBytes: st.size,
@@ -253,7 +293,27 @@ function extract(
    * after the URL was given in an earlier message, which is a normal way to
    * work and otherwise showed no link at all.
    */
-  let typedPr: PrLink | null = null;
+  const typedPrs: PrLink[] = [];
+
+  /**
+   * Message text for search, user messages first. Bounded because this is
+   * cached to disk for every session: the cap is what keeps index-cache.json
+   * a few megabytes rather than a few hundred.
+   */
+  let userParts: string[] = [];
+  let userLen = 0;
+  let asstParts: string[] = [];
+  let asstLen = 0;
+  const addSearchText = (content: any, mine: boolean) => {
+    const cap = mine ? SEARCH_USER_MAX : SEARCH_ASSISTANT_MAX;
+    const len = mine ? userLen : asstLen;
+    if (len >= cap) return;
+    const t = textOf(content).trim();
+    if (!t) return;
+    const slice = t.length > cap - len ? t.slice(0, cap - len) : t;
+    if (mine) { userParts.push(slice); userLen += slice.length; }
+    else { asstParts.push(slice); asstLen += slice.length; }
+  };
 
   const absorb = (rec: any) => {
     if (!rec) return;
@@ -296,20 +356,33 @@ function extract(
         break;
       case 'user': {
         if (!firstUserText && !rec.isMeta) firstUserText = textOf(rec.message?.content);
+        addSearchText(rec.message?.content, true);
         // Detect a review invocation from the RAW text: textOf() strips the
         // very slash-command envelope this reads, and cleanPromptText throws
         // the args away, so this has to run before either of them.
         const raw = rawTextOf(rec.message?.content);
-        if (!s.review) s.review = detectReview(raw);
-        // Typed by a person, not echoed back by a tool. Transcripts are full
-        // of PR URLs in command output and Claude's own prose — attaching one
-        // of those would put a confident, wrong link on sessions that merely
-        // mentioned a PR in passing.
-        if (!typedPr && !rec.isMeta && !hasToolResult(rec.message?.content)) {
-          typedPr = parsePrUrl(raw);
+        // ...but only from what THIS session did. `/branch` copies the parent's
+        // conversation into the new transcript, tagging every inherited record
+        // with `forkedFrom`, so the parent's '/pr-review' sits at line 0 of a
+        // branch that is not reviewing anything. Verified across every branched
+        // transcript on this machine: the review command is always an inherited
+        // record. Skipping those is what stops a branch claiming its parent's
+        // label.
+        if (!isInherited(rec)) {
+          if (!s.review) s.review = detectReview(raw);
+          // Typed by a person, not echoed back by a tool. Transcripts are full
+          // of PR URLs in command output and Claude's own prose — attaching one
+          // of those would put a confident, wrong link on sessions that merely
+          // mentioned a PR in passing.
+          if (!rec.isMeta && !hasToolResult(rec.message?.content)) {
+            for (const pr of parsePrUrls(raw)) pushPr(typedPrs, pr);
+          }
         }
         break;
       }
+      case 'assistant':
+        addSearchText(rec.message?.content, false);
+        break;
     }
   };
 
@@ -332,7 +405,18 @@ function extract(
   }
 
   // A review that named no PR still usually has one — said earlier, in prose.
-  if (s.review && !s.review.pr && typedPr) s.review = { ...s.review, pr: typedPr };
+  // Command arguments come first because they are the explicit statement of
+  // what is under review; anything else the person typed is a fallback and an
+  // addition, deduped against them.
+  if (s.review) {
+    const prs = [...s.review.prs];
+    for (const pr of typedPrs) pushPr(prs, pr);
+    s.review = { ...s.review, prs, pr: prs[0] ?? null };
+  }
+
+  s.searchText = [...userParts, ...asstParts].join(' \n').toLowerCase();
+  userParts = [];
+  asstParts = [];
 
   s.tail = readTail(tailLines.length ? tailLines : headLines);
 
@@ -486,6 +570,13 @@ const COMMAND_NAME = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/gi;
 const COMMAND_ARGS = /<command-args>([\s\S]*?)<\/command-args>/i;
 /** Only a full PR URL is trusted: a bare "#12" names no repository. */
 const PR_URL = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/i;
+const PR_URL_ALL = new RegExp(PR_URL.source, 'gi');
+/**
+ * A review can genuinely cover several PRs; a transcript that mentions dozens
+ * is quoting output, not describing its subject. Cap rather than let one
+ * session render an unbounded list.
+ */
+const MAX_REVIEW_PRS = 8;
 
 function detectReview(raw: string): ReviewInfo | null {
   if (!raw) return null;
@@ -498,14 +589,47 @@ function detectReview(raw: string): ReviewInfo | null {
     // command, so search forward from this match rather than the whole string.
     const rest = raw.slice(m.index);
     const args = COMMAND_ARGS.exec(rest)?.[1] ?? '';
-    return { command: name, pr: parsePrUrl(args) };
+    const prs = parsePrUrls(args);
+    return { command: name, pr: prs[0] ?? null, prs };
   }
   return null;
 }
 
+/**
+ * A record `/branch` copied in from the session it forked from. Claude Code
+ * tags every inherited record with `forkedFrom: { sessionId, messageUuid }`;
+ * records this session produced itself have no such field.
+ */
+function isInherited(rec: any): boolean {
+  return !!rec?.forkedFrom;
+}
+
+/** Append unless an equal PR is already there. Order is first-seen. */
+function pushPr(list: PrLink[], pr: PrLink): void {
+  if (list.length >= MAX_REVIEW_PRS) return;
+  if (list.some((p) => p.url === pr.url)) return;
+  list.push(pr);
+}
+
 function parsePrUrl(text: string): PrLink | null {
   const m = PR_URL.exec(text);
-  if (!m) return null;
+  return m ? prFrom(m) : null;
+}
+
+/** Every distinct PR named in `text`, in the order they appear. */
+function parsePrUrls(text: string): PrLink[] {
+  if (!text) return [];
+  const out: PrLink[] = [];
+  PR_URL_ALL.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PR_URL_ALL.exec(text)) !== null) {
+    pushPr(out, prFrom(m));
+    if (out.length >= MAX_REVIEW_PRS) break;
+  }
+  return out;
+}
+
+function prFrom(m: RegExpMatchArray): PrLink {
   return {
     number: Number(m[3]),
     url: `https://github.com/${m[1]}/${m[2]}/pull/${m[3]}`,

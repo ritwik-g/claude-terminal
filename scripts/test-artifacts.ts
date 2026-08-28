@@ -62,6 +62,9 @@ const S = {
   remediation: '77777777-7777-4777-8777-777777777777',
   reviewLatePr: '88888888-8888-4888-8888-888888888888',
   prInToolOutput: '99999999-9999-4999-8999-999999999999',
+  multiPr: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  branchedFromReview: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  branchOwnReview: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
 };
 
 const PROJECTS = path.join(FAKE_HOME, '.claude', 'projects', '-ct-artifacts-work');
@@ -150,6 +153,43 @@ function scaffold(): void {
   write(S.none, [
     ...base(900_000),
     { type: 'custom-title', customTitle: 'no artifacts', cwd: WORK, timestamp: at(890_000) },
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // A review covering three PRs at once — comparing them, or working a stack.
+  // Showing only the first hid what the session was actually about.
+  write(S.multiPr, [
+    ...base(900_000),
+    command(
+      'pr-review',
+      'compare https://github.com/acme/widgets/pull/11 with ' +
+      'https://github.com/acme/widgets/pull/22 and https://github.com/acme/toolkit/pull/33',
+      890_000,
+    ),
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // `/branch` copies the parent's conversation into the new transcript and
+  // tags every inherited record with `forkedFrom`. The parent's /pr-review
+  // therefore sits at line 0 of a branch that is reviewing nothing — which is
+  // exactly how a branched session used to inherit its parent's review label.
+  write(S.branchedFromReview, [
+    { ...command('pr-review', 'https://github.com/acme/widgets/pull/4242', 900_000),
+      forkedFrom: { sessionId: S.review, messageUuid: 'u-1' } },
+    { type: 'user', cwd: WORK, timestamp: at(880_000),
+      forkedFrom: { sessionId: S.review, messageUuid: 'u-2' },
+      message: { role: 'user', content: [{ type: 'text', text: 'earlier parent turn' }] } },
+    { type: 'user', cwd: WORK, timestamp: at(500_000),
+      message: { role: 'user', content: [{ type: 'text', text: 'now do something unrelated' }] } },
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // The mirror case: a branch that runs its OWN review command must still be
+  // marked, or the fork guard would have thrown out the real signal too.
+  write(S.branchOwnReview, [
+    { ...command('pr-review', 'https://github.com/acme/widgets/pull/1', 900_000),
+      forkedFrom: { sessionId: S.review, messageUuid: 'u-1' } },
+    command('pr-review', 'https://github.com/acme/toolkit/pull/777', 500_000),
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
   ]);
 
@@ -248,7 +288,7 @@ const main = async () => {
   try {
     await waitForUp(proc);
     const payload: any = await (await fetch(`${BASE}/api/sessions?force=1`)).json();
-    check('all synthetic sessions are scanned', payload.sessions.length === 9, `got ${payload.sessions.length}`);
+    check('all synthetic sessions are scanned', payload.sessions.length === 12, `got ${payload.sessions.length}`);
 
     const get = async (id: string) =>
       (await (await fetch(`${BASE}/api/sessions/${id}/artifacts`)).json()).artifacts;
@@ -309,6 +349,58 @@ const main = async () => {
       JSON.stringify(by(S.prInToolOutput)?.review));
     check('  but that session is still marked a review',
       by(S.prInToolOutput)?.review?.command === 'pr-review');
+
+    // ---- several PRs in one review ----
+    check('a review naming three PRs keeps all three',
+      by(S.multiPr)?.review?.prs?.length === 3,
+      JSON.stringify(by(S.multiPr)?.review?.prs?.map((p: any) => p.number)));
+    check('  in the order they were named',
+      JSON.stringify(by(S.multiPr)?.review?.prs?.map((p: any) => p.number)) === '[11,22,33]',
+      JSON.stringify(by(S.multiPr)?.review?.prs?.map((p: any) => p.number)));
+    check('  across different repositories',
+      by(S.multiPr)?.review?.prs?.[2]?.repository === 'acme/toolkit');
+    check('  and `pr` still names the first, for readers that want just one',
+      by(S.multiPr)?.review?.pr?.number === 11);
+    check('a single-PR review still reports exactly one',
+      by(S.review)?.review?.prs?.length === 1, JSON.stringify(by(S.review)?.review?.prs));
+
+    // ---- a branch does not inherit its parent's review ----
+    check('a session branched off a review is NOT itself a review',
+      by(S.branchedFromReview)?.review === null,
+      JSON.stringify(by(S.branchedFromReview)?.review));
+    check('  so it does not claim the parent\'s PR either',
+      by(S.branchedFromReview)?.shape !== 'review',
+      String(by(S.branchedFromReview)?.shape));
+    check('a branch that runs its OWN review command is still a review',
+      by(S.branchOwnReview)?.review?.command === 'pr-review',
+      JSON.stringify(by(S.branchOwnReview)?.review));
+    check('  and takes the PR IT named, not the inherited one',
+      by(S.branchOwnReview)?.review?.pr?.number === 777,
+      JSON.stringify(by(S.branchOwnReview)?.review?.pr));
+
+    // ---- review is a shape you can filter by ----
+    check('a review session is typed as a review',
+      by(S.review)?.shape === 'review', String(by(S.review)?.shape));
+    check('  overriding the span-derived shape',
+      by(S.remediation)?.shape === 'review', String(by(S.remediation)?.shape));
+    check('a non-review keeps its span-derived shape',
+      by(S.none)?.shape !== 'review', String(by(S.none)?.shape));
+
+    // ---- searching the messages themselves ----
+    const search = async (q: string) =>
+      (await (await fetch(`${BASE}/api/search?q=${encodeURIComponent(q)}`)).json()).ids as string[];
+    check('a phrase only ever said in a message is findable',
+      (await search('something unrelated')).includes(S.branchedFromReview),
+      JSON.stringify(await search('something unrelated')));
+    check('  and does not match sessions that never said it',
+      !(await search('something unrelated')).includes(S.none));
+    check('every term must match, not just one',
+      (await search('unrelated nonexistentword')).length === 0);
+    check('a one-character query is refused rather than matching everything',
+      (await search('a')).length === 0);
+    check('message search does not leak into the payload',
+      by(S.review) !== undefined && !('searchText' in (by(S.review) as any)),
+      JSON.stringify(Object.keys(by(S.review) ?? {})));
 
     check('review is never written into the tags a human owns',
       by(S.review)?.user.tags.length === 0, JSON.stringify(by(S.review)?.user.tags));

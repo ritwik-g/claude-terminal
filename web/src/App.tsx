@@ -26,7 +26,7 @@ const SHORTCUTS: { keys: string; what: string }[] = [
   { keys: 'j / \u2193', what: 'move down the list' },
   { keys: 'k / \u2191', what: 'move up the list' },
   { keys: 'Enter', what: 'open the session under the cursor in a terminal' },
-  { keys: '/', what: 'search titles, session ids, prompts, tags, branches and PRs' },
+  { keys: '/', what: 'search titles, ids, tags, branches, PRs \u2014 and the messages themselves' },
   { keys: 'Esc', what: 'clear the search, then leave it \u2014 or close a dialog' },
   { keys: 'p', what: 'cycle priority \u2014 p0, p1, p2, none' },
   { keys: 'x', what: 'pin or unpin' },
@@ -257,6 +257,36 @@ export function App() {
 
   const sessions = payload?.sessions ?? [];
 
+  /**
+   * Ids whose MESSAGE text matches the query. The payload deliberately does
+   * not carry message text — it would add megabytes to every poll — so this is
+   * the one part of search the server answers, and it is unioned with the
+   * local metadata match rather than replacing it.
+   *
+   * Debounced because it runs on every keystroke, and stale responses are
+   * dropped by sequence number: without that, a slow reply for "rev" can land
+   * after a fast one for "review" and show the wrong set.
+   */
+  const [msgIds, setMsgIds] = useState<Set<string>>(new Set());
+  const searchSeq = useRef(0);
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) { setMsgIds(new Set()); return; }
+    const seq = ++searchSeq.current;
+    const timer = setTimeout(() => {
+      api.search(q)
+        .then((r) => { if (seq === searchSeq.current) setMsgIds(new Set(r.ids)); })
+        .catch(() => { if (seq === searchSeq.current) setMsgIds(new Set()); });
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  /** Metadata match OR a hit in the conversation itself. */
+  const hits = useCallback(
+    (s: Session) => matches(s, query) || msgIds.has(s.id),
+    [query, msgIds],
+  );
+
   /** Everything the explicit filters allow, before "active only" narrows it. */
   const baseVisible = useMemo(
     () =>
@@ -265,9 +295,9 @@ export function App() {
           (showArchived ? s.user.archived : !s.user.archived) &&
           (!shapeFilter || s.shape === shapeFilter) &&
           (!tagFilter || s.user.tags.includes(tagFilter)) &&
-          matches(s, query),
+          hits(s),
       ),
-    [sessions, query, shapeFilter, tagFilter, showArchived],
+    [sessions, hits, shapeFilter, tagFilter, showArchived],
   );
 
   /**
@@ -364,7 +394,10 @@ export function App() {
   }, [payload, tagFilter]);
 
   const shapeCounts = useMemo(() => {
-    const c: Record<string, number> = { errand: 0, task: 0, thread: 0 };
+    // Derived from SHAPE_ORDER, not hand-listed: a literal typed as
+    // Record<string, number> silently missed 'review' when it was added, and
+    // the chip rendered "Reviews NaN" because nothing type-checked the keys.
+    const c = Object.fromEntries(SHAPE_ORDER.map((sh) => [sh, 0])) as Record<SessionShape, number>;
     for (const s of sessions) {
       // Same base as the list itself, minus the shape filter these chips set —
       // otherwise the chips describe the active list while the bucket chips
@@ -373,11 +406,11 @@ export function App() {
       if (tagFilter && !s.user.tags.includes(tagFilter)) continue;
       if (bucketFilter && bucketOf(s, now) !== bucketFilter) continue;
       if (activeApplies && !isActive(s)) continue;
-      if (!matches(s, query)) continue;
+      if (!hits(s)) continue;
       c[s.shape]++;
     }
     return c;
-  }, [sessions, query, tagFilter, showArchived, bucketFilter, now, activeApplies]);
+  }, [sessions, hits, tagFilter, showArchived, bucketFilter, now, activeApplies]);
 
   const selected = useMemo(
     () => sessions.find((s) => s.id === selectedId) ?? null,
@@ -715,7 +748,7 @@ export function App() {
           <input
             ref={searchRef}
             className="search"
-            placeholder="Search titles, ids, prompts, tags, branches, PRs…   /"
+            placeholder="Search titles, messages, ids, tags, branches, PRs…   /"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -1154,12 +1187,14 @@ export function App() {
                       session RAISED, and only usually the same one — reviewing
                       your own draft is the common case, and then showing both
                       buttons would just be the same link twice. */}
-                  {selected.review?.pr && selected.review.pr.url !== selected.pr?.url && (
-                    <a className="btn" href={selected.review.pr.url} target="_blank" rel="noreferrer"
-                       title={`Reviewing ${selected.review.pr.repository} #${selected.review.pr.number}`}>
-                      Reviewing #{selected.review.pr.number}
-                    </a>
-                  )}
+                  {(selected.review?.prs ?? [])
+                    .filter((p) => p.url !== selected.pr?.url)
+                    .map((p) => (
+                      <a key={p.url} className="btn" href={p.url} target="_blank" rel="noreferrer"
+                         title={`Reviewing ${p.repository} #${p.number}`}>
+                        Reviewing #{p.number}
+                      </a>
+                    ))}
                   {selected.pr && (
                     <a className="btn" href={selected.pr.url} target="_blank" rel="noreferrer"
                        title={`${selected.pr.repository} #${selected.pr.number}`}>
@@ -1388,8 +1423,10 @@ export function App() {
                 on claude.ai; republishing keeps one entry and bumps its version.
               </li>
               <li>
-                A session opened with a review command is marked with that command, and links to
-                the PR it is reviewing when the invocation named one.
+                A session opened with a review command is typed as a <b>review</b> and links to
+                every PR the invocation named — several, when the review covers several. A
+                session branched off a review does not inherit the label: only the command this
+                session ran itself counts.
               </li>
               <li>
                 Terminals you leave open are offered back the next time you launch, so quitting to

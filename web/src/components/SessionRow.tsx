@@ -73,10 +73,21 @@ export const SessionRow = React.memo(function SessionRow({ s, selected, atCursor
           {s.review && (
             <span className="chip review" title={`Opened with /${s.review.command}`}>review</span>
           )}
-          {/* The PR being reviewed stands in when the session raised none of
-              its own, which is the usual case when reviewing someone else. */}
-          {(s.pr ?? s.review?.pr) && (
-            <span className="chip pr">#{(s.pr ?? s.review!.pr)!.number}</span>
+          {/* The PRs being reviewed stand in when the session raised none of
+              its own, which is the usual case when reviewing someone else. A
+              review covering several PRs shows each, so the row says what the
+              session is actually about rather than naming only the first. */}
+          {s.pr
+            ? <span className="chip pr">#{s.pr.number}</span>
+            : (s.review?.prs ?? []).slice(0, 3).map((p) => (
+                <span key={p.url} className="chip pr" title={`${p.repository} #${p.number}`}>
+                  #{p.number}
+                </span>
+              ))}
+          {!s.pr && (s.review?.prs.length ?? 0) > 3 && (
+            <span className="chip pr" title={`${s.review!.prs.length} PRs under review`}>
+              +{s.review!.prs.length - 3}
+            </span>
           )}
           {s.user.tags.slice(0, 1).map((t) => (
             <span className="chip tag" key={t}>{t}</span>

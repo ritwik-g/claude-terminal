@@ -12,8 +12,11 @@ export type Priority = 'p0' | 'p1' | 'p2';
  * 'errand'  short, single-purpose  — a PR review, a quick question
  * 'task'    a normal piece of work
  * 'thread'  a long-running exploration carried across days
+ * 'review'  opened to review code — derived from the command, not the span,
+ *           so it OVERRIDES the others: what the session is for is more useful
+ *           to filter on than how long it happened to run.
  */
-export type SessionShape = 'errand' | 'task' | 'thread';
+export type SessionShape = 'errand' | 'task' | 'thread' | 'review';
 
 export interface LiveInfo {
   pid: number;
@@ -55,8 +58,17 @@ export interface Artifact {
 export interface ReviewInfo {
   /** The command as invoked, e.g. 'pr-review', minus its leading slash. */
   command: string;
-  /** The PR under review, when the invocation named one. */
+  /**
+   * The PR under review. `prs[0]` when there is one — kept as its own field
+   * because most reviews have exactly one and every reader wants it directly.
+   */
   pr: PrLink | null;
+  /**
+   * Every PR this review covers, deduped and in the order they appeared. A
+   * review that compares two PRs, or works through a stack of them, is a
+   * normal thing to do and showing only the first hid the rest.
+   */
+  prs: PrLink[];
 }
 
 export interface TailInfo {

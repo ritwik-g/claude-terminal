@@ -50,6 +50,7 @@ The signals are derived, so the list stays useful with no upkeep:
 | Stopped mid tool-call | last transcript entry is an unresolved `tool_use` |
 | Work left behind | uncommitted files / unpushed commits **attributable to this session** |
 | Has a PR | `pr-link` entries in the transcript |
+| Is a review | a review command this session ran itself, not one inherited from a branch parent |
 
 **Errands vs explorations, derived.** Every session is classified by shape —
 `⚡ errand` (short, single-purpose: a PR review, a quick question), `◆ task`, or
@@ -74,7 +75,18 @@ artifacts are read whole-file, on demand, for the one session you are looking
 at — about 60ms for a 14MB transcript, cached on its mtime.
 
 **Review sessions name what they are reviewing.** A session opened with a
-review command is marked as one, and links straight to the PR under review.
+review command becomes its own type — `✓ review`, filterable alongside errands,
+tasks and threads — and links straight to **every** PR under review, because a
+review that compares two PRs or works a stack is a normal thing to do. Because
+the type is derived from intent rather than duration, it overrides the
+span-based ones: a review that turned into a three-day remediation loop is
+still a review, not a thread.
+
+A session **branched off** a review does not inherit the label. `/branch`
+copies the parent's conversation into the new transcript, so the parent's
+`/pr-review` sits at line 0 of a branch that is reviewing nothing; the
+inherited records are tagged `forkedFrom` and only commands this session ran
+itself count.
 Nothing here is tool-specific: commands are matched by stem — `review`,
 `remediation`, `critique` — on the last colon-separated segment, so
 `/pr-review`, `/code-review`, `/security-review`,
@@ -278,6 +290,19 @@ Check the indexer against your real data, and smoke-test the API:
 npm run doctor   # what the scanner sees: titles, states, live registry, timings
 npm run smoke    # 35 black-box API checks; never spawns a real session
 ```
+
+**Search reaches the conversation, not just the labels.** `/` matches titles,
+session ids, prompts, tags, branches, cwds and PR numbers — and the messages
+themselves, so a phrase you remember typing finds the session even when nothing
+in its metadata mentions it. Message text is indexed server-side and
+deliberately kept out of the session payload: at ~14KB a session it would add
+megabytes to every poll for something the client never renders. `/api/search`
+answers that half and the results are merged with the local match.
+
+The index is bounded — roughly 12KB of what you said and 8KB of what Claude
+replied, taken from the same head+tail windows the scanner already reads. Your
+own words get the larger share because they are what you actually search for.
+On a 135-session corpus that is a 1.9MB index answering in under 30ms.
 
 ## Keys
 

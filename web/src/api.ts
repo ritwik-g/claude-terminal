@@ -45,6 +45,10 @@ export const api = {
       body: JSON.stringify(arg === undefined ? { command } : { command, arg }),
     }),
 
+  /** Sessions whose MESSAGE TEXT matches — the part the payload does not carry. */
+  search: (q: string) =>
+    json<{ ids: string[]; q: string }>(`/api/search?q=${encodeURIComponent(q)}`),
+
   clearRestore: () => json<{ ok: boolean }>('/api/restore', { method: 'DELETE' }),
 
   killTerm: (id: string, hard = false) =>

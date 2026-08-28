@@ -96,8 +96,12 @@ async function build(): Promise<SessionsPayload> {
     });
 
     // `_mtimeMs`/`_size` are scan-cache bookkeeping and are not part of Session.
-    const { _mtimeMs, _size, ...clean } = s as typeof s & { _mtimeMs?: number; _size?: number };
-    void _mtimeMs; void _size;
+    // `searchText` is ~2KB of message text per session — server-side only, or
+    // it would add megabytes to every poll for something the client never
+    // reads directly. /api/search answers questions about it instead.
+    const { _mtimeMs, _size, searchText, ...clean } =
+      s as typeof s & { _mtimeMs?: number; _size?: number };
+    void _mtimeMs; void _size; void searchText;
 
     return {
       ...clean,
@@ -105,7 +109,7 @@ async function build(): Promise<SessionsPayload> {
       live: liveInfo,
       git,
       user,
-      shape: classifyShape(s.startedAt, s.lastActivity, s.sizeBytes),
+      shape: classifyShape(s.startedAt, s.lastActivity, s.sizeBytes, !!s.review),
       state,
       score: sc,
       reasons,
