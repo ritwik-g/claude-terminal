@@ -1,215 +1,63 @@
-# claude-terminal
+# Claude Terminal
 
-An attention-ranked workspace for Claude Code sessions, with embedded terminals.
+**Which of your Claude Code sessions needs you right now — and get into it without leaving the window.**
 
-`clsm` answers *"what sessions do I have?"*. This answers *"which one needs me
-right now, and can I get into it without leaving this window?"*
+Sessions pile up. Some are a quick PR review, some are week-long explorations,
+some you parked on purpose. A flat, recency-sorted list can't tell those apart,
+so finding the one that actually needs you means opening several and reading
+them. This ranks them by attention instead, and gives you a real terminal in the
+same window.
 
-> **Not affiliated with, endorsed by, or sponsored by Anthropic.** This is an
-> unofficial personal project that works *with* Claude Code. "Claude" is a
-> trademark of Anthropic, used here only to say what this tool is for.
+> **Not affiliated with, endorsed by, or sponsored by Anthropic.** An unofficial
+> personal project that works *with* Claude Code. "Claude" is a trademark of
+> Anthropic, used here only to say what this tool is for.
 
-**Runs entirely on your machine.** It makes no network requests of any kind —
-no telemetry, no analytics, no update check. It reads your Claude Code
-transcripts under `~/.claude/` (never writes there) and keeps its own state in
-`~/.claude-terminal/`. Nothing is uploaded anywhere. See
-[SECURITY.md](SECURITY.md) for the full trust model.
+**Runs entirely on your machine.** No network requests of any kind — no
+telemetry, no analytics, no update check. It reads your Claude Code transcripts
+under `~/.claude/` (and never writes there), keeping its own state in
+`~/.claude-terminal/`. See [SECURITY.md](SECURITY.md) for the full trust model.
 
-## Requirements
+---
+
+## What you get
 
 | | |
 |---|---|
-| **Claude Code** | Required — this tool reads its transcripts and drives its sessions. It is not useful without it. |
-| **Node.js** | 20 or newer (22 recommended). Needed to run or build from source. |
-| **macOS** | Fully supported. Apple Silicon and Intel; the packaged app is built for both. |
-| **Linux** | The headless server (`npm start`) is supported and used. The AppImage builds but is untested. |
-| **Windows** | Not supported and not tested. |
-
-Building from source compiles `node-pty`, which needs a C++ toolchain — Xcode
-Command Line Tools on macOS, `build-essential` and Python 3.11 on Linux.
-
-## The problem
-
-Sessions accumulate. Some are ad-hoc and short-lived (a PR review, a customer
-issue). Some are long-running explorations. Some get parked for a later day.
-A flat, recency-sorted list can't tell those apart, so finding the session that
-actually needs attention means opening several and reading them.
-
-## What it does
-
-**Ranks by attention, not recency.** Sessions are grouped into *Needs you /
-Working / Parked / Quiet / Snoozed*, and every session carries a `reasons` trail
-explaining its position — the ranking is always inspectable, never a black box.
-
-The signals are derived, so the list stays useful with no upkeep:
-
-| Signal | Where it comes from |
-|---|---|
-| Waiting on you | live process is `idle`, or the last assistant turn ended with `stop_reason: end_turn` |
-| Working now | Claude Code's own `busy` status |
-| Stopped mid tool-call | last transcript entry is an unresolved `tool_use` |
-| Work left behind | uncommitted files / unpushed commits **attributable to this session** |
-| Has a PR | `pr-link` entries in the transcript |
-| Is a review | a review command this session ran itself, not one inherited from a branch parent |
-
-**Errands vs explorations, derived.** Every session is classified by shape —
-`⚡ errand` (short, single-purpose: a PR review, a quick question), `◆ task`, or
-`∞ thread` (a long-running exploration carried across days) — and you can filter
-by it. The thresholds come from the real distribution rather than intuition:
-across 134 sessions, span is strongly bimodal at p25 = 28 minutes and
-p75 = 4.75 days.
-
-**What the session produced, above what it is.** Artifacts a session published
-are listed across the top of its detail pane and open on claude.ai in a click.
-Republishing an artifact keeps one entry and bumps its version count, because
-the URL is the artifact's identity — a document you have revised four times is
-one row marked `v4`, not four rows.
-
-These are read from `frame-link` transcript records, and deliberately *not*
-through the shared scanner. That scanner samples the first 256KB and the last
-1MB of each transcript, which is sound for titles and PR links because Claude
-Code re-emits those as they change. A `frame-link` is written once, when you
-publish, and never again: across this corpus 51 of the 71 artifacts in
-transcripts larger than that window fall between the two sampled ranges. So
-artifacts are read whole-file, on demand, for the one session you are looking
-at — about 60ms for a 14MB transcript, cached on its mtime.
-
-**Review sessions name what they are reviewing.** A session opened with a
-review command becomes its own type — `✓ review`, filterable alongside errands,
-tasks and threads — and links straight to **every** PR under review, because a
-review that compares two PRs or works a stack is a normal thing to do. Because
-the type is derived from intent rather than duration, it overrides the
-span-based ones: a review that turned into a three-day remediation loop is
-still a review, not a thread.
-
-A session **branched off** a review does not inherit the label. `/branch`
-copies the parent's conversation into the new transcript, so the parent's
-`/pr-review` sits at line 0 of a branch that is reviewing nothing; the
-inherited records are tagged `forkedFrom` and only commands this session ran
-itself count.
-Nothing here is tool-specific: commands are matched by stem — `review`,
-`remediation`, `critique` — on the last colon-separated segment, so
-`/pr-review`, `/code-review`, `/security-review`,
-`/pr-review-toolkit:review-pr`, `/team:standard-review-lite` and
-`/team:max-remediation` all land, and a new review tool works with no
-change as long as its name says what it does. `remediation` is in that list
-because those skills *are* review loops — they run the review repeatedly and
-fix what it finds — and none of their names contain "review". The list stays
-short deliberately: stems like `audit` would drag in commands that have
-nothing to do with code review, and a session wrongly labelled a review is
-worse than one left unlabelled.
-
-The PR comes from the command's own arguments, and failing that from the first
-PR **you** typed earlier in the session — running `/pr-review` bare after
-pasting the link in an earlier message is a normal way to work, and used to
-show no link at all. A PR seen only in tool output is never adopted:
-transcripts are full of PR URLs in command output, and a confident wrong link
-is worse than none. This is derived on every scan and
-never written into your tags — an auto-applied tag could not be removed,
-because the next scan would put it straight back. The PR a session is
-*reviewing* stays distinct from the PR it *raised*; they are usually different,
-and both show when they are.
-
-**Active only, by default.** The list opens showing just the sessions Claude
-is actually running right now — live in `~/.claude/sessions`, or attached to a
-terminal here. Here that is 10 of 129. Attached counts as active on its own
-because a session you have just opened takes a second or two to register
-itself as live, and the row would otherwise vanish at the moment you opened
-it. Snoozed sessions are included when they are running — a session still
-working has not really been set aside, and three of the four snoozed ones
-here had terminals open in them.
-
-While the filter is applying, groups are not collapsed. Quiet and Snoozed
-start collapsed, so a running session in either was counted and then hidden
-behind a group header — the toggle read 8 with five rows on screen. Having
-asked for only the handful that are running, there is nothing left to
-collapse away; the count and the rows always agree.
-
-It is one click to turn off, and it is a default rather than a constraint:
-searching, or clicking one of the bucket counts along the top, overrides it,
-so a session it hides is never a session you cannot reach. The counts
-themselves are deliberately calculated *before* it applies — showing "Quiet 0"
-would leave no way to discover the 78 sitting there.
-
-**Branch and rename, from the app.** With a terminal open, **Branch** and
-**Rename** run Claude Code's own `/branch` and `/rename` in it. The app does
-not reimplement either — it types the command you would have typed, so the
-session stays the only source of truth for its own title and lineage. The
-route takes a command *name* rather than raw bytes, and builds the text
-server-side: a newline in a rename would otherwise submit early and leave the
-rest sitting at the prompt as though you had typed it.
-
-Branching is why a terminal's session id is not learned once and kept.
-`/branch` forks the session into a new id inside the *same* process, so the
-PTY that started out running A is now running B. Believing the first answer
-left the branched session — the one you were sitting in — with no terminal at
-all, while the pane announced *"Running in another terminal"* about the very
-terminal you were typing into. Claude Code keeps one registry file per pid, so
-the pid always resolves to exactly one current session and re-reading it
-cannot oscillate.
-
-**Manual state is an override, never load-bearing.** Tags, P0/P1/P2, pin and
-snooze all exist, but the tool works fully if you never touch them. Tags become
-filter chips as soon as you create one; priority colours the row's left edge,
-because it outranks every derived signal and you should be able to see why a row
-is on top.
-
-**Embedded terminals, no tmux.** The server holds the PTYs directly, so xterm.js
-gets native scrolling, a real scrollbar, and search across the whole buffer.
-Raw output is logged to `~/.claude-terminal/logs/` so scrollback survives a
-reload. Sessions survive closing the window; they do not survive the daemon
-being killed, which is the deliberate trade for the scrolling.
-
-**Your working set survives a quit.** The terminals you had open are recorded
-as you open and close them, and on the next launch the app offers to reopen
-them in one click — so updating it costs you a click rather than an afternoon
-of remembering which four sessions you were in the middle of. The offer only
-lists what will actually work: the session still exists, its directory is still
-there, and it has not been picked up by a terminal of your own in the meantime.
-Nothing is reopened without you asking, and dismissing it is permanent.
-
-**A dropped connection is not a dropped session.** The socket is closed by a
-laptop sleep or any network gap, but the PTY on the other side is fine — so the
-pane reconnects on its own with backoff and replays its scrollback, and says so
-rather than looking frozen. Nothing in the recovery path touches the running
-process.
+| **Ranked by attention, not recency** | Sessions group into *Needs you / Working / Parked / Quiet / Snoozed*. Every row carries a `reasons` trail, so the ranking is always inspectable — never a black box. |
+| **Session types, derived** | `✓ review`, `⚡ errand`, `◆ task`, `∞ thread` — read off the transcript and filterable. No tagging required. |
+| **Terminals in the same window** | Real PTYs, native scrolling, a real scrollbar, and search across the whole buffer. No tmux. |
+| **Reviews link what they review** | A session opened with a review command links **every** PR it covers, not just the first. |
+| **Artifacts, front and centre** | What a session *published* leads its detail pane and opens on claude.ai in a click. Revisions collapse into one row with a version count. |
+| **Search that reads the conversation** | Titles, ids, tags, branches, cwds, PR numbers — **and the messages themselves**, so a phrase you remember typing finds the session. |
+| **Branch and rename from the app** | Runs Claude Code's own `/branch` and `/rename` in the live session, so it stays the source of truth for its own title and lineage. |
+| **Your working set survives a quit** | The terminals you had open are offered back on the next launch, in one click. |
+| **Active only, by default** | Opens showing just what's running — one click to see everything, and searching overrides it, so nothing is ever unreachable. |
 
 ## Install
 
-There are two ways in, and the difference is only about Gatekeeper.
+**Requires [Claude Code](https://claude.com/claude-code).** This tool reads its
+transcripts and drives its sessions; it isn't useful on its own.
 
-### Build it yourself — no Gatekeeper at all
-
-An app you build on your own machine is never quarantined, so it just opens.
-For a personal tool this is the path of least friction:
-
-```bash
-git clone https://github.com/ritwik-g/claude-terminal.git && cd claude-terminal
-npm install
-npm run dist:mac     # -> release/*.dmg and release/*.zip (host architecture)
-```
-
-Then drag **Claude Terminal** out of `release/` into Applications. Or skip
-packaging entirely and run it from source with `npm run app`.
-
-### Download a release — one command afterwards
+### macOS — download a release
 
 Grab the `.dmg` for your chip from
 [Releases](https://github.com/ritwik-g/claude-terminal/releases)
 (`mac-arm64` for Apple Silicon, `mac-x64` for Intel), open it, drag
-**Claude Terminal** to Applications, and then:
+**Claude Terminal** to Applications.
 
-```bash
-xattr -dr com.apple.quarantine "/Applications/Claude Terminal.app"
-```
-
-**Verify the download first.** Because these builds are unsigned, the digest is
-how you tell this artifact from any other. Every release attaches
-`SHA256SUMS-*.txt`, and every installer carries signed build provenance:
+**Verify it before you run it.** These builds are unsigned, so the digest is how
+you tell this artifact from any other. Every release attaches `SHA256SUMS-*.txt`,
+and every installer carries signed build provenance:
 
 ```bash
 shasum -a 256 -c SHA256SUMS-macos-14.txt
 gh attestation verify Claude.Terminal-0.4.0-mac-arm64.dmg --repo ritwik-g/claude-terminal
+```
+
+Then let macOS open it:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Claude Terminal.app"
 ```
 
 Stripping quarantine turns off Gatekeeper's check for that app permanently, so
@@ -237,25 +85,25 @@ account (its certificates cannot notarize, so they change nothing here).
 Deleting the app bundle is harmless either way: everything the tool remembers
 lives in `~/.claude-terminal/`, not in the bundle.
 
-### Either way
+### Build from source — no Gatekeeper at all
+
+An app you build on your own machine is never quarantined, so it just opens.
+For a personal tool this is the path of least friction:
+
+```bash
+git clone https://github.com/ritwik-g/claude-terminal.git && cd claude-terminal
+npm install
+npm run dist:mac     # -> release/*.dmg and release/*.zip (host architecture)
+```
+
+Then drag **Claude Terminal** out of `release/` into Applications. Or skip
+packaging entirely and run it from source with `npm run app`.
 
 Quitting the app (⌘Q) stops the server and closes every terminal it started —
 it asks first if any are still running, and offers to reopen them next launch.
 Sessions in your own terminals are never affected.
 
-**Cutting a release.** `.github/workflows/release.yml` builds both macOS
-architectures on one Apple Silicon runner and a Linux AppImage on its own, then
-attaches every installer to a GitHub Release:
-
-```bash
-npm version patch          # or edit package.json
-git push --follow-tags     # tag v* triggers the workflow
-```
-
-There is also a `workflow_dispatch` trigger, so a release can be re-cut without
-moving a tag.
-
-### Headless / Linux
+### Linux / headless
 
 Releases carry an `x86_64.AppImage`, but it has only ever been *built* — never
 run — so treat it as untested. The server runs fine without Electron either
@@ -333,7 +181,257 @@ new size only when the character grid actually changes — a drag crosses a cell
 boundary a few dozen times, and sending a `SIGWINCH` per animation frame
 instead would make Claude Code redraw its whole interface 60 times a second.
 
-## Testing conventions
+## How it works
+
+The short version is above. Each of these opens up the reasoning and the
+measurements behind a piece of it.
+
+<details>
+<summary><b>Ranks by attention, not recency</b></summary>
+
+Sessions are grouped into *Needs you /
+Working / Parked / Quiet / Snoozed*, and every session carries a `reasons` trail
+explaining its position — the ranking is always inspectable, never a black box.
+
+The signals are derived, so the list stays useful with no upkeep:
+
+| Signal | Where it comes from |
+|---|---|
+| Waiting on you | live process is `idle`, or the last assistant turn ended with `stop_reason: end_turn` |
+| Working now | Claude Code's own `busy` status |
+| Stopped mid tool-call | last transcript entry is an unresolved `tool_use` |
+| Work left behind | uncommitted files / unpushed commits **attributable to this session** |
+| Has a PR | `pr-link` entries in the transcript |
+| Is a review | a review command this session ran itself, not one inherited from a branch parent |
+
+</details>
+
+<details>
+<summary><b>Errands vs explorations, derived</b></summary>
+
+Every session is classified by shape —
+`⚡ errand` (short, single-purpose: a PR review, a quick question), `◆ task`, or
+`∞ thread` (a long-running exploration carried across days) — and you can filter
+by it. The thresholds come from the real distribution rather than intuition:
+across 134 sessions, span is strongly bimodal at p25 = 28 minutes and
+p75 = 4.75 days.
+
+</details>
+
+<details>
+<summary><b>What the session produced, above what it is</b></summary>
+
+Artifacts a session published
+are listed across the top of its detail pane and open on claude.ai in a click.
+Republishing an artifact keeps one entry and bumps its version count, because
+the URL is the artifact's identity — a document you have revised four times is
+one row marked `v4`, not four rows.
+
+These are read from `frame-link` transcript records, and deliberately *not*
+through the shared scanner. That scanner samples the first 256KB and the last
+1MB of each transcript, which is sound for titles and PR links because Claude
+Code re-emits those as they change. A `frame-link` is written once, when you
+publish, and never again: across this corpus 51 of the 71 artifacts in
+transcripts larger than that window fall between the two sampled ranges. So
+artifacts are read whole-file, on demand, for the one session you are looking
+at — about 60ms for a 14MB transcript, cached on its mtime.
+
+</details>
+
+<details>
+<summary><b>Review sessions name what they are reviewing</b></summary>
+
+A session opened with a
+review command becomes its own type — `✓ review`, filterable alongside errands,
+tasks and threads — and links straight to **every** PR under review, because a
+review that compares two PRs or works a stack is a normal thing to do. Because
+the type is derived from intent rather than duration, it overrides the
+span-based ones: a review that turned into a three-day remediation loop is
+still a review, not a thread.
+
+A session **branched off** a review does not inherit the label. `/branch`
+copies the parent's conversation into the new transcript, so the parent's
+`/pr-review` sits at line 0 of a branch that is reviewing nothing; the
+inherited records are tagged `forkedFrom` and only commands this session ran
+itself count.
+Nothing here is tool-specific: commands are matched by stem — `review`,
+`remediation`, `critique` — on the last colon-separated segment, so
+`/pr-review`, `/code-review`, `/security-review`,
+`/pr-review-toolkit:review-pr`, `/team:standard-review-lite` and
+`/team:max-remediation` all land, and a new review tool works with no
+change as long as its name says what it does. `remediation` is in that list
+because those skills *are* review loops — they run the review repeatedly and
+fix what it finds — and none of their names contain "review". The list stays
+short deliberately: stems like `audit` would drag in commands that have
+nothing to do with code review, and a session wrongly labelled a review is
+worse than one left unlabelled.
+
+The PR comes from the command's own arguments, and failing that from the first
+PR **you** typed earlier in the session — running `/pr-review` bare after
+pasting the link in an earlier message is a normal way to work, and used to
+show no link at all. A PR seen only in tool output is never adopted:
+transcripts are full of PR URLs in command output, and a confident wrong link
+is worse than none. This is derived on every scan and
+never written into your tags — an auto-applied tag could not be removed,
+because the next scan would put it straight back. The PR a session is
+*reviewing* stays distinct from the PR it *raised*; they are usually different,
+and both show when they are.
+
+</details>
+
+<details>
+<summary><b>Active only, by default</b></summary>
+
+The list opens showing just the sessions Claude
+is actually running right now — live in `~/.claude/sessions`, or attached to a
+terminal here. Here that is 10 of 129. Attached counts as active on its own
+because a session you have just opened takes a second or two to register
+itself as live, and the row would otherwise vanish at the moment you opened
+it. Snoozed sessions are included when they are running — a session still
+working has not really been set aside, and three of the four snoozed ones
+here had terminals open in them.
+
+While the filter is applying, groups are not collapsed. Quiet and Snoozed
+start collapsed, so a running session in either was counted and then hidden
+behind a group header — the toggle read 8 with five rows on screen. Having
+asked for only the handful that are running, there is nothing left to
+collapse away; the count and the rows always agree.
+
+It is one click to turn off, and it is a default rather than a constraint:
+searching, or clicking one of the bucket counts along the top, overrides it,
+so a session it hides is never a session you cannot reach. The counts
+themselves are deliberately calculated *before* it applies — showing "Quiet 0"
+would leave no way to discover the 78 sitting there.
+
+</details>
+
+<details>
+<summary><b>Branch and rename, from the app</b></summary>
+
+With a terminal open, **Branch** and
+
+**Rename** run Claude Code's own `/branch` and `/rename` in it. The app does
+not reimplement either — it types the command you would have typed, so the
+session stays the only source of truth for its own title and lineage. The
+route takes a command *name* rather than raw bytes, and builds the text
+server-side: a newline in a rename would otherwise submit early and leave the
+rest sitting at the prompt as though you had typed it.
+
+Branching is why a terminal's session id is not learned once and kept.
+`/branch` forks the session into a new id inside the *same* process, so the
+PTY that started out running A is now running B. Believing the first answer
+left the branched session — the one you were sitting in — with no terminal at
+all, while the pane announced *"Running in another terminal"* about the very
+terminal you were typing into. Claude Code keeps one registry file per pid, so
+the pid always resolves to exactly one current session and re-reading it
+cannot oscillate.
+
+</details>
+
+<details>
+<summary><b>Manual state is an override, never load-bearing</b></summary>
+
+Tags, P0/P1/P2, pin and
+snooze all exist, but the tool works fully if you never touch them. Tags become
+filter chips as soon as you create one; priority colours the row's left edge,
+because it outranks every derived signal and you should be able to see why a row
+is on top.
+
+</details>
+
+<details>
+<summary><b>Embedded terminals, no tmux</b></summary>
+
+The server holds the PTYs directly, so xterm.js
+gets native scrolling, a real scrollbar, and search across the whole buffer.
+Raw output is logged to `~/.claude-terminal/logs/` so scrollback survives a
+reload. Sessions survive closing the window; they do not survive the daemon
+being killed, which is the deliberate trade for the scrolling.
+
+</details>
+
+<details>
+<summary><b>Your working set survives a quit</b></summary>
+
+The terminals you had open are recorded
+as you open and close them, and on the next launch the app offers to reopen
+them in one click — so updating it costs you a click rather than an afternoon
+of remembering which four sessions you were in the middle of. The offer only
+lists what will actually work: the session still exists, its directory is still
+there, and it has not been picked up by a terminal of your own in the meantime.
+Nothing is reopened without you asking, and dismissing it is permanent.
+
+</details>
+
+<details>
+<summary><b>A dropped connection is not a dropped session</b></summary>
+
+The socket is closed by a
+laptop sleep or any network gap, but the PTY on the other side is fine — so the
+pane reconnects on its own with backoff and replays its scrollback, and says so
+rather than looking frozen. Nothing in the recovery path touches the running
+process.
+
+</details>
+
+## Requirements
+
+| | |
+|---|---|
+| **Claude Code** | Required — this tool reads its transcripts and drives its sessions. It is not useful without it. |
+| **Node.js** | 20 or newer (22 recommended). Needed to run or build from source. |
+| **macOS** | Fully supported. Apple Silicon and Intel; the packaged app is built for both. |
+| **Linux** | The headless server (`npm start`) is supported and used. The AppImage builds but is untested. |
+| **Windows** | Not supported and not tested. |
+
+Building from source compiles `node-pty`, which needs a C++ toolchain — Xcode
+Command Line Tools on macOS, `build-essential` and Python 3.11 on Linux.
+
+## Where state lives
+
+Everything this tool owns is under `~/.claude-terminal/` — `state.json` (tags,
+priority, pins, snoozes, and the working set of open terminals),
+`index-cache.json`, and `logs/`. It **never writes to
+`~/.claude`**; that directory is read-only as far as this tool is concerned.
+
+If `state.json` exists but cannot be read, the server refuses to write over it
+and goes read-only for the session, saying so in the UI. A whole-file
+write-then-rename over a file you failed to load is the one way a tool like this
+silently destroys everything you hand-entered.
+
+## Good to know
+
+- **Sessions already running elsewhere cannot be attached.** Resuming a live
+  session would put two clients on one transcript, so the UI blocks it and tells
+  you the pid instead.
+- **Spawned sessions get a cleaned environment.** Claude Code's own session
+  markers (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_MESSAGING_*`,
+  `CLAUDE_EFFORT`, …) are stripped before spawning. Inheriting them silently
+  disables transcript saving and leaks the parent's messaging channel. Because
+  the spawn goes through a login shell, anything you export from your own shell
+  config is still applied.
+- Indexing 1200+ transcripts across ~600MB takes well under a second. Files
+  under ~1.25MB are read whole; larger ones are sampled head+tail. Results are
+  cached by mtime+size, so a refresh costs single-digit milliseconds.
+- **The list order is frozen while your pointer is over it.** The ranking is
+  genuinely live — scores decay, sessions flip busy/idle, git state changes on
+  every save — so without this a row can move between seeing it and clicking it.
+  Contents still update; only positions hold still, and only while you're aiming.
+- **The local server is gated two ways.** It refuses non-loopback Hosts and any
+  Origin that is not its own, which stops a *browser*: WebSockets are exempt
+  from CORS, so any page you visit could otherwise have typed into a live
+  session. Headers alone stop nothing else, though — a non-browser client sets
+  them freely — so the API and the socket also require a token minted at
+  startup and written to `~/.claude-terminal/token` (mode 0600). That is what
+  keeps a second account on the machine out. It cannot keep out a process
+  already running as *you*: that process can read the token, exactly as it can
+  read `~/.claude` directly. See [SECURITY.md](SECURITY.md).
+- **This depends on Claude Code internals that are not a public API** —
+  transcript record shapes, `~/.claude/sessions/<pid>.json`. They can change in
+  any Claude Code release and this tool would need updating. That is the deal
+  with a tool like this; it is worth knowing before you rely on it.
+
+## Development
 
 **Do functional and click testing in Chrome, against `http://localhost:7777`.**
 The Electron window and the browser render the *same* page from the *same*
@@ -386,7 +484,20 @@ buried in the middle. That case is the reason the module exists: swap the
 whole-file read for head-only sampling and every other check in the file still
 passes.
 
-## The icon
+### Cutting a release
+**Cutting a release.** `.github/workflows/release.yml` builds both macOS
+architectures on one Apple Silicon runner and a Linux AppImage on its own, then
+attaches every installer to a GitHub Release:
+
+```bash
+npm version patch          # or edit package.json
+git push --follow-tags     # tag v* triggers the workflow
+```
+
+There is also a `workflow_dispatch` trigger, so a release can be re-cut without
+moving a tag.
+
+### The icon
 
 `npm run icon` regenerates `build/icon.png`, `build/icon.icns` and the DMG
 background from `scripts/icon-designs.mjs`, which holds every design that was
@@ -404,50 +515,6 @@ downscaled from the 1024 master: the stroke is a fraction of the icon size, so
 rendering at 16px gives a crisp two-pixel stroke where a downscale gives a grey
 smear — and 16px is what Finder's list view actually uses. That step needs
 `iconutil`, so it is skipped off macOS and the committed `.icns` is kept.
-
-## Where state lives
-
-Everything this tool owns is under `~/.claude-terminal/` — `state.json` (tags,
-priority, pins, snoozes, and the working set of open terminals),
-`index-cache.json`, and `logs/`. It **never writes to
-`~/.claude`**; that directory is read-only as far as this tool is concerned.
-
-If `state.json` exists but cannot be read, the server refuses to write over it
-and goes read-only for the session, saying so in the UI. A whole-file
-write-then-rename over a file you failed to load is the one way a tool like this
-silently destroys everything you hand-entered.
-
-## Notes
-
-- **Sessions already running elsewhere cannot be attached.** Resuming a live
-  session would put two clients on one transcript, so the UI blocks it and tells
-  you the pid instead.
-- **Spawned sessions get a cleaned environment.** Claude Code's own session
-  markers (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_MESSAGING_*`,
-  `CLAUDE_EFFORT`, …) are stripped before spawning. Inheriting them silently
-  disables transcript saving and leaks the parent's messaging channel. Because
-  the spawn goes through a login shell, anything you export from your own shell
-  config is still applied.
-- Indexing 1200+ transcripts across ~600MB takes well under a second. Files
-  under ~1.25MB are read whole; larger ones are sampled head+tail. Results are
-  cached by mtime+size, so a refresh costs single-digit milliseconds.
-- **The list order is frozen while your pointer is over it.** The ranking is
-  genuinely live — scores decay, sessions flip busy/idle, git state changes on
-  every save — so without this a row can move between seeing it and clicking it.
-  Contents still update; only positions hold still, and only while you're aiming.
-- **The local server is gated two ways.** It refuses non-loopback Hosts and any
-  Origin that is not its own, which stops a *browser*: WebSockets are exempt
-  from CORS, so any page you visit could otherwise have typed into a live
-  session. Headers alone stop nothing else, though — a non-browser client sets
-  them freely — so the API and the socket also require a token minted at
-  startup and written to `~/.claude-terminal/token` (mode 0600). That is what
-  keeps a second account on the machine out. It cannot keep out a process
-  already running as *you*: that process can read the token, exactly as it can
-  read `~/.claude` directly. See [SECURITY.md](SECURITY.md).
-- **This depends on Claude Code internals that are not a public API** —
-  transcript record shapes, `~/.claude/sessions/<pid>.json`. They can change in
-  any Claude Code release and this tool would need updating. That is the deal
-  with a tool like this; it is worth knowing before you rely on it.
 
 ## Prior art
 
