@@ -124,19 +124,52 @@ async function waitForDown(ms = 15_000): Promise<void> {
   throw new Error('port never freed');
 }
 
+/** The server of the current lifetime, so a failed run does not leave it up. */
+let running: ChildProcess | null = null;
+
 function startServer(): ChildProcess {
-  return spawn('npx', ['tsx', 'server/cli.ts'], {
+  running = spawn('npx', ['tsx', 'server/cli.ts'], {
     cwd: REPO,
     env: { ...process.env, HOME: FAKE_HOME, PORT: String(PORT) },
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Its own process group, so one signal reaches every layer — see
+    // signalServer().
+    detached: true,
   });
+  return running;
+}
+
+/**
+ * `npx tsx` puts an npm-exec wrapper and a shell between us and node, and on
+ * Linux neither forwards a signal: killing the pid we spawned kills the
+ * wrapper and leaves the real server holding the port, which is exactly what
+ * `waitForDown` then times out on. bin/claude-terminal documents the same
+ * hazard and works around it by resolving the listener pid; here the child is
+ * spawned detached, so signalling the group reaches the server itself and its
+ * SIGTERM handler still runs — the flush-on-quit this test is about.
+ */
+function signalServer(proc: ChildProcess, signal: NodeJS.Signals): void {
+  if (proc.pid === undefined) return;
+  try {
+    process.kill(-proc.pid, signal);
+  } catch {
+    proc.kill(signal); // group already gone
+  }
 }
 
 /** A clean quit, the way the app quits: SIGTERM into cli.ts's handler. */
 async function stopServer(proc: ChildProcess): Promise<void> {
-  proc.kill('SIGTERM');
+  signalServer(proc, 'SIGTERM');
   await waitForDown();
   await new Promise((r) => setTimeout(r, 400));
+  if (proc === running) running = null;
+}
+
+/** Last resort on the way out: never leave a detached server on the port. */
+function killServer(): void {
+  if (!running) return;
+  signalServer(running, 'SIGKILL');
+  running = null;
 }
 
 const api = {
@@ -275,5 +308,5 @@ const main = async () => {
 };
 
 main()
-  .then((f) => { killStubs(); fs.rmSync(ROOT, { recursive: true, force: true }); process.exit(f ? 1 : 0); })
-  .catch((e) => { killStubs(); console.error(e); console.error(`left ${ROOT} for inspection`); process.exit(1); });
+  .then((f) => { killServer(); killStubs(); fs.rmSync(ROOT, { recursive: true, force: true }); process.exit(f ? 1 : 0); })
+  .catch((e) => { killServer(); killStubs(); console.error(e); console.error(`left ${ROOT} for inspection`); process.exit(1); });
