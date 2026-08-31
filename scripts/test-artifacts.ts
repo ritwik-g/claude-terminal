@@ -279,10 +279,15 @@ const main = async () => {
   check('the big transcript really exceeds the sampled window',
     bigSize > 256 * 1024 + 1024 * 1024, `${Math.round(bigSize / 1024)}KB`);
 
+  // Detached so the whole npx wrapper chain is one process group: on Linux
+  // neither `npm exec` nor the shell it spawns forwards a signal, so killing
+  // the pid we spawned would leave the real server alive for the rest of the
+  // suite. See the same note in test-restore.ts.
   const proc = spawn('npx', ['tsx', 'server/cli.ts'], {
     cwd: REPO,
     env: { ...process.env, HOME: FAKE_HOME, PORT: String(PORT) },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
 
   try {
@@ -405,7 +410,12 @@ const main = async () => {
     check('review is never written into the tags a human owns',
       by(S.review)?.user.tags.length === 0, JSON.stringify(by(S.review)?.user.tags));
   } finally {
-    proc.kill('SIGTERM');
+    try {
+      if (proc.pid !== undefined) process.kill(-proc.pid, 'SIGTERM');
+    } catch {
+      proc.kill('SIGTERM'); // group already gone
+    }
+    await new Promise((r) => setTimeout(r, 400));
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
