@@ -1,6 +1,7 @@
 import type { Session, SessionShape, SessionState } from '../../server/types';
 
 export const STATE_COLOR: Record<SessionState, string> = {
+  blocked: 'var(--st-blocked)',
   needs_you: 'var(--st-needs)',
   working: 'var(--st-working)',
   crashed: 'var(--st-crashed)',
@@ -9,6 +10,7 @@ export const STATE_COLOR: Record<SessionState, string> = {
 };
 
 export const STATE_LABEL: Record<SessionState, string> = {
+  blocked: 'stopped on a question',
   needs_you: 'waiting on you',
   working: 'running',
   crashed: 'stopped mid tool-call',
@@ -53,7 +55,7 @@ export const BUCKET_LABEL: Record<Bucket, string> = {
 
 /** What each group actually means, for the help dialog. */
 export const BUCKET_HELP: Record<Bucket, string> = {
-  attention: 'Claude finished its turn and is waiting on you, or it stopped mid tool-call',
+  attention: 'Claude is stopped on a question it cannot pass, has finished its turn and is waiting on you, or stopped mid tool-call. Questions sort to the top \u2014 nothing in them can move until you answer',
   working: 'running right now',
   parked: 'idle, but with uncommitted changes or an open PR left behind',
   quiet: 'nothing pending',
@@ -70,7 +72,7 @@ export const BUCKET_COLOR: Record<Bucket, string> = {
 
 export function bucketOf(s: Session, now = Date.now()): Bucket {
   if (s.user.snoozedUntil && s.user.snoozedUntil > now) return 'snoozed';
-  if (s.state === 'needs_you' || s.state === 'crashed') return 'attention';
+  if (s.state === 'blocked' || s.state === 'needs_you' || s.state === 'crashed') return 'attention';
   if (s.state === 'working') return 'working';
   if (s.state === 'parked') return 'parked';
   return 'quiet';

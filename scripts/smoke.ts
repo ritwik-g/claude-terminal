@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { SESSION_SHAPES } from '../server/rank.js';
+
 const BASE = process.env.CT_BASE ?? 'http://127.0.0.1:7777';
 
 /**
@@ -65,7 +67,7 @@ const main = async () => {
   for (const s of sessions) {
     if (s.user.archived) { recount.archived++; continue; }
     if (s.user.snoozedUntil && s.user.snoozedUntil > now) { recount.snoozed++; continue; }
-    if (s.state === 'needs_you' || s.state === 'crashed') recount.attention++;
+    if (s.state === 'blocked' || s.state === 'needs_you' || s.state === 'crashed') recount.attention++;
     else if (s.state === 'working') recount.working++;
     else if (s.state === 'parked') recount.parked++;
     else recount.quiet++;
@@ -77,7 +79,10 @@ const main = async () => {
   check('no empty titles', sessions.every((s) => s.title?.length > 0));
   check('no future activity', sessions.every((s) => s.lastActivity <= Date.now() + 60_000));
   check('all cwds absolute', sessions.every((s) => s.cwd.startsWith('/')));
-  check('every session has a shape', sessions.every((s) => ['errand', 'task', 'thread'].includes(s.shape)));
+  // Derived from the type, not hand-listed: this assertion was written before
+  // 'review' existed and silently went red the day it was added, because a
+  // literal list cannot be checked against the union it is meant to cover.
+  check('every session has a shape', sessions.every((s) => SESSION_SHAPES.includes(s.shape)));
   check('sorted by score desc', sessions.every((s, i) => i === 0 || sessions[i - 1].score >= s.score));
   check('no internal cache fields leak', sessions.every((s) => !('_mtimeMs' in s) && !('_size' in s)));
   check('live sessions are never quiet', sessions.every((s) => !s.live || s.state !== 'quiet'));
@@ -89,7 +94,10 @@ const main = async () => {
   check('live sessions are detected', registryPids > 0,
     `${registryPids} live — if Claude Code is running, this must be > 0`);
   check('idle live sessions rank as needs_you',
-    sessions.filter((s) => s.live?.status === 'idle').every((s) => s.state === 'needs_you'));
+    sessions.filter((s) => s.live?.status === 'idle')
+      // ...unless the transcript shows it stopped ON a question, which is a
+      // sharper reading of the same session than 'idle' is.
+      .every((s) => s.state === 'needs_you' || s.state === 'blocked'));
 
   const id: string = sessions[0].id;
 

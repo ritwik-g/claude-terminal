@@ -15,6 +15,11 @@
   --accent:        #6ea8fe;
   --accent-dim:    #2b4a7d;
 
+  /* Deliberately NOT another red. 'blocked' shares the Needs-you group with
+     'crashed' (#f2686a), and two reds a shade apart is exactly where the one
+     distinction that matters gets lost — violet separates them at a glance,
+     and stays separable for red-green colour blindness. */
+  --st-blocked:    #a97bff;
   --st-needs:      #f0a83c;
   --st-working:    #48c98a;
   --st-crashed:    #f2686a;

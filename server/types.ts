@@ -1,4 +1,5 @@
 export type SessionState =
+  | 'blocked'     // stopped ON a question and cannot proceed until you answer
   | 'needs_you'   // Claude finished its turn and is waiting on you
   | 'working'     // actively running right now
   | 'crashed'     // process gone, but it died mid tool-call
@@ -20,7 +21,21 @@ export type SessionShape = 'errand' | 'task' | 'thread' | 'review';
 
 export interface LiveInfo {
   pid: number;
-  status: 'busy' | 'idle';
+  /**
+   * Claude Code's own word for what the process is doing. 'waiting' is a THIRD
+   * state, not a flavour of idle: idle means the turn ended and the prompt is
+   * yours, waiting means Claude is stopped on a dialog and cannot continue at
+   * all. 'unknown' is a registry entry with no status yet — a session that has
+   * only just launched — which must not be read as either.
+   */
+  status: 'busy' | 'idle' | 'waiting' | 'unknown';
+  /**
+   * Why it is waiting, verbatim from the registry: 'permission prompt' (the
+   * default for any dialog kind Claude Code does not label), 'dialog open',
+   * 'input needed', 'sandbox request', 'goal proposal'. Only ever a hint —
+   * the labels are coarse and an AskUserQuestion reports the default.
+   */
+  waitingFor?: string;
   name: string;
   statusUpdatedAt: number;
   startedAt: number;
@@ -80,6 +95,15 @@ export interface TailInfo {
   lastUserWasToolResult: boolean;
   /** ended while a tool call was still outstanding */
   endedMidTool: boolean;
+  /**
+   * Names of the tool calls left outstanding by that last turn. Empty unless
+   * `endedMidTool`. This is how a dead session that stopped ON a question is
+   * told apart from one that stopped mid-Bash: same dangling tool_use, very
+   * different thing to do about it.
+   */
+  pendingTools: string[];
+  /** The first question of a pending AskUserQuestion, so the row can say what was asked. */
+  pendingQuestion: string | null;
 }
 
 export interface GitInfo {

@@ -24,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 6;
+const CACHE_VERSION = 7;
 
 export interface ScannedSession {
   id: string;
@@ -280,6 +280,8 @@ function extract(
       lastRole: null,
       lastUserWasToolResult: false,
       endedMidTool: false,
+      pendingTools: [],
+      pendingQuestion: null,
     },
   };
 
@@ -500,6 +502,8 @@ function readTail(lines: string[]): TailInfo {
     lastRole: null,
     lastUserWasToolResult: false,
     endedMidTool: false,
+    pendingTools: [],
+    pendingQuestion: null,
   };
 
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -512,6 +516,14 @@ function readTail(lines: string[]): TailInfo {
       info.lastRole = 'assistant';
       info.lastStopReason = rec.message?.stop_reason ?? null;
       info.endedMidTool = info.lastStopReason === 'tool_use';
+      if (info.endedMidTool) {
+        const blocks = Array.isArray(rec.message?.content) ? rec.message.content : [];
+        for (const b of blocks) {
+          if (b?.type !== 'tool_use' || typeof b.name !== 'string') continue;
+          info.pendingTools.push(b.name);
+          if (!info.pendingQuestion) info.pendingQuestion = firstQuestion(b.input);
+        }
+      }
       return info;
     }
 
@@ -525,6 +537,19 @@ function readTail(lines: string[]): TailInfo {
     return info;
   }
   return info;
+}
+
+/**
+ * The question text out of an AskUserQuestion payload. Only the first: a row
+ * has one line to spend, and the point is to say what is being asked, not to
+ * reproduce the dialog.
+ */
+function firstQuestion(input: any): string | null {
+  const q = input?.questions?.[0]?.question;
+  if (typeof q !== 'string') return null;
+  const t = q.replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  return t.length > 160 ? `${t.slice(0, 159)}\u2026` : t;
 }
 
 /** A message carrying tool output is the machine talking, not the person. */

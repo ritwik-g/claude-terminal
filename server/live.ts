@@ -32,7 +32,8 @@ export function readLiveSessions(): Map<string, LiveInfo> {
 
       out.set(d.sessionId, {
         pid: d.pid,
-        status: d.status === 'busy' ? 'busy' : 'idle',
+        status: readStatus(d.status),
+        waitingFor: typeof d.waitingFor === 'string' ? d.waitingFor : undefined,
         name: d.name ?? '',
         statusUpdatedAt: d.statusUpdatedAt ?? d.updatedAt ?? 0,
         startedAt: d.startedAt ?? 0,
@@ -43,6 +44,23 @@ export function readLiveSessions(): Map<string, LiveInfo> {
     }
   }
   return out;
+}
+
+/**
+ * Claude Code reports three statuses, and collapsing the third into 'idle'
+ * loses the one that matters most: 'waiting' means it is stopped on a dialog
+ * — a permission prompt, an AskUserQuestion, a plan to approve — and will not
+ * move until you answer. 'idle' merely means the turn ended.
+ *
+ * An entry with no status at all is a session that has only just registered
+ * (the sdk-cli entrypoint writes its file before its first status). Calling
+ * that 'idle' put brand-new sessions in the attention bucket claiming to be
+ * waiting on you, so it gets its own value and the caller falls back to the
+ * transcript instead of guessing.
+ */
+function readStatus(raw: unknown): LiveInfo['status'] {
+  if (raw === 'busy' || raw === 'idle' || raw === 'waiting') return raw;
+  return 'unknown';
 }
 
 /** signal 0 tests for existence without touching the process. */

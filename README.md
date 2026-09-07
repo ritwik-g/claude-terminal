@@ -24,6 +24,7 @@ under `~/.claude/` (and never writes there), keeping its own state in
 | | |
 |---|---|
 | **Ranked by attention, not recency** | Sessions group into *Needs you / Working / Parked / Quiet / Snoozed*. Every row carries a `reasons` trail, so the ranking is always inspectable — never a black box. |
+| **Questions surface first** | A session stopped on a question — a permission prompt, a multiple-choice ask, a plan waiting for approval — sorts to the top of *Needs you* and says what was asked. Nothing in it can move until you answer. |
 | **Session types, derived** | `✓ review`, `⚡ errand`, `◆ task`, `∞ thread` — read off the transcript and filterable. No tagging required. |
 | **Terminals in the same window** | Real PTYs, native scrolling, a real scrollbar, and search across the whole buffer. No tmux. |
 | **Reviews link what they review** | A session opened with a review command links **every** PR it covers, not just the first. |
@@ -197,12 +198,21 @@ The signals are derived, so the list stays useful with no upkeep:
 
 | Signal | Where it comes from |
 |---|---|
+| Stopped on a question | Claude Code's own `waiting` status (with the `waitingFor` label it reports), or an unanswered `AskUserQuestion` / `ExitPlanMode` left in the transcript |
 | Waiting on you | live process is `idle`, or the last assistant turn ended with `stop_reason: end_turn` |
 | Working now | Claude Code's own `busy` status |
-| Stopped mid tool-call | last transcript entry is an unresolved `tool_use` |
+| Stopped mid tool-call | last transcript entry is an unresolved `tool_use` that asked you nothing |
 | Work left behind | uncommitted files / unpushed commits **attributable to this session** |
 | Has a PR | `pr-link` entries in the transcript |
 | Is a review | a review command this session ran itself, not one inherited from a branch parent |
+
+The two question signals are deliberately independent. The live registry is the
+only thing that knows about a permission prompt, which leaves no transcript
+trace at all; the transcript is the only thing that still remembers a question
+you walked away from weeks ago, long after the process is gone. Before this
+existed, that second case was reported as *stopped mid tool-call* — an
+abandoned question does leave a dangling `tool_use`, so it read as a crash,
+which is the opposite of what happened.
 
 </details>
 
@@ -210,9 +220,10 @@ The signals are derived, so the list stays useful with no upkeep:
 <summary><b>Errands vs explorations, derived</b></summary>
 
 Every session is classified by shape —
-`⚡ errand` (short, single-purpose: a PR review, a quick question), `◆ task`, or
-`∞ thread` (a long-running exploration carried across days) — and you can filter
-by it. The thresholds come from the real distribution rather than intuition:
+`⚡ errand` (short, single-purpose: a quick question or one-off fix), `◆ task`,
+`∞ thread` (a long-running exploration carried across days), or `✓ review`
+(opened with a review command, which overrides the others: what a session is
+*for* outlasts how long it happened to run) — and you can filter by it. The thresholds come from the real distribution rather than intuition:
 across 134 sessions, span is strongly bimodal at p25 = 28 minutes and
 p75 = 4.75 days.
 
