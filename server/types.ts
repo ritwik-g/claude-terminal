@@ -171,6 +171,25 @@ export interface WorkingSetEntry {
   cwd: string;
 }
 
+/**
+ * A session that stopped working, noticed by completions.ts.
+ *
+ * `kind` is what it stopped INTO, and the three are worth telling apart — they
+ * ask different things of you:
+ *   'idle'    the turn ended; the prompt is yours whenever you want it
+ *   'waiting' it is stopped ON a dialog and cannot move until you answer
+ *   'exited'  the process is gone; whether that was clean or a crash needs the
+ *             transcript, which this path deliberately does not read
+ *
+ * `at` is when it stopped, not when the event fired — those differ by the hold
+ * window — so a marker keyed on it survives the debounce without shifting.
+ */
+export interface CompletionEvent {
+  sessionId: string;
+  at: number;
+  kind: 'idle' | 'waiting' | 'exited';
+}
+
 /** A working-set entry we have checked is still restorable, ready to offer. */
 export interface RestoreCandidate {
   sessionId: string;

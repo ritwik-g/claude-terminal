@@ -1,8 +1,11 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, BrowserWindow, dialog, shell, Menu, type MenuItemConstructorOptions } from 'electron';
+import {
+  app, BrowserWindow, dialog, shell, Menu, Notification,
+  type MenuItemConstructorOptions,
+} from 'electron';
 
-import { startServer, type ServerHandle } from '../server/index.js';
+import { startServer, type CompletionNotice, type ServerHandle } from '../server/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,6 +22,54 @@ const STATIC_DIR = path.join(__dirname, '..', 'dist');
 let handle: ServerHandle | null = null;
 let win: BrowserWindow | null = null;
 let quitting = false;
+let unsubscribeCompletions: (() => void) | null = null;
+/**
+ * Completions you have not looked at yet, as a dock badge.
+ *
+ * Counted here rather than read from the renderer because the two answer
+ * different questions: the in-app markers are per session and cleared by
+ * opening one, this is "is there anything at all" and is cleared by looking at
+ * the app. Focus is the honest signal for that, and it is the one the main
+ * process actually has.
+ */
+let unseen = 0;
+
+/** Off with CT_NOTIFY=0, for anyone who wants the badge without the popup. */
+const NOTIFY = process.env.CT_NOTIFY !== '0';
+
+const COMPLETION_BODY: Record<CompletionNotice['kind'], string> = {
+  idle: 'Finished — waiting on you',
+  waiting: 'Stopped on a question it cannot pass',
+  exited: 'Stopped running',
+};
+
+function showUnseen(n: number): void {
+  unseen = Math.max(0, n);
+  // macOS has a real badge; elsewhere setOverlayIcon needs a NativeImage we do
+  // not have, so flash the taskbar entry instead of shipping an asset for it.
+  if (process.platform === 'darwin') app.dock?.setBadge(unseen ? String(unseen) : '');
+  else if (win && !win.isDestroyed()) win.flashFrame(unseen > 0);
+}
+
+function onCompletion(e: CompletionNotice): void {
+  // Already looking at it. A popup for something on screen is the fastest way
+  // to make someone turn notifications off.
+  if (win && !win.isDestroyed() && win.isFocused()) return;
+
+  showUnseen(unseen + 1);
+
+  if (!NOTIFY || !Notification.isSupported()) return;
+  const n = new Notification({ title: e.title, body: COMPLETION_BODY[e.kind] });
+  // Focusing the window is all this does. Selecting the session that finished
+  // would need a renderer channel, and there is no preload to carry one.
+  n.on('click', () => {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+  n.show();
+}
 
 /**
  * A second instance would fail on EADDRINUSE and, worse, could fight over the
@@ -51,6 +102,9 @@ async function createWindow(): Promise<void> {
     return;
   }
 
+  // Once per server, not per window: 'activate' can call this again.
+  if (!unsubscribeCompletions) unsubscribeCompletions = handle.onCompletion(onCompletion);
+
   win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -72,6 +126,10 @@ async function createWindow(): Promise<void> {
 
   win.once('ready-to-show', () => win?.show());
   win.on('closed', () => { win = null; });
+  // Looking at the app is the acknowledgement. The per-session markers in the
+  // list survive this — they are cleared by opening the session, not by
+  // glancing at the window.
+  win.on('focus', () => showUnseen(0));
 
   // Anything that is not our own origin belongs in the user's real browser —
   // a PR link should not navigate the app away from itself.
@@ -203,6 +261,8 @@ app.on('before-quit', (e) => {
 
 async function shutdown(): Promise<void> {
   try {
+    unsubscribeCompletions?.();
+    unsubscribeCompletions = null;
     await handle?.close();
   } catch (err) {
     console.error('[claude-terminal] shutdown error:', err);

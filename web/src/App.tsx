@@ -50,6 +50,9 @@ const SHORTCUTS: { keys: string; what: string }[] = [
  */
 const isActive = (s: Session): boolean => !!s.live || s.attached;
 
+/** Identity of one completion marker: the session AND when it stopped. */
+const doneKey = (c: { sessionId: string; at: number }): string => `${c.sessionId}:${c.at}`;
+
 const SIDEBAR_DEFAULT = 380;
 const SIDEBAR_MIN = 260;
 const SIDEBAR_MAX = 640;
@@ -85,6 +88,20 @@ export function App() {
     () => { try { return localStorage.getItem('ct.activeOnly') !== '0'; } catch { return true; } },
   );
   const [now, setNow] = useState(Date.now());
+  /**
+   * Completions already shown to you, as `<sessionId>:<at>` keys.
+   *
+   * Persisted, because a window reload is not you having seen anything — an
+   * in-memory set resurrects every marker the moment the renderer restarts.
+   * Keyed on the stop time as well as the id so a session that finishes twice
+   * marks twice, rather than the second one arriving pre-dismissed.
+   */
+  const [seenDone, setSeenDone] = useState<Set<string>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('ct.seenDone') ?? '[]');
+      return new Set(Array.isArray(raw) ? raw.filter((k) => typeof k === 'string') : []);
+    } catch { return new Set(); }
+  });
   const [busy, setBusy] = useState(false);
   const [newTermId, setNewTermId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
@@ -98,6 +115,9 @@ export function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const tagRef = useRef<HTMLInputElement>(null);
   const seqRef = useRef(0);
+  // Read by `select`, which must not re-create on every poll — it is a
+  // dependency of the keydown handler, which would then re-subscribe endlessly.
+  const payloadRef = useRef<SessionsPayload | null>(null);
   const orderRef = useRef<string[]>([]);
   // Read inside the keydown handler, which must not re-subscribe on every
   // selection change just to know whether a terminal is mounted.
@@ -153,6 +173,7 @@ export function App() {
       // (which showed up as the terminal flashing away right after opening it).
       if (seq !== seqRef.current) return;
       setPayload(p);
+      payloadRef.current = p;
       setError(null);
     } catch (e: any) {
       if (seq !== seqRef.current) return;
@@ -325,6 +346,22 @@ export function App() {
     return c;
   }, [baseVisible, now]);
   const activeCount = baseVisible.filter(isActive).length;
+
+  /** Sessions that finished while you were not looking, and have not been opened since. */
+  const unseenDone = useMemo(() => {
+    const out = new Set<string>();
+    for (const c of payload?.completions ?? []) {
+      if (!seenDone.has(doneKey(c))) out.add(c.sessionId);
+    }
+    return out;
+  }, [payload?.completions, seenDone]);
+
+  useEffect(() => {
+    // Bounded by the server's own ring, so this cannot grow without limit —
+    // but trim anyway rather than trusting a payload to stay small.
+    try { localStorage.setItem('ct.seenDone', JSON.stringify([...seenDone].slice(-200))); }
+    catch { /* private mode */ }
+  }, [seenDone]);
 
   /**
    * Freeze the DISPLAY order while the pointer is over the list.
@@ -582,6 +619,16 @@ export function App() {
     setSelectedId(s.id);
     setCursorId(s.id);
     setExitedFor((prev) => (prev === s.id ? prev : null));
+    // Opening it IS reading it. Marks every outstanding completion for this
+    // session, not just the newest, so a row that finished twice clears once.
+    setSeenDone((prev) => {
+      const mine = (payloadRef.current?.completions ?? [])
+        .filter((c) => c.sessionId === s.id && !prev.has(doneKey(c)));
+      if (!mine.length) return prev;
+      const next = new Set(prev);
+      for (const c of mine) next.add(doneKey(c));
+      return next;
+    });
   }, []);
 
   /**
@@ -785,6 +832,13 @@ export function App() {
         <div className="counts">
           {BUCKET_ORDER.map((b) => {
             const n = bucketCounts[b] ?? 0;
+            // Every completion lands a session in one of these buckets, so
+            // count them where they landed rather than assuming 'attention':
+            // a session that finished and exited is parked or quiet, and a
+            // bubble on the wrong chip sends you looking in the wrong place.
+            const fresh = baseVisible.filter(
+              (s) => unseenDone.has(s.id) && bucketOf(s, now) === b,
+            ).length;
             return (
               <button
                 key={b}
@@ -794,10 +848,15 @@ export function App() {
                   setBucketFilter(next);
                   if (next) expandBucket(next);
                 }}
-                title={`Show only ${BUCKET_LABEL[b]}`}
+                title={
+                  fresh
+                    ? `${fresh} finished since you last looked — show only ${BUCKET_LABEL[b]}`
+                    : `Show only ${BUCKET_LABEL[b]}`
+                }
               >
                 <span className="dot" style={{ background: BUCKET_COLOR[b] }} />
                 {BUCKET_LABEL[b]} {n}
+                {fresh > 0 && <span className="bubble">{fresh}</span>}
               </button>
             );
           })}
@@ -1014,6 +1073,7 @@ export function App() {
                       now={now}
                       selected={s.id === selectedId}
                       atCursor={flat[cursor]?.id === s.id}
+                      unseenDone={unseenDone.has(s.id)}
                       onClick={() => select(s)}
                     />
                   ))}

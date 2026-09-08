@@ -1,4 +1,4 @@
-import type { Artifact, RestoreCandidate, Session, UserState } from '../../server/types';
+import type { Artifact, CompletionEvent, RestoreCandidate, Session, UserState } from '../../server/types';
 import { authHeaders } from './token';
 
 export interface SessionsPayload {
@@ -9,6 +9,7 @@ export interface SessionsPayload {
   scanMs: number;
   storeReadOnly: boolean;
   restore: RestoreCandidate[];
+  completions: CompletionEvent[];
 }
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {

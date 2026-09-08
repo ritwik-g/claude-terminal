@@ -5,7 +5,8 @@ import { getUserState, allTags, isReadOnly } from './store.js';
 import { score, bucketOf, classifyShape } from './rank.js';
 import { listTerms } from './pty.js';
 import { pendingRestore, dropPending, cwdUsable } from './restore.js';
-import type { RestoreCandidate, Session } from './types.js';
+import { recentCompletions } from './completions.js';
+import type { CompletionEvent, RestoreCandidate, Session } from './types.js';
 
 export interface SessionsPayload {
   sessions: Session[];
@@ -17,6 +18,12 @@ export interface SessionsPayload {
   storeReadOnly: boolean;
   /** Terminals open when the app last stopped, still reopenable. */
   restore: RestoreCandidate[];
+  /**
+   * Sessions that recently stopped working. Carried on the poll rather than
+   * pushed, because the client only needs them when it is actually on screen
+   * — the OS-level notification is what covers the case where it is not.
+   */
+  completions: CompletionEvent[];
 }
 
 let inflight: Promise<SessionsPayload> | null = null;
@@ -167,6 +174,7 @@ async function build(): Promise<SessionsPayload> {
     scanMs: Date.now() - t0,
     storeReadOnly: isReadOnly(),
     restore,
+    completions: recentCompletions(),
   };
   last = payload;
   lastAt = Date.now();
@@ -184,6 +192,16 @@ export function initSessions(): void {
  */
 export function fileForSession(id: string): string | null {
   return last?.sessions.find((s) => s.id === id)?.file ?? null;
+}
+
+/**
+ * The display title for a session id, for callers that have only the id — the
+ * completion notification, which is raised from the live registry and never
+ * touches the session list. Null when we have not scanned it yet, which the
+ * caller must handle rather than printing an empty notification.
+ */
+export function titleForSession(id: string): string | null {
+  return last?.sessions.find((s) => s.id === id)?.title ?? null;
 }
 
 /**

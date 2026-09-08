@@ -7,10 +7,14 @@ interface Props {
   selected: boolean;
   atCursor: boolean;
   now: number;
+  /** Finished while you were away and not opened since — see App's seenDone. */
+  unseenDone: boolean;
   onClick: () => void;
 }
 
-export const SessionRow = React.memo(function SessionRow({ s, selected, atCursor, now, onClick }: Props) {
+export const SessionRow = React.memo(function SessionRow({
+  s, selected, atCursor, now, unseenDone, onClick,
+}: Props) {
   const dotColor = STATE_COLOR[s.state];
   // The primary line under the title is the single most useful fact we have:
   // what you last asked, else the running recap, else where it lives.
@@ -65,6 +69,21 @@ export const SessionRow = React.memo(function SessionRow({ s, selected, atCursor
       <div className="row-meta">
         <span className="row-age">{relTime(s.lastActivity, now)}</span>
         <div className="chips">
+          {/* Not a chip, and deliberately wordless. Every other chip here is a
+              standing FACT about the session, and a word like 'done' among them
+              reads as one — as though the work had been completed rather than
+              merely stopped. A pulsing dot says "look at me" and nothing else,
+              which is all this actually knows. */}
+          {unseenDone && (
+            <>
+              <span
+                className="new-dot"
+                title="Stopped since you last looked — open it to clear"
+                aria-hidden
+              />
+              <span className="sr-only">stopped since you last looked</span>
+            </>
+          )}
           {s.user.pinned && <span className="chip pin">pin</span>}
           {s.user.priority && <span className={`chip pri ${s.user.priority}`}>{s.user.priority.toUpperCase()}</span>}
           {s.attached && <span className="chip live">term</span>}

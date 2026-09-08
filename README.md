@@ -31,6 +31,7 @@ under `~/.claude/` (and never writes there), keeping its own state in
 | **Artifacts, front and centre** | What a session *published* leads its detail pane and opens on claude.ai in a click. Revisions collapse into one row with a version count. |
 | **Search that reads the conversation** | Titles, ids, tags, branches, cwds, PR numbers — **and the messages themselves**, so a phrase you remember typing finds the session. |
 | **Branch and rename from the app** | Runs Claude Code's own `/branch` and `/rename` in the live session, so it stays the source of truth for its own title and lineage. |
+| **Tells you when something finished** | A session that stops working raises a desktop notification and a dock badge, and puts a pulsing dot on the row until you open it. Debounced, so a gap between turns is not reported as a finish. |
 | **Your working set survives a quit** | The terminals you had open are offered back on the next launch, in one click. |
 | **Active only, by default** | Opens showing just what's running — one click to see everything, and searching overrides it, so nothing is ever unreachable. |
 
@@ -405,6 +406,10 @@ priority, pins, snoozes, and the working set of open terminals),
 `index-cache.json`, and `logs/`. It **never writes to
 `~/.claude`**; that directory is read-only as far as this tool is concerned.
 
+The browser keeps a little of its own: `ct.selected`, `ct.activeOnly`,
+`ct.sidebarW`, `ct.sidebarOpen`, and `ct.seenDone` — which completion markers
+you have already looked at, so a window reload does not resurrect them.
+
 If `state.json` exists but cannot be read, the server refuses to write over it
 and goes read-only for the session, saying so in the UI. A whole-file
 write-then-rename over a file you failed to load is the one way a tool like this
@@ -412,6 +417,15 @@ silently destroys everything you hand-entered.
 
 ## Good to know
 
+- **Completion notices are debounced, and detected server-side.** A session has
+  to stay stopped for `HOLD_MS` (5s, in `server/completions.ts`) before it
+  counts as finished — Claude Code reports `idle` the moment a turn ends, and
+  firing on that edge announces every gap between turns. Detection runs on the
+  server's own 2s tick rather than in the page, because a hidden window's
+  timers are throttled to about once a minute, which is exactly when a
+  notification is worth having. Set `CT_NOTIFY=0` for the badge without the
+  popup. The desktop notification is suppressed while the window is focused;
+  the dot on the row is not, and clears when you open the session.
 - **Sessions already running elsewhere cannot be attached.** Resuming a live
   session would put two clients on one transcript, so the UI blocks it and tells
   you the pid instead.

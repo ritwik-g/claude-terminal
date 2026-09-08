@@ -186,6 +186,20 @@ input  { font-family: inherit; font-size: inherit; }
 }
 .count-chip.on { border-color: var(--border-strong); color: var(--fg); background: var(--bg-active); }
 .count-chip .dot { width: 6px; height: 6px; border-radius: 50%; }
+/* Filled, unlike everything else up here, because it is the only element in
+   the bar reporting a CHANGE rather than a standing count. */
+.count-chip .bubble {
+  margin-left: 1px;
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--st-needs);
+  color: var(--bg);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+}
 
 .scan-meta { color: var(--fg-dim); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 @media (max-width: 1080px) { .scan-meta { display: none; } }
@@ -391,6 +405,22 @@ body.resizing .term-wrap { pointer-events: none; }
 .chip.pin  { color: var(--st-needs); border-color: color-mix(in srgb, var(--st-needs) 42%, transparent); }
 .chip.tag  { color: var(--fg-muted); }
 .chip.live { color: var(--st-working); border-color: color-mix(in srgb, var(--st-working) 42%, transparent); }
+/* The unseen-completion marker. A halo rather than a bare dot, so it does not
+   read as a second state dot next to the one on the left of the row — that one
+   says what the session IS, this one says something changed. */
+.new-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex: none;
+  align-self: center;
+  /* Ring-inside-halo, so it is not mistaken for the state dot on the left of
+     the row at a glance — that one is flat, this one has structure. */
+  background: var(--st-needs);
+  border: 1.5px solid var(--bg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--st-needs) 45%, transparent);
+  margin-right: 2px;
+  animation: pulse 1.6s ease-in-out infinite;
+}
 
 /* ------------------------------------------------------------------ main */
 
@@ -595,6 +625,9 @@ kbd {
 
 @media (prefers-reduced-motion: reduce) {
   .row-dot.pulse { animation: none; }
+  /* The halo carries it without the motion — the marker still reads, it just
+     stops moving. Dropping the whole element here would hide the signal. */
+  .new-dot { animation: none; }
 }
 
 /* ---------------------------------------------------------------- artifacts */

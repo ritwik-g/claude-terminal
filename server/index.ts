@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 
-import { initSessions, getSessions, fileForSession } from './sessions.js';
+import { initSessions, getSessions, fileForSession, titleForSession } from './sessions.js';
+import { tickCompletions, completionEvents } from './completions.js';
 import { readArtifacts } from './artifacts.js';
 import { saveCache, searchIds } from './scan.js';
 import { loadStore, setUserState, flushStore, isSafeKey, hasUserState, isReadOnly } from './store.js';
@@ -20,7 +21,7 @@ import {
   initRestore, captureWorkingSet, captureAndFreeze, clearRestore,
 } from './restore.js';
 import { APP_DIR, TOKEN_FILE, FILE_MODE, ensurePrivateDir, repairPrivateModes } from './paths.js';
-import type { Priority, UserState } from './types.js';
+import type { CompletionEvent, Priority, UserState } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -559,6 +560,11 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   console.error('[claude-terminal] server error:', err);
 });
 
+/** A completion, with the title resolved — what a notification needs to say. */
+export interface CompletionNotice extends CompletionEvent {
+  title: string;
+}
+
 /** What a caller gets back so it can stop us and reason about live work. */
 export interface ServerHandle {
   url: string;
@@ -568,6 +574,14 @@ export interface ServerHandle {
   token: string;
   /** Terminals still running — quitting will kill these. */
   liveTerminalCount(): number;
+  /**
+   * Called when a session stops working. Returns an unsubscribe function.
+   *
+   * The title is resolved here rather than in completions.ts, which knows only
+   * ids: having the watcher reach into the session list would make the two
+   * modules import each other.
+   */
+  onCompletion(fn: (e: CompletionNotice) => void): () => void;
   close(): Promise<void>;
 }
 
@@ -614,6 +628,10 @@ export async function startServer(opts: {
     // fresh session finally learning its id — in one place. The store ignores
     // an unchanged set, so this is free when nothing has happened.
     captureWorkingSet();
+    // Must run on OUR clock, not the client's. A hidden window's timers are
+    // throttled to about once a minute, which is precisely when noticing that
+    // a session finished is worth something. See completions.ts.
+    tickCompletions();
   }, 2000);
   houseKeeping.unref();
 
@@ -639,11 +657,24 @@ export async function startServer(opts: {
     port,
     token: AUTH_TOKEN,
     liveTerminalCount: () => listTerms().filter((t) => !t.exited).length,
+    onCompletion(fn) {
+      const handler = (e: CompletionEvent) => {
+        // A session that finished before its first scan has no title yet.
+        // The short id is what the UI shows for it anyway, so it is a real
+        // fallback rather than a placeholder.
+        fn({ ...e, title: titleForSession(e.sessionId) ?? e.sessionId.slice(0, 8) });
+      };
+      completionEvents.on('completed', handler);
+      return () => { completionEvents.off('completed', handler); };
+    },
     close() {
       // Idempotent: quit can be triggered from the menu, the dock and a signal.
       if (closing) return closing;
       closing = (async () => {
         if (houseKeeping) { clearInterval(houseKeeping); houseKeeping = null; }
+        // A subscriber outliving the server would hold a closure over a dead
+        // handle; nothing can emit after the tick stops anyway.
+        completionEvents.removeAllListeners();
         // Persist before killing anything, so a quit never costs tag edits —
         // and record the working set before shutdownAll() empties it.
         captureAndFreeze();
