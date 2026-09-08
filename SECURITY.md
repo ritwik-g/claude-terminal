@@ -14,12 +14,21 @@ within a week. There is no bounty.
 Understanding the trust model makes it easier to judge whether something is a
 bug or the intended design:
 
-- It runs **entirely on your machine**. It makes no outbound network requests —
-  no telemetry, no analytics, no update check, no error reporting.
+- It runs **entirely on your machine**. It makes no outbound network requests of
+  its own — no telemetry, no analytics, no update check, no error reporting.
 - It **reads** `~/.claude/` — your Claude Code transcripts and the live session
-  registry. That is its whole input, and transcripts contain your real work.
+  registry. That is its whole input, and transcripts contain your real work. It
+  also reads `~/.claude.json`, Claude Code's config file, for the cached usage
+  numbers shown in the header.
 - It **writes** to `~/.claude-terminal/` — ranking state, a scan cache, and the
   scrollback of terminals it started.
+- To refresh the usage figure it **starts a throwaway `claude` session** — in an
+  empty directory in your temp dir, never a project of yours — sends `/usage`,
+  and reads the result out of Claude Code's config. That session talks to
+  Anthropic, exactly as running `/usage` yourself does; this app still sends
+  nothing anywhere. It runs at most every 10 minutes and only while the window
+  is on screen. It submits no prompt, so it costs no tokens, runs no tool, and
+  leaves no transcript.
 - It **binds a local HTTP server** on `127.0.0.1` and **spawns PTYs** running
   `claude`. The Electron window is a client of that server.
 
@@ -37,7 +46,9 @@ These are documented rather than fixed, so you can decide if they matter to you:
   against the published `SHA256SUMS` and the build provenance attestation, or
   build from source — the README explains both.
 - **It depends on undocumented Claude Code internals** (transcript record
-  shapes, `~/.claude/sessions/<pid>.json`). Those can change without notice.
+  shapes, `~/.claude/sessions/<pid>.json`, the cached usage payload in
+  `~/.claude.json`). Those can change without notice — `npm run probe:usage`
+  checks the usage path in isolation when it looks like it has.
 
 ## Scope
 

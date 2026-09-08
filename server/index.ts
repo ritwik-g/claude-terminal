@@ -12,6 +12,7 @@ import { readArtifacts } from './artifacts.js';
 import { saveCache, searchIds } from './scan.js';
 import { loadStore, setUserState, flushStore, isSafeKey, hasUserState, isReadOnly } from './store.js';
 import { readLiveSessions } from './live.js';
+import { readUsage, refreshUsage, refreshInFlight, needsRefresh } from './usage.js';
 import {
   startTerm, writeTerm, resizeTerm, killTerm, disposeTerm,
   readScrollback, listTerms, getTerm, ptyEvents, shutdownAll,
@@ -144,6 +145,30 @@ app.get('/api/search', (req, res) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, pid: process.pid, uptime: process.uptime(), storeReadOnly: isReadOnly() });
+});
+
+/**
+ * The account-wide usage windows, read straight from Claude Code's own cache.
+ * Free and local: no process is started and nothing leaves the machine, so the
+ * front end can poll this as often as it likes.
+ */
+app.get('/api/usage', (_req, res) => {
+  const usage = readUsage();
+  res.json({ usage, refreshing: refreshInFlight(), refreshable: needsRefresh(usage) });
+});
+
+/**
+ * Bring the numbers up to date, which means starting a throwaway Claude Code
+ * session — see usage.ts for why nothing cheaper works. Always answers with a
+ * snapshot: on any failure that is the old one, which the client shows with its
+ * age rather than pretending it is current.
+ */
+app.post('/api/usage/refresh', async (_req, res) => {
+  try {
+    res.json({ usage: await refreshUsage(), refreshing: false });
+  } catch (err: any) {
+    res.status(500).json({ error: String(err?.message ?? err) });
+  }
 });
 
 app.get('/api/sessions', async (req, res) => {

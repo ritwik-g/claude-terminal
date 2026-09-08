@@ -1,5 +1,12 @@
 import type { Artifact, CompletionEvent, RestoreCandidate, Session, UserState } from '../../server/types';
+import type { UsageSnapshot } from '../../server/usage';
 import { authHeaders } from './token';
+
+export interface UsagePayload {
+  usage: UsageSnapshot | null;
+  refreshing: boolean;
+  refreshable?: boolean;
+}
 
 export interface SessionsPayload {
   sessions: Session[];
@@ -51,6 +58,12 @@ export const api = {
     json<{ ids: string[]; q: string }>(`/api/search?q=${encodeURIComponent(q)}`),
 
   clearRestore: () => json<{ ok: boolean }>('/api/restore', { method: 'DELETE' }),
+
+  /** Cached usage windows. Cheap — reads a file, starts nothing. */
+  usage: () => json<UsagePayload>('/api/usage'),
+
+  /** Starts a throwaway Claude Code session to bring the numbers up to date. */
+  refreshUsage: () => json<UsagePayload>('/api/usage/refresh', { method: 'POST' }),
 
   killTerm: (id: string, hard = false) =>
     json<{ ok: boolean }>(`/api/terms/${encodeURIComponent(id)}${hard ? '?hard=1' : ''}`, {

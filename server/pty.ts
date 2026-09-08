@@ -67,7 +67,7 @@ export function isValidTermId(id: unknown): id is string {
  * Stripping is safe because we spawn through a login shell (`-l`), so anything
  * the user genuinely exports from their own shell config is re-applied.
  */
-function cleanEnv(): Record<string, string> {
+export function cleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
 
   // Start from the user's real login-shell environment when we can get it.
@@ -118,7 +118,7 @@ function ensurePath(current: string): string {
   return parts.join(':');
 }
 
-function shell(): string {
+export function loginShell(): string {
   return process.env.SHELL || '/bin/zsh';
 }
 
@@ -204,7 +204,7 @@ export function startTerm(opts: {
   const rows = opts.rows ?? 32;
   const cwd = fs.existsSync(opts.cwd) ? opts.cwd : os.homedir();
 
-  const proc = nodePty.spawn(shell(), ['-l', '-c', commandFor(opts.sessionId, opts.extraArgs)], {
+  const proc = nodePty.spawn(loginShell(), ['-l', '-c', commandFor(opts.sessionId, opts.extraArgs)], {
     name: 'xterm-256color',
     cols,
     rows,

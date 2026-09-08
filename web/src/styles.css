@@ -201,6 +201,42 @@ input  { font-family: inherit; font-size: inherit; }
   text-align: center;
 }
 
+/* The account-wide 5-hour window. Sits with the buttons rather than the count
+   chips: those filter the list, this one does not — clicking it refreshes. */
+.usage-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.usage-pill:hover { border-color: var(--border-strong); color: var(--fg); }
+.usage-pill:focus-visible { outline: 1px solid var(--accent-dim); }
+/* Past an hour the number is history, not status, so it stops looking live —
+   but it stays on screen, because a real figure with a visible age beats a
+   blank space that says nothing at all. */
+.usage-pill.stale { opacity: .5; }
+.usage-pill.busy { opacity: .75; }
+.usage-bar {
+  display: block;
+  width: 34px; height: 4px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  overflow: hidden;
+}
+.usage-fill { display: block; height: 100%; border-radius: 999px; }
+.usage-pct { color: var(--fg); font-weight: 600; }
+.usage-reset { color: var(--fg-dim); }
+/* Goes before the count chips do: on a narrow window the buckets you filter by
+   matter more than a number you only read. */
+@media (max-width: 820px) { .usage-pill { display: none; } }
+
 .scan-meta { color: var(--fg-dim); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 @media (max-width: 1080px) { .scan-meta { display: none; } }
 @media (max-width: 900px)  { .counts { display: none; } }

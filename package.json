@@ -21,12 +21,14 @@
     "postinstall": "node scripts/fix-node-pty.mjs",
     "doctor": "tsx scripts/doctor.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "probe:usage": "tsx scripts/probe-usage.ts",
     "test:search": "tsx scripts/test-search.ts",
     "test:artifacts": "tsx scripts/test-artifacts.ts",
     "test:blocked": "tsx scripts/test-blocked.ts",
     "test:completions": "tsx scripts/test-completions.ts",
     "test:branch": "tsx scripts/test-branch.ts",
     "test:restore": "tsx scripts/test-restore.ts",
+    "test:usage": "tsx scripts/test-usage.ts",
     "app:cli": "bash bin/claude-terminal"
   },
   "dependencies": {

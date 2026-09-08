@@ -12,10 +12,13 @@ same window.
 > personal project that works *with* Claude Code. "Claude" is a trademark of
 > Anthropic, used here only to say what this tool is for.
 
-**Runs entirely on your machine.** No network requests of any kind — no
+**Runs entirely on your machine.** It makes no network requests of its own — no
 telemetry, no analytics, no update check. It reads your Claude Code transcripts
 under `~/.claude/` (and never writes there), keeping its own state in
-`~/.claude-terminal/`. See [SECURITY.md](SECURITY.md) for the full trust model.
+`~/.claude-terminal/`. The one thing that reaches the network is the usage
+figure in the header, and only indirectly: it asks Claude Code for your usage,
+and Claude Code asks Anthropic — the same call `/usage` makes when you run it
+yourself. See [SECURITY.md](SECURITY.md) for the full trust model.
 
 ---
 
@@ -32,6 +35,7 @@ under `~/.claude/` (and never writes there), keeping its own state in
 | **Search that reads the conversation** | Titles, ids, tags, branches, cwds, PR numbers — **and the messages themselves**, so a phrase you remember typing finds the session. |
 | **Branch and rename from the app** | Runs Claude Code's own `/branch` and `/rename` in the live session, so it stays the source of truth for its own title and lineage. |
 | **Tells you when something finished** | A session that stops working raises a desktop notification and a dock badge, and puts a pulsing dot on the row until you open it. Debounced, so a gap between turns is not reported as a finish. |
+| **Usage at a glance** | How much of your 5-hour window is gone and when it resets, in the header. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
 | **Your working set survives a quit** | The terminals you had open are offered back on the next launch, in one click. |
 | **Active only, by default** | Opens showing just what's running — one click to see everything, and searching overrides it, so nothing is ever unreachable. |
 
@@ -497,11 +501,20 @@ System Settings > Privacy & Security.
 | `npm run test:restore` | the working-set round trip across two full server lifetimes | nothing |
 | `npm run test:artifacts` | artifact extraction and review detection, including an artifact stranded mid-file where the sampled scanner is blind | nothing |
 | `npm run test:branch` | that a terminal follows its session across a `/branch`, and the slash-command route the Branch and Rename buttons drive | nothing |
+| `npm run test:usage` | the usage round trip — that a probe is skipped inside Claude Code's write throttle, and that a stale or another account's cache is never served as your current number | nothing |
+| `npm run probe:usage` | the usage probe against your real Claude Code, printing what came back — for when the numbers stop moving and you need to see which half broke | Claude Code, logged in |
 
 `test:restore` builds a throwaway `HOME` with synthetic transcripts and a stub
 `claude` on the PATH, because verifying it means opening terminals, quitting and
 reopening — and doing that against your real sessions would resume them for
 real. It never touches `~/.claude` or `~/.claude-terminal`.
+
+`test:usage` builds a throwaway `HOME` whose stub `claude` writes a usage
+payload when it is sent `/usage`, so the whole path — start a session, send the
+command, read the config back — runs without a login and without touching your
+real `~/.claude.json`. `probe:usage` is the opposite: it drives the real thing,
+which is what you want when the question is whether Claude Code still behaves
+the way the module assumes.
 
 `test:artifacts` builds a throwaway `HOME` too, including a transcript
 deliberately larger than the scanner's sampling window with its only artifact

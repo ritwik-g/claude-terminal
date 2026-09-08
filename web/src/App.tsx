@@ -7,6 +7,7 @@ import {
   bucketOf, matches, relTime, shortPath, type Bucket,
 } from './util';
 import { SessionRow } from './components/SessionRow';
+import { UsagePill } from './components/UsagePill';
 import { TerminalPane } from './components/TerminalPane';
 
 const POLL_MS = 2500;
@@ -861,6 +862,7 @@ export function App() {
             );
           })}
         </div>
+        <UsagePill />
         <button
           className="btn sm"
           onClick={() => { setNewCwd(selected?.cwd ?? knownCwds[0] ?? ''); setNewOpen((v) => !v); }}
