@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { relTime } from '../util';
-import type { UsageSnapshot } from '../../../server/usage';
+import type { UsageSnapshot, UsageWindow } from '../../../server/usage';
 
 /**
  * How often we ask Claude Code for current numbers. Its own cache is only
@@ -26,20 +26,40 @@ function resetsIn(at: number | null, now: number): string {
   const mins = Math.round((at - now) / 60_000);
   if (mins <= 0) return 'any moment';
   if (mins < 60) return `${mins}m`;
-  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  const hours = Math.floor(mins / 60);
+  // The weekly window is days away, and "102h 17m" makes the reader do the
+  // division. Minutes stop being interesting long before that.
+  if (hours >= 24) return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+  return `${hours}h ${mins % 60}m`;
+}
+
+/**
+ * Whether the window this reading describes has already rolled over.
+ *
+ * The percentage is only meaningful until its own reset time; past that the
+ * window emptied and started again, so the number is not merely old, it is
+ * about a window that no longer exists. This is a sharper test than the
+ * one-hour staleness rule and independent of it — a reading taken twenty
+ * minutes ago is not stale, but if its reset fell ten minutes ago the figure
+ * is still describing the wrong window.
+ */
+function expired(w: UsageWindow, now: number): boolean {
+  return w.resetsAt !== null && w.resetsAt <= now;
+}
+
+function windowLine(label: string, w: UsageWindow, now: number): string {
+  return expired(w, now)
+    ? `${label}: ${w.percent}% when last checked — that window has since reset`
+    : `${label}: ${w.percent}% used, resets in ${resetsIn(w.resetsAt, now)}`;
 }
 
 function tooltip(u: UsageSnapshot, now: number): string {
   const lines: string[] = [];
-  if (u.fiveHour) {
-    lines.push(`5-hour window: ${u.fiveHour.percent}% used, resets in ${resetsIn(u.fiveHour.resetsAt, now)}`);
-  }
-  if (u.weekly) {
-    lines.push(`This week: ${u.weekly.percent}% used, resets in ${resetsIn(u.weekly.resetsAt, now)}`);
-  }
+  if (u.fiveHour) lines.push(windowLine('5-hour window', u.fiveHour, now));
+  if (u.weekly) lines.push(windowLine('This week', u.weekly, now));
   lines.push('');
   lines.push(
-    u.stale
+    u.stale || (u.fiveHour && expired(u.fiveHour, now))
       ? `Last checked ${relTime(u.fetchedAt, now)} ago — too old to trust. Click to refresh.`
       : `Checked ${relTime(u.fetchedAt, now)} ago. Click to refresh now.`,
   );
@@ -118,12 +138,20 @@ export function UsagePill(): JSX.Element | null {
   if (!usage?.fiveHour) return null;
 
   const { percent, resetsAt } = usage.fiveHour;
+  // Both conditions mean the same thing to a reader — do not act on this number
+  // — so they get the same dimmed treatment rather than two shades of doubt.
+  const gone = expired(usage.fiveHour, now);
+  const doubtful = usage.stale || gone;
   return (
     <button
-      className={`usage-pill${usage.stale ? ' stale' : ''}${busy ? ' busy' : ''}`}
+      className={`usage-pill${doubtful ? ' stale' : ''}${busy ? ' busy' : ''}`}
       onClick={() => void refresh(true)}
       title={tooltip(usage, now)}
-      aria-label={`Usage: ${percent}% of the 5-hour window used, resets in ${resetsIn(resetsAt, now)}`}
+      aria-label={
+        gone
+          ? `Usage: ${percent}% when last checked, and that 5-hour window has since reset`
+          : `Usage: ${percent}% of the 5-hour window used, resets in ${resetsIn(resetsAt, now)}`
+      }
     >
       <span className="usage-bar" aria-hidden>
         <span
@@ -133,8 +161,12 @@ export function UsagePill(): JSX.Element | null {
       </span>
       <span className="usage-pct">{percent}%</span>
       {/* Named, not just a duration: beside a percentage a bare "1h 59m" reads
-          as time spent rather than time left. */}
-      <span className="usage-reset">resets {resetsIn(resetsAt, now)}</span>
+          as time spent rather than time left. Once the window has rolled over
+          there is no countdown to show — saying "resets any moment" about a
+          reset that happened hours ago is worse than saying nothing. */}
+      <span className="usage-reset">
+        {gone ? 'out of date' : `resets ${resetsIn(resetsAt, now)}`}
+      </span>
     </button>
   );
 }
