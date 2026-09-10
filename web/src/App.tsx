@@ -83,7 +83,14 @@ export function App() {
   const [collapsed, setCollapsed] = useState<Set<Bucket>>(new Set(['quiet', 'snoozed']));
   const [bucketFilter, setBucketFilter] = useState<Bucket | null>(null);
   const [shapeFilter, setShapeFilter] = useState<SessionShape | null>(null);
-  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  // A list, not a single tag: with a dozen tags the old row of chips ran out
+  // of sidebar and truncated the names to 'customer…' twice over, which named
+  // nothing. Selecting several is an OR — tags here are categories (a
+  // customer, a ticket family), so intersecting them almost always yields
+  // nothing, while a union is the question people actually ask.
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const [tagQuery, setTagQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [activeOnly, setActiveOnly] = useState(
     () => { try { return localStorage.getItem('ct.activeOnly') !== '0'; } catch { return true; } },
@@ -316,10 +323,10 @@ export function App() {
         (s) =>
           (showArchived ? s.user.archived : !s.user.archived) &&
           (!shapeFilter || s.shape === shapeFilter) &&
-          (!tagFilter || s.user.tags.includes(tagFilter)) &&
+          (!tagFilters.length || s.user.tags.some((t) => tagFilters.includes(t))) &&
           hits(s),
       ),
-    [sessions, hits, shapeFilter, tagFilter, showArchived],
+    [sessions, hits, shapeFilter, tagFilters, showArchived],
   );
 
   /**
@@ -327,8 +334,14 @@ export function App() {
    * for explicitly outranks it. Searching would otherwise be unable to reach
    * the quiet sessions, which is most of what you search FOR; and clicking the
    * Quiet chip would filter to a bucket this hides and show an empty list.
+   *
+   * Tags belong in that list for the same reason: a tag is filed by hand on a
+   * session you mean to come back to, so it is almost always a QUIET one this
+   * would hide. Without this, half the tag menu read "0" and every one of
+   * those rows was a click to an empty list.
    */
-  const activeApplies = activeOnly && !query.trim() && !bucketFilter;
+  const activeApplies =
+    activeOnly && !query.trim() && !bucketFilter && !tagFilters.length;
 
   const visible = useMemo(
     () => (activeApplies ? baseVisible.filter(isActive) : baseVisible),
@@ -423,13 +436,21 @@ export function App() {
   useEffect(() => {
     setCursorId(flat[0]?.id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, shapeFilter, tagFilter, bucketFilter, showArchived, activeOnly]);
+  }, [query, shapeFilter, tagFilters, bucketFilter, showArchived, activeOnly]);
 
-  // If the last use of a tag is removed, its chip disappears — leaving the
-  // filter stuck on with no control to clear it and a permanently empty list.
+  // If the last use of a tag is removed it leaves the menu — so drop it from
+  // the selection too, or the filter stays on with no control left to clear it
+  // and the list is permanently empty.
   useEffect(() => {
-    if (tagFilter && payload && !payload.tags.includes(tagFilter)) setTagFilter(null);
-  }, [payload, tagFilter]);
+    if (!payload) return;
+    // The trigger button is only rendered while some tag is in use, so an open
+    // menu that outlives the last tag would leave Escape swallowed by a dialog
+    // with nothing left to show.
+    if (!payload.tags.length) setTagsOpen(false);
+    if (!tagFilters.length) return;
+    const live = tagFilters.filter((t) => payload.tags.includes(t));
+    if (live.length !== tagFilters.length) setTagFilters(live);
+  }, [payload, tagFilters]);
 
   const shapeCounts = useMemo(() => {
     // Derived from SHAPE_ORDER, not hand-listed: a literal typed as
@@ -441,14 +462,44 @@ export function App() {
       // otherwise the chips describe the active list while the bucket chips
       // describe the archived one.
       if (showArchived ? !s.user.archived : s.user.archived) continue;
-      if (tagFilter && !s.user.tags.includes(tagFilter)) continue;
+      if (tagFilters.length && !s.user.tags.some((t) => tagFilters.includes(t))) continue;
       if (bucketFilter && bucketOf(s, now) !== bucketFilter) continue;
       if (activeApplies && !isActive(s)) continue;
       if (!hits(s)) continue;
       c[s.shape]++;
     }
     return c;
-  }, [sessions, hits, tagFilter, showArchived, bucketFilter, now, activeApplies]);
+  }, [sessions, hits, tagFilters, showArchived, bucketFilter, now, activeApplies]);
+
+  /**
+   * How many sessions each tag would bring in, counted in the same scope as
+   * the list but WITHOUT the tag filter itself — so ticking one tag does not
+   * zero every other number in the menu you are still choosing from.
+   */
+  const tagCounts = useMemo(() => {
+    const c = new Map<string, number>();
+    for (const s of sessions) {
+      if (showArchived ? !s.user.archived : s.user.archived) continue;
+      if (shapeFilter && s.shape !== shapeFilter) continue;
+      if (bucketFilter && bucketOf(s, now) !== bucketFilter) continue;
+      // Deliberately NOT filtered by `activeApplies`: picking a tag switches
+      // "active only" off, so a count that applied it would promise fewer rows
+      // than the click delivers.
+      if (!hits(s)) continue;
+      for (const t of s.user.tags) c.set(t, (c.get(t) ?? 0) + 1);
+    }
+    return c;
+  }, [sessions, hits, shapeFilter, showArchived, bucketFilter, now]);
+
+  /** The menu's rows: what the search box allows, chosen ones held at the top. */
+  const tagOptions = useMemo(() => {
+    const q = tagQuery.trim().toLowerCase();
+    const all = payload?.tags ?? [];
+    const list = q ? all.filter((t) => t.toLowerCase().includes(q)) : all.slice();
+    // Stable sort, so within each half the server's own order survives. Chosen
+    // tags float to the top or a long list scrolls your own selection away.
+    return list.sort((a, b) => Number(tagFilters.includes(b)) - Number(tagFilters.includes(a)));
+  }, [payload, tagQuery, tagFilters]);
 
   const selected = useMemo(
     () => sessions.find((s) => s.id === selectedId) ?? null,
@@ -677,6 +728,9 @@ export function App() {
         if (helpOpen) { setHelpOpen(false); e.preventDefault(); return; }
         if (renameOpen) { setRenameOpen(false); e.preventDefault(); return; }
         if (newOpen) { setNewOpen(false); e.preventDefault(); return; }
+        // Before the `typing` branch: the tag menu owns a search box, so Escape
+        // inside it should shut the menu rather than merely blur the field.
+        if (tagsOpen) { setTagsOpen(false); e.preventDefault(); return; }
         if (typing) { (el as HTMLInputElement).blur(); e.preventDefault(); }
         return;
       }
@@ -738,7 +792,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flat, cursor, attach, patch, cyclePriority, refresh, newOpen, helpOpen, renameOpen, sidebarOpen]);
+  }, [flat, cursor, attach, patch, cyclePriority, refresh, newOpen, helpOpen, renameOpen, sidebarOpen, tagsOpen]);
 
   /**
    * Drive one of Claude Code's own slash commands in the attached terminal.
@@ -966,7 +1020,9 @@ export function App() {
                 activeOnly
                   ? (activeApplies
                       ? 'Showing only sessions with Claude running right now, snoozed ones included. Click to show every session.'
-                      : `Active only is on, but ${query.trim() ? 'a search' : 'a bucket filter'} overrides it so nothing is hidden right now.`)
+                      : `Active only is on, but ${
+                          query.trim() ? 'a search' : tagFilters.length ? 'a tag filter' : 'a bucket filter'
+                        } overrides it so nothing is hidden right now.`)
                   : 'Showing every session. Click to show only the ones running right now.'
               }
             >
@@ -988,19 +1044,88 @@ export function App() {
               </button>
             ))}
           </div>
+          {/* One control instead of a wrapping bed of chips. Tags accumulate
+              forever — every customer, every ticket family — and the chip row
+              answered that by truncating names to 64px, which turned three
+              different customers into three chips reading 'customer…'. A menu
+              has room for the whole name, a count, and more than one choice. */}
           {(payload?.tags.length ?? 0) > 0 && (
-            <div className="filter-row tags">
-              {payload!.tags.map((t) => (
-                <button
-                  key={t}
-                  className={`chip tag clickable${tagFilter === t ? ' on' : ''}`}
-                  aria-pressed={tagFilter === t}
-                  onClick={() => setTagFilter(tagFilter === t ? null : t)}
-                >
-                  {t}
-                </button>
-              ))}
+            <div className="filter-row">
+              <button
+                className={`btn sm${tagFilters.length ? ' on' : ''}`}
+                aria-expanded={tagsOpen}
+                aria-haspopup="true"
+                onClick={() => { setTagQuery(''); setTagsOpen((v) => !v); }}
+                title={
+                  tagFilters.length
+                    ? `Showing sessions tagged ${tagFilters.join(' or ')}`
+                    : `Filter by tag (${payload!.tags.length} in use)`
+                }
+              >
+                {tagFilters.length === 1
+                  ? `Tag: ${tagFilters[0]}`
+                  : tagFilters.length
+                    ? `Tags: ${tagFilters.length}`
+                    : `Tags ${payload!.tags.length}`}
+                {' \u25be'}
+              </button>
             </div>
+          )}
+          {tagsOpen && (
+            <>
+              <div className="scrim" onClick={() => setTagsOpen(false)} />
+              <div className="tag-pop" role="group" aria-label="Filter by tag">
+                <input
+                  className="tag-input"
+                  style={{ width: '100%' }}
+                  autoFocus
+                  placeholder="Find a tag…"
+                  value={tagQuery}
+                  onChange={(e) => setTagQuery(e.target.value)}
+                />
+                <div className="tag-pop-list">
+                  {tagOptions.map((t) => {
+                    const on = tagFilters.includes(t);
+                    return (
+                      <button
+                        key={t}
+                        className={`tag-opt${on ? ' on' : ''}`}
+                        role="checkbox"
+                        aria-checked={on}
+                        onClick={() =>
+                          setTagFilters((prev) =>
+                            prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
+                          )
+                        }
+                      >
+                        <span className="tag-box" aria-hidden>{on ? '\u2713' : ''}</span>
+                        {/* Full width, full name — the thing the chip row could
+                            not give it. */}
+                        <span className="tag-name" title={t}>{t}</span>
+                        <span className="tag-n">{tagCounts.get(t) ?? 0}</span>
+                      </button>
+                    );
+                  })}
+                  {!tagOptions.length && (
+                    <div className="tag-pop-empty">No tag matches that.</div>
+                  )}
+                </div>
+                <div className="tag-pop-foot">
+                  <span>
+                    {tagFilters.length > 1
+                      ? `${tagFilters.length} selected \u2014 a session with any of them shows`
+                      : 'Pick as many as you like'}
+                  </span>
+                  <button
+                    className="btn sm"
+                    disabled={!tagFilters.length}
+                    onClick={() => setTagFilters([])}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </>
           )}
           {/* The exit must render whenever the view is open, not only while
               something is archived — unarchiving the last item used to remove
@@ -1015,12 +1140,12 @@ export function App() {
               </button>
             </div>
           )}
-          {(query || shapeFilter || tagFilter || bucketFilter) && (
+          {(query || shapeFilter || tagFilters.length || bucketFilter) && (
             <div className="filter-row">
               <button
                 className="btn sm"
                 onClick={() => {
-                  setQuery(''); setShapeFilter(null); setTagFilter(null); setBucketFilter(null);
+                  setQuery(''); setShapeFilter(null); setTagFilters([]); setBucketFilter(null);
                 }}
               >
                 Clear filters
@@ -1093,15 +1218,15 @@ export function App() {
                 ? 'Every group is collapsed — expand one above.'
                 : bucketFilter && visible.length
                 ? <>Nothing in <strong>{BUCKET_LABEL[bucketFilter]}</strong> matches the current filters.</>
-                : query || shapeFilter || tagFilter
+                : query || shapeFilter || tagFilters.length
                   ? 'No session matches these filters.'
                   : showArchived ? 'Nothing archived.' : 'No sessions found.'}
-              {(query || shapeFilter || tagFilter || bucketFilter) && (
+              {(query || shapeFilter || tagFilters.length || bucketFilter) && (
                 <div style={{ marginTop: 10 }}>
                   <button
                     className="btn sm"
                     onClick={() => {
-                      setQuery(''); setShapeFilter(null); setTagFilter(null); setBucketFilter(null);
+                      setQuery(''); setShapeFilter(null); setTagFilters([]); setBucketFilter(null);
                     }}
                   >
                     Clear filters

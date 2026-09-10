@@ -348,8 +348,9 @@ cannot oscillate.
 <summary><b>Manual state is an override, never load-bearing</b></summary>
 
 Tags, P0/P1/P2, pin and
-snooze all exist, but the tool works fully if you never touch them. Tags become
-filter chips as soon as you create one; priority colours the row's left edge,
+snooze all exist, but the tool works fully if you never touch them. A tag joins
+the sidebar's tag menu as soon as you create one, where any number of them can
+be filtered on at once; priority colours the row's left edge,
 because it outranks every derived signal and you should be able to see why a row
 is on top.
 

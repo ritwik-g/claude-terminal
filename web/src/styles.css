@@ -291,11 +291,79 @@ body.resizing .term-wrap { pointer-events: none; }
   display: flex;
   flex-direction: column;
   gap: 5px;
+  /* Anchors .tag-pop, which hangs below this whole block. */
+  position: relative;
 }
 .filter-row { display: flex; gap: 5px; flex-wrap: wrap; }
 .filter-row > .btn { flex: 1; text-align: center; white-space: nowrap; }
-.filter-row.tags { max-height: 56px; overflow-y: auto; }
-.filter-row.tags > .chip { flex: none; }
+
+/* The tag menu. Hung off .filters rather than the button so it spans the
+   sidebar's full width — the point of the menu is that a tag name has room to
+   be read in full, which a popover the width of its trigger would undo. */
+.tag-pop {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% - 3px);
+  left: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 34px rgba(0,0,0,.6);
+}
+/* Deep enough to show a handful without scrolling, capped so a workspace with
+   forty tags cannot push the menu past the bottom of the window. */
+.tag-pop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.tag-opt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 3px 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.tag-opt:hover { background: var(--bg-hover); color: var(--fg); }
+.tag-opt.on { color: var(--accent); }
+.tag-opt:focus-visible { outline: none; border-color: var(--accent-dim); }
+.tag-box {
+  flex: none;
+  width: 12px; height: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  font-size: 9px;
+  line-height: 10px;
+  text-align: center;
+}
+.tag-opt.on .tag-box { border-color: var(--accent); background: var(--bg-active); }
+.tag-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-n { flex: none; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+.tag-pop-empty { font-size: 11px; color: var(--fg-faint); padding: 4px 5px; }
+.tag-pop-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  line-height: 1.35;
+}
+.tag-pop-foot .btn { margin-left: auto; flex: none; }
 
 .list {
   flex: 1;
@@ -364,8 +432,26 @@ body.resizing .term-wrap { pointer-events: none; }
 .row-dot {
   width: 8px; height: 8px; border-radius: 50%;
   margin-top: 4px; flex: none;
+  position: relative;
 }
 .row-dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
+/* The unseen-completion marker: a ring AROUND the state dot, not a second dot.
+   The dot still says what the session is; the ring says something changed
+   since you last looked. Drawn on a pseudo-element so it survives the inline
+   `background` that carries the state colour, and sized to the 14px column so
+   it cannot widen the row. */
+.row-dot.unseen::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--st-needs);
+  animation: halo 1.6s ease-in-out infinite;
+}
+@keyframes halo {
+  0%, 100% { opacity: 1;   transform: scale(1); }
+  50%      { opacity: .35; transform: scale(1.18); }
+}
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: .45; transform: scale(.82); }
@@ -418,11 +504,33 @@ body.resizing .term-wrap { pointer-events: none; }
   font-family: var(--mono);
 }
 
+/* A fixed-width strip that scrolls sideways rather than silently clipping.
+   `overflow: hidden` with `justify-content: flex-end` dropped whatever came
+   FIRST in the DOM — pin, priority, the completion marker — so the busiest
+   rows lost their most important chips and there was no way to see them. The
+   strip now starts at the left, so importance order is what survives, and the
+   rest is one trackpad swipe (or a shift-wheel) away. Right-aligned by the
+   column's own `align-items: flex-end` when it does not overflow. */
 .chips {
-  display: flex; gap: 3px; justify-content: flex-end;
-  flex-wrap: nowrap; overflow: hidden; max-width: 128px;
+  display: flex; gap: 3px;
+  flex-wrap: nowrap;
+  max-width: 150px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* A visible scrollbar would add height to overflowing rows only, making the
+     list uneven. Hovering the strip spells the whole set out instead. */
+  scrollbar-width: none;
+  /* Stops a sideways swipe over a row from also swiping the window. */
+  overscroll-behavior-x: contain;
 }
-.chip.tag { max-width: 64px; overflow: hidden; text-overflow: ellipsis; }
+.chips::-webkit-scrollbar { display: none; }
+/* Without this the chips SHRINK to fit instead of overflowing — scrollWidth
+   stays equal to clientWidth, so there is nothing to scroll and the strip
+   silently squeezes every chip into an ellipsis. */
+.chips > * { flex: none; }
+/* Roomier than it was, now that a name too long for it is reachable by
+   scrolling and spelled out in full by the strip's tooltip. */
+.chip.tag { max-width: 88px; overflow: hidden; text-overflow: ellipsis; }
 .chip {
   font-size: 9.5px;
   padding: 1px 5px;
@@ -441,22 +549,6 @@ body.resizing .term-wrap { pointer-events: none; }
 .chip.pin  { color: var(--st-needs); border-color: color-mix(in srgb, var(--st-needs) 42%, transparent); }
 .chip.tag  { color: var(--fg-muted); }
 .chip.live { color: var(--st-working); border-color: color-mix(in srgb, var(--st-working) 42%, transparent); }
-/* The unseen-completion marker. A halo rather than a bare dot, so it does not
-   read as a second state dot next to the one on the left of the row — that one
-   says what the session IS, this one says something changed. */
-.new-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  flex: none;
-  align-self: center;
-  /* Ring-inside-halo, so it is not mistaken for the state dot on the left of
-     the row at a glance — that one is flat, this one has structure. */
-  background: var(--st-needs);
-  border: 1.5px solid var(--bg);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--st-needs) 45%, transparent);
-  margin-right: 2px;
-  animation: pulse 1.6s ease-in-out infinite;
-}
 
 /* ------------------------------------------------------------------ main */
 
@@ -663,7 +755,7 @@ kbd {
   .row-dot.pulse { animation: none; }
   /* The halo carries it without the motion — the marker still reads, it just
      stops moving. Dropping the whole element here would hide the signal. */
-  .new-dot { animation: none; }
+  .row-dot.unseen::after { animation: none; }
 }
 
 /* ---------------------------------------------------------------- artifacts */

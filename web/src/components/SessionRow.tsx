@@ -2,6 +2,9 @@ import React from 'react';
 import type { Session } from '../../../server/types';
 import { STATE_COLOR, STATE_LABEL, SHAPE_GLYPH, SHAPE_HINT, relTime, shortId, shortPath } from '../util';
 
+/** How many of a review's PRs get their own chip before the rest collapse. */
+const PR_CHIPS = 3;
+
 interface Props {
   s: Session;
   selected: boolean;
@@ -28,6 +31,19 @@ export const SessionRow = React.memo(function SessionRow({
     s.state === 'needs_you' || s.state === 'working' || s.state === 'parked';
   const detail = (restatesHeader ? s.reasons.slice(1, 3) : s.reasons.slice(0, 2)).join(' · ');
 
+  const reviewPrs = s.review?.prs ?? [];
+  // The strip is a fixed width and scrolls, so on a busy row some of it is
+  // always off-screen. Spelling the whole set out in words gives the hover a
+  // job beyond decoration — it is the only place the hidden chips are legible.
+  const chipWords = [
+    s.user.pinned ? 'pinned' : null,
+    s.user.priority ? s.user.priority.toUpperCase() : null,
+    s.attached ? 'terminal open' : null,
+    s.review ? `review · /${s.review.command}` : null,
+    ...(s.pr ? [`PR #${s.pr.number}`] : reviewPrs.map((p) => `${p.repository} #${p.number}`)),
+    ...s.user.tags,
+  ].filter(Boolean) as string[];
+
   return (
     <div
       className={
@@ -41,12 +57,23 @@ export const SessionRow = React.memo(function SessionRow({
       data-session-row={s.id}
       title={s.reasons.length ? s.reasons.join(' · ') : undefined}
     >
+      {/* The unseen-completion marker rides on the state dot as a halo rather
+          than sitting among the chips. It used to be the first child of a
+          right-aligned, clipped strip, which made it the very first thing to
+          disappear on exactly the busy rows most worth flagging. This column
+          is a fixed 14px and holds one glyph, so it can never be crowded out. */}
       <span
-        className={`row-dot${s.state === 'working' ? ' pulse' : ''}`}
+        className={
+          `row-dot${s.state === 'working' ? ' pulse' : ''}${unseenDone ? ' unseen' : ''}`
+        }
         style={{ background: dotColor }}
+        title={unseenDone ? 'Stopped since you last looked — open it to clear' : undefined}
         aria-hidden
       />
-      <span className="sr-only">{STATE_LABEL[s.state]}</span>
+      <span className="sr-only">
+        {STATE_LABEL[s.state]}
+        {unseenDone ? ', stopped since you last looked' : ''}
+      </span>
       <div className="row-main">
         <div className="row-title">
           {s.shape !== 'task' && (
@@ -68,22 +95,7 @@ export const SessionRow = React.memo(function SessionRow({
       </div>
       <div className="row-meta">
         <span className="row-age">{relTime(s.lastActivity, now)}</span>
-        <div className="chips">
-          {/* Not a chip, and deliberately wordless. Every other chip here is a
-              standing FACT about the session, and a word like 'done' among them
-              reads as one — as though the work had been completed rather than
-              merely stopped. A pulsing dot says "look at me" and nothing else,
-              which is all this actually knows. */}
-          {unseenDone && (
-            <>
-              <span
-                className="new-dot"
-                title="Stopped since you last looked — open it to clear"
-                aria-hidden
-              />
-              <span className="sr-only">stopped since you last looked</span>
-            </>
-          )}
+        <div className="chips" title={chipWords.length ? chipWords.join(' · ') : undefined}>
           {s.user.pinned && <span className="chip pin">pin</span>}
           {s.user.priority && <span className={`chip pri ${s.user.priority}`}>{s.user.priority.toUpperCase()}</span>}
           {s.attached && <span className="chip live">term</span>}
@@ -98,18 +110,20 @@ export const SessionRow = React.memo(function SessionRow({
               session is actually about rather than naming only the first. */}
           {s.pr
             ? <span className="chip pr">#{s.pr.number}</span>
-            : (s.review?.prs ?? []).slice(0, 3).map((p) => (
+            : reviewPrs.slice(0, PR_CHIPS).map((p) => (
                 <span key={p.url} className="chip pr" title={`${p.repository} #${p.number}`}>
                   #{p.number}
                 </span>
               ))}
-          {!s.pr && (s.review?.prs.length ?? 0) > 3 && (
-            <span className="chip pr" title={`${s.review!.prs.length} PRs under review`}>
-              +{s.review!.prs.length - 3}
+          {!s.pr && reviewPrs.length > PR_CHIPS && (
+            <span className="chip pr" title={`${reviewPrs.length} PRs under review`}>
+              +{reviewPrs.length - PR_CHIPS}
             </span>
           )}
-          {s.user.tags.slice(0, 1).map((t) => (
-            <span className="chip tag" key={t}>{t}</span>
+          {/* All of them, not the first: the strip scrolls now, so a second
+              tag is reachable rather than silently dropped. */}
+          {s.user.tags.map((t) => (
+            <span className="chip tag" key={t} title={t}>{t}</span>
           ))}
         </div>
       </div>
