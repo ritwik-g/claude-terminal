@@ -8,6 +8,7 @@ import {
 } from './util';
 import { SessionRow } from './components/SessionRow';
 import { UsagePill } from './components/UsagePill';
+import { FolderBrowser } from './components/FolderBrowser';
 import { TerminalPane } from './components/TerminalPane';
 
 const POLL_MS = 2500;
@@ -80,7 +81,12 @@ export function App() {
   // The cursor is an ID, not an index: any reorder would silently retarget an
   // index, so pressing snooze twice would snooze two different sessions.
   const [cursorId, setCursorId] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<Bucket>>(new Set(['quiet', 'snoozed']));
+  const [fullCollapsed, setFullCollapsed] = useState<Set<Bucket>>(new Set(['quiet', 'snoozed']));
+  // A separate set for the "active only" view, starting fully expanded. The
+  // full view's defaults (Quiet and Snoozed folded) would hide running
+  // sessions behind a header there; sharing one set meant the only fix was to
+  // ignore collapsing entirely, which left every header in this view inert.
+  const [activeCollapsed, setActiveCollapsed] = useState<Set<Bucket>>(new Set());
   const [bucketFilter, setBucketFilter] = useState<Bucket | null>(null);
   const [shapeFilter, setShapeFilter] = useState<SessionShape | null>(null);
   // A list, not a single tag: with a dozen tags the old row of chips ran out
@@ -114,6 +120,7 @@ export function App() {
   const [newTermId, setNewTermId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [newCwd, setNewCwd] = useState('');
+  const [browsing, setBrowsing] = useState(false);
   const [aiming, setAiming] = useState(false);
   // A terminal that exits vanishes from the server's `attached` set instantly,
   // which used to unmount the pane ~10ms later — so the exit banner and the
@@ -409,22 +416,23 @@ export function App() {
   }, [ordered, now]);
 
   /**
-   * Collapsing is ignored while "active only" is narrowing the list. Quiet and
-   * Snoozed start collapsed, so a running session in either of them was
+   * "Active only" keeps its own collapse state. Quiet and Snoozed start
+   * collapsed in the full view, so a running session in either of them was
    * counted and then hidden behind a group header — the toggle said 8 with
-   * five rows on screen. Having asked for just the handful that are running,
-   * there is nothing left to collapse away.
+   * five rows on screen. The active view starts with everything open instead,
+   * and whatever you fold there stays out of the full view's way.
    */
-  const showCollapsed = activeApplies;
+  const collapsed = activeApplies ? activeCollapsed : fullCollapsed;
+  const setCollapsed = activeApplies ? setActiveCollapsed : setFullCollapsed;
   const flat = useMemo(() => {
     const out: Session[] = [];
     for (const b of BUCKET_ORDER) {
       if (bucketFilter && b !== bucketFilter) continue;
-      if (!showCollapsed && collapsed.has(b)) continue;
+      if (collapsed.has(b)) continue;
       out.push(...(groups.get(b) ?? []));
     }
     return out;
-  }, [groups, collapsed, bucketFilter, showCollapsed]);
+  }, [groups, collapsed, bucketFilter]);
 
   const cursor = useMemo(() => {
     const i = flat.findIndex((s) => s.id === cursorId);
@@ -703,7 +711,7 @@ export function App() {
 
   const expandBucket = useCallback((b: Bucket) => {
     setCollapsed((prev) => { const n = new Set(prev); n.delete(b); return n; });
-  }, []);
+  }, [setCollapsed]);
 
   // -------------------------------------------------------------- keyboard
   useEffect(() => {
@@ -940,15 +948,26 @@ export function App() {
             <div className="scrim" onClick={() => setNewOpen(false)} />
             <div className="new-pop">
               <div className="detail-label">Start a new session in</div>
-              <input
-                className="tag-input"
-                style={{ width: '100%', fontSize: 12 }}
-                value={newCwd}
-                autoFocus
-                placeholder="/path/to/repo"
-                onChange={(e) => setNewCwd(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void startNew(); } }}
-              />
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  className="tag-input"
+                  style={{ flex: 1, minWidth: 0, fontSize: 12 }}
+                  value={newCwd}
+                  autoFocus
+                  placeholder="/path/to/repo"
+                  onChange={(e) => setNewCwd(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void startNew(); } }}
+                />
+                <button
+                  className={`btn sm${browsing ? ' on' : ''}`}
+                  aria-pressed={browsing}
+                  onClick={() => setBrowsing((v) => !v)}
+                  title="Browse folders"
+                >
+                  Browse…
+                </button>
+              </div>
+              {browsing && <FolderBrowser start={newCwd} onPick={setNewCwd} />}
               <div className="new-list">
                 {knownCwds.slice(0, 8).map((c) => (
                   <button key={c} className="btn sm" onClick={() => setNewCwd(c)} title={c}>
@@ -1163,7 +1182,7 @@ export function App() {
             const list = groups.get(b) ?? [];
             if (!list.length) return null;
             if (bucketFilter && b !== bucketFilter) return null;
-            const isCollapsed = collapsed.has(b) && !showCollapsed;
+            const isCollapsed = collapsed.has(b);
             return (
               <div key={b}>
                 <button

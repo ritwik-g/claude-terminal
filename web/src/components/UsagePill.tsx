@@ -11,6 +11,13 @@ import type { UsageSnapshot, UsageWindow } from '../../../server/usage';
  */
 const REFRESH_MS = 10 * 60 * 1000;
 
+/**
+ * Retry interval while there is no cache at all. Claude Code deletes it on
+ * every login and logout, and waiting the full REFRESH_MS to put it back made
+ * the pill vanish for ten minutes with no explanation.
+ */
+const MISSING_RETRY_MS = 60 * 1000;
+
 /** Re-reading the cached file is free, so notice refreshes from elsewhere. */
 const POLL_MS = 30 * 1000;
 
@@ -53,8 +60,12 @@ function windowLine(label: string, w: UsageWindow, now: number): string {
     : `${label}: ${w.percent}% used, resets in ${resetsIn(w.resetsAt, now)}`;
 }
 
-function tooltip(u: UsageSnapshot, now: number): string {
+function tooltip(u: UsageSnapshot, now: number, lost: boolean): string {
   const lines: string[] = [];
+  if (lost) {
+    lines.push('Claude Code cleared its usage cache (it does on login and logout). Showing the last reading until it is refetched.');
+    lines.push('');
+  }
   if (u.fiveHour) lines.push(windowLine('5-hour window', u.fiveHour, now));
   if (u.weekly) lines.push(windowLine('This week', u.weekly, now));
   lines.push('');
@@ -76,6 +87,9 @@ function tooltip(u: UsageSnapshot, now: number): string {
  */
 export function UsagePill(): JSX.Element | null {
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
+  // The cache vanished after we had numbers. Keep showing them, dimmed, rather
+  // than dropping the pill out of the header without a word.
+  const [lost, setLost] = useState(false);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   // Refs, not state: the polling effect reads both, and as state they would be
@@ -84,55 +98,71 @@ export function UsagePill(): JSX.Element | null {
   const busyRef = useRef(false);
   const lastTried = useRef(0);
 
-  const refresh = useCallback(async (force: boolean) => {
+  const accept = useCallback((next: UsageSnapshot | null) => {
+    if (next) {
+      setUsage(next);
+      setLost(false);
+    } else {
+      setLost(true);
+    }
+  }, []);
+
+  const refresh = useCallback(async (force: boolean, gap = REFRESH_MS) => {
     if (busyRef.current) return;
     // Failed probes are rate-limited too, or a machine that cannot refresh at
     // all would start a doomed session on every interval.
-    if (!force && Date.now() - lastTried.current < REFRESH_MS) return;
+    if (!force && Date.now() - lastTried.current < gap) return;
     busyRef.current = true;
     lastTried.current = Date.now();
     setBusy(true);
     try {
       const res = await api.refreshUsage();
-      setUsage(res.usage);
+      accept(res.usage);
     } catch {
       // Leave the last good numbers on screen; their age is already visible.
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
-  }, []);
+  }, [accept]);
 
   useEffect(() => {
     let alive = true;
 
-    const read = async () => {
+    /** Resolves to whether a cache exists, or null when the server is unreachable. */
+    const read = async (): Promise<boolean | null> => {
       try {
         const res = await api.usage();
-        if (alive) setUsage(res.usage);
+        if (alive) accept(res.usage);
+        return res.usage !== null;
       } catch {
         /* the server is down; the rest of the app will say so */
+        return null;
       }
     };
 
-    const tick = () => {
+    const tick = async () => {
       setNow(Date.now());
-      void read();
+      const present = await read();
+      if (!alive || present === null) return;
       // Only while the window is on screen: a minimised app that keeps starting
       // Claude Code sessions is spending the user's quota to tell them about
       // their quota.
-      if (document.visibilityState === 'visible') void refresh(false);
+      if (document.visibilityState === 'visible') {
+        void refresh(false, present ? REFRESH_MS : MISSING_RETRY_MS);
+      }
     };
 
-    void tick();
-    const iv = setInterval(tick, POLL_MS);
-    document.addEventListener('visibilitychange', tick);
+    const run = () => { void tick(); };
+    run();
+    const iv = setInterval(run, POLL_MS);
+    document.addEventListener('visibilitychange', run);
     return () => {
       alive = false;
       clearInterval(iv);
-      document.removeEventListener('visibilitychange', tick);
+      document.removeEventListener('visibilitychange', run);
     };
-  }, [refresh]);
+  }, [refresh, accept]);
 
   // Nothing cached and nothing fetched yet — say nothing rather than guess.
   if (!usage?.fiveHour) return null;
@@ -141,12 +171,12 @@ export function UsagePill(): JSX.Element | null {
   // Both conditions mean the same thing to a reader — do not act on this number
   // — so they get the same dimmed treatment rather than two shades of doubt.
   const gone = expired(usage.fiveHour, now);
-  const doubtful = usage.stale || gone;
+  const doubtful = usage.stale || gone || lost;
   return (
     <button
       className={`usage-pill${doubtful ? ' stale' : ''}${busy ? ' busy' : ''}`}
       onClick={() => void refresh(true)}
-      title={tooltip(usage, now)}
+      title={tooltip(usage, now, lost)}
       aria-label={
         gone
           ? `Usage: ${percent}% when last checked, and that 5-hour window has since reset`

@@ -8,6 +8,14 @@ export interface UsagePayload {
   refreshable?: boolean;
 }
 
+export interface DirListing {
+  path: string;
+  parent: string | null;
+  home: string;
+  dirs: string[];
+  truncated: boolean;
+}
+
 export interface SessionsPayload {
   sessions: Session[];
   tags: string[];
@@ -58,6 +66,10 @@ export const api = {
     json<{ ids: string[]; q: string }>(`/api/search?q=${encodeURIComponent(q)}`),
 
   clearRestore: () => json<{ ok: boolean }>('/api/restore', { method: 'DELETE' }),
+
+  /** Subdirectories of `path` (home when omitted), for the folder browser. */
+  dirs: (path?: string) =>
+    json<DirListing>(`/api/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 
   /** Cached usage windows. Cheap — reads a file, starts nothing. */
   usage: () => json<UsagePayload>('/api/usage'),

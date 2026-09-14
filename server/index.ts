@@ -21,7 +21,7 @@ import {
 import {
   initRestore, captureWorkingSet, captureAndFreeze, clearRestore,
 } from './restore.js';
-import { APP_DIR, TOKEN_FILE, FILE_MODE, ensurePrivateDir, repairPrivateModes } from './paths.js';
+import { APP_DIR, HOME, TOKEN_FILE, FILE_MODE, ensurePrivateDir, repairPrivateModes } from './paths.js';
 import type { CompletionEvent, Priority, UserState } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -141,6 +141,43 @@ app.get('/api/search', (req, res) => {
     return;
   }
   res.json({ ids: searchIds(q.slice(0, 200)), q });
+});
+
+/**
+ * Subdirectories of one folder, for the new-session folder browser. Names
+ * only — no file contents, no files at all — and never more than DIR_LIMIT,
+ * so pointing it at a huge directory cannot stall the event loop or the UI.
+ * An empty or relative path means home, which is where browsing starts.
+ */
+const DIR_LIMIT = 1000;
+app.get('/api/dirs', (req, res) => {
+  const raw = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+  const expanded = raw === '~' || raw.startsWith('~/') ? path.join(HOME, raw.slice(1)) : raw;
+  const dir = expanded && path.isAbsolute(expanded) ? path.resolve(expanded) : HOME;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err: any) {
+    return res.status(400).json({ error: `cannot read ${dir}: ${err?.code ?? err?.message ?? err}` });
+  }
+  const dirs: string[] = [];
+  for (const e of entries) {
+    // Symlinks are followed so a linked checkout shows up like any other folder.
+    let isDir = e.isDirectory();
+    if (!isDir && e.isSymbolicLink()) {
+      try { isDir = fs.statSync(path.join(dir, e.name)).isDirectory(); } catch { /* dangling */ }
+    }
+    if (isDir) dirs.push(e.name);
+  }
+  dirs.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+  const parent = path.dirname(dir);
+  res.json({
+    path: dir,
+    parent: parent === dir ? null : parent,
+    home: HOME,
+    dirs: dirs.slice(0, DIR_LIMIT),
+    truncated: dirs.length > DIR_LIMIT,
+  });
 });
 
 app.get('/api/health', (_req, res) => {
