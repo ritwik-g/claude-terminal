@@ -13,6 +13,7 @@ import { saveCache, searchIds } from './scan.js';
 import { loadStore, setUserState, flushStore, isSafeKey, hasUserState, isReadOnly } from './store.js';
 import { readLiveSessions } from './live.js';
 import { readUsage, refreshUsage, refreshInFlight, needsRefresh } from './usage.js';
+import { pickFolder } from './pick-folder.js';
 import {
   startTerm, writeTerm, resizeTerm, killTerm, disposeTerm,
   readScrollback, listTerms, getTerm, ptyEvents, shutdownAll,
@@ -178,6 +179,19 @@ app.get('/api/dirs', (req, res) => {
     dirs: dirs.slice(0, DIR_LIMIT),
     truncated: dirs.length > DIR_LIMIT,
   });
+});
+
+/**
+ * Open the OS folder picker. Answers `unsupported` where there is none (a
+ * headless Linux box, say), and the client falls back to the inline browser.
+ */
+app.post('/api/pick-folder', async (req, res) => {
+  const raw = typeof req.body?.start === 'string' ? req.body.start.trim() : '';
+  let start: string | null = null;
+  try {
+    if (raw && path.isAbsolute(raw) && fs.statSync(raw).isDirectory()) start = raw;
+  } catch { /* not a folder yet — open wherever the picker defaults */ }
+  res.json(await pickFolder(start));
 });
 
 app.get('/api/health', (_req, res) => {

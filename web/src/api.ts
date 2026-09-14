@@ -71,6 +71,13 @@ export const api = {
   dirs: (path?: string) =>
     json<DirListing>(`/api/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 
+  /** Opens the OS folder picker; resolves once it is closed. */
+  pickFolder: (start: string) =>
+    json<{ status: 'picked'; path: string } | { status: 'cancelled' } | { status: 'unsupported' }>(
+      '/api/pick-folder',
+      { method: 'POST', body: JSON.stringify({ start }) },
+    ),
+
   /** Cached usage windows. Cheap — reads a file, starts nothing. */
   usage: () => json<UsagePayload>('/api/usage'),
 

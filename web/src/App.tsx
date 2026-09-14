@@ -121,6 +121,7 @@ export function App() {
   const [newOpen, setNewOpen] = useState(false);
   const [newCwd, setNewCwd] = useState('');
   const [browsing, setBrowsing] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [aiming, setAiming] = useState(false);
   // A terminal that exits vanishes from the server's `attached` set instantly,
   // which used to unmount the pane ~10ms later — so the exit banner and the
@@ -656,6 +657,24 @@ export function App() {
     [refresh],
   );
 
+  /**
+   * The OS folder picker first; the inline browser only where the machine has
+   * none, or when the picker could not be reached at all.
+   */
+  const browse = useCallback(async () => {
+    if (browsing) { setBrowsing(false); return; }
+    setPicking(true);
+    try {
+      const r = await api.pickFolder(newCwd.trim());
+      if (r.status === 'picked') setNewCwd(r.path);
+      else if (r.status === 'unsupported') setBrowsing(true);
+    } catch {
+      setBrowsing(true);
+    } finally {
+      setPicking(false);
+    }
+  }, [browsing, newCwd]);
+
   const startNew = useCallback(async () => {
     const cwd = newCwd.trim();
     if (!cwd) return;
@@ -961,10 +980,11 @@ export function App() {
                 <button
                   className={`btn sm${browsing ? ' on' : ''}`}
                   aria-pressed={browsing}
-                  onClick={() => setBrowsing((v) => !v)}
-                  title="Browse folders"
+                  disabled={picking}
+                  onClick={() => void browse()}
+                  title="Choose a folder"
                 >
-                  Browse…
+                  {picking ? 'Choosing…' : 'Browse…'}
                 </button>
               </div>
               {browsing && <FolderBrowser start={newCwd} onPick={setNewCwd} />}

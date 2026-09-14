@@ -709,7 +709,7 @@ body.resizing .term-wrap { pointer-events: none; }
 .fb-hidden { display: flex; align-items: center; gap: 3px; font-size: 10.5px; color: var(--fg-dim); white-space: nowrap; }
 .fb-filter { width: 100%; font-size: 11.5px; }
 .fb-list { display: flex; flex-direction: column; max-height: 200px; overflow-y: auto; }
-.fb-item { all: unset; box-sizing: border-box; cursor: pointer; padding: 3px 6px; border-radius: 4px; font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fb-item { all: unset; flex: none; box-sizing: border-box; cursor: pointer; padding: 3px 6px; border-radius: 4px; font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fb-item:hover, .fb-item:focus-visible { background: var(--bg-hover); }
 .fb-none { color: var(--fg-dim); font-size: 11px; padding: 4px 6px; }
 .fb-none.err { color: var(--st-crashed); }
