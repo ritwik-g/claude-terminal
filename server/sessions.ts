@@ -112,7 +112,7 @@ async function build(): Promise<SessionsPayload> {
 
     return {
       ...clean,
-      title: bestTitle(s.title, s.titleSource, liveInfo?.name, s.cwd),
+      title: bestTitle(s.title, s.titleSource, liveInfo?.name, s.cwd, s.projectKey),
       live: liveInfo,
       git,
       user,
@@ -215,16 +215,34 @@ function bestTitle(
   titleSource: string,
   liveName: string | undefined,
   cwd: string,
+  projectKey: string,
 ): string {
   if (!liveName) return title;
-  const base = cwd.split('/').filter(Boolean).pop() ?? '';
-  const isAutoName = base
-    ? new RegExp(`^${escapeRe(base)}-[0-9a-f]{2,4}$`, 'i').test(liveName)
-    : false;
-  if (isAutoName && titleSource !== 'id') return title;
+  if (isAutoName(liveName, cwd, projectKey) && titleSource !== 'id') return title;
   return liveName;
 }
 
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const AUTO_NAME = /^(.+)-[0-9a-f]{2,4}$/i;
+
+/**
+ * Claude Code mints the fallback name ONCE, from the directory the session
+ * started in — but `cwd` is wherever it has got to since, and a session that
+ * cd's into a subdirectory or a worktree is completely ordinary. Matching the
+ * stem against `cwd` alone therefore stopped recognising the fallback the
+ * moment the session moved, and the auto-name then beat a perfectly good
+ * ai-title: one real session started in ~/unstract-repos, moved into a
+ * worktree, and renamed itself to 'unstract-repos-6e' mid-run.
+ *
+ * `projectKey` is the answer, because it is derived from the start directory
+ * and never moves. It cannot be decoded back into a path — every separator in
+ * it is a '-', so a folder whose own name contains one is ambiguous — but it
+ * does not need to be: the start directory's basename is always a suffix of
+ * it, dashes and all.
+ */
+function isAutoName(liveName: string, cwd: string, projectKey: string): boolean {
+  const stem = AUTO_NAME.exec(liveName)?.[1].toLowerCase();
+  if (!stem) return false;
+  const base = (cwd.split('/').filter(Boolean).pop() ?? '').toLowerCase();
+  if (base && stem === base) return true;
+  return projectKey.toLowerCase().endsWith(`-${stem}`);
 }

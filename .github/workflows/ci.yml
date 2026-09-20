@@ -55,7 +55,7 @@ jobs:
           npm run build
           npm run build:electron
 
-      # These six build a throwaway HOME with synthetic transcripts and a stub
+      # These seven build a throwaway HOME with synthetic transcripts and a stub
       # `claude`, so they are hermetic. test:search and smoke are deliberately
       # excluded: both assert against the developer's real ~/.claude corpus and
       # a server already running, neither of which exists on a runner. So is
@@ -65,6 +65,7 @@ jobs:
           npm run test:artifacts
           npm run test:blocked
           npm run test:branch
+          npm run test:title
           npm run test:restore
           npm run test:usage
           npm run test:hook

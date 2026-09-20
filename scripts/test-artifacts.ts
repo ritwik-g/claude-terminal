@@ -65,6 +65,9 @@ const S = {
   multiPr: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   branchedFromReview: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
   branchOwnReview: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+  typed: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+  bothRecords: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+  talksAboutOne: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
 };
 
 const PROJECTS = path.join(FAKE_HOME, '.claude', 'projects', '-ct-artifacts-work');
@@ -105,6 +108,70 @@ function frame(url: string, title: string, off: number, extra: Record<string, un
     timestamp: at(off),
     ...extra,
   };
+}
+
+/**
+ * An artifact created from an Artifact TYPE. Claude Code writes no frame-link
+ * for one of these: the url is only ever stated in the tool_result prose, and
+ * the title only on the tool_use, so the pair is the whole record of it.
+ */
+function typedPublish(id: string, url: string, title: string, off: number) {
+  return [
+    {
+      type: 'assistant',
+      cwd: WORK,
+      timestamp: at(off),
+      message: {
+        role: 'assistant',
+        stop_reason: 'tool_use',
+        content: [{
+          type: 'tool_use', id, name: 'Artifact',
+          input: { action: 'publish', type_url: 'https://claude.ai/artifact/TEMPLATE', title },
+        }],
+      },
+    },
+    {
+      type: 'user',
+      cwd: WORK,
+      timestamp: at(off - 1000),
+      message: {
+        role: 'user',
+        content: [{
+          type: 'tool_result', tool_use_id: id,
+          content: `Created a new Artifact at ${url} (version 1) from the Artifact type ` +
+            'https://claude.ai/artifact/TEMPLATE (release 1).\n\nLive subscription: arming.',
+        }],
+      },
+    },
+  ];
+}
+
+/** The tool_use/tool_result pair a FILE publish leaves, alongside its frame-link. */
+function filePublish(id: string, url: string, off: number) {
+  return [
+    {
+      type: 'assistant',
+      cwd: WORK,
+      timestamp: at(off),
+      message: {
+        role: 'assistant',
+        stop_reason: 'tool_use',
+        content: [{
+          type: 'tool_use', id, name: 'Artifact',
+          input: { action: 'publish', file_path: '/tmp/page.html' },
+        }],
+      },
+    },
+    {
+      type: 'user',
+      cwd: WORK,
+      timestamp: at(off - 1000),
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: id, content: `Published /tmp/page.html at ${url} (Version 1)` }],
+      },
+    },
+  ];
 }
 
 function scaffold(): void {
@@ -153,6 +220,44 @@ function scaffold(): void {
   write(S.none, [
     ...base(900_000),
     { type: 'custom-title', customTitle: 'no artifacts', cwd: WORK, timestamp: at(890_000) },
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // An artifact made from an Artifact type, which writes NO frame-link at all.
+  // Reading only frame-links showed this session as having published nothing
+  // while Claude Code's own statusline carried the pill.
+  write(S.typed, [
+    ...base(900_000),
+    { type: 'custom-title', customTitle: 'typed artifact', cwd: WORK, timestamp: at(890_000) },
+    ...typedPublish('toolu_typed', 'https://claude.ai/artifact/MkMnwbSvfzp', 'Staging DB Bottleneck RCA', 800_000),
+    // Written straight after the publish, carrying the Claude Docs project id
+    // rather than the artifact's own — no url in it, so it cannot stand in.
+    { type: 'artifact-comment-monitor', v: 1, sessionId: S.typed,
+      artifacts: { 'a80491a2-d8b9': { state: 'armed', writtenAtMs: now - 799_000, title: 'Staging DB Bottleneck RCA' } } },
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // A FILE publish leaves both a frame-link and a tool_result naming the same
+  // url. Counting both would report every artifact ever published at twice
+  // its real revisions.
+  write(S.bothRecords, [
+    ...base(900_000),
+    { type: 'custom-title', customTitle: 'file publish', cwd: WORK, timestamp: at(890_000) },
+    ...filePublish('toolu_file', 'https://claude.ai/artifact/filepub', 800_000),
+    frame('https://claude.ai/artifact/filepub', 'A Real Page', 799_000),
+    { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
+  ]);
+
+  // The create sentence quoted as prose, and a result answering a call this
+  // transcript never made. Neither is this session publishing anything.
+  write(S.talksAboutOne, [
+    ...base(900_000),
+    { type: 'custom-title', customTitle: 'only talks about it', cwd: WORK, timestamp: at(890_000) },
+    { type: 'user', cwd: WORK, timestamp: at(880_000), message: { role: 'user', content: [{ type: 'text',
+      text: 'the tool says "Created a new Artifact at https://claude.ai/artifact/someoneelse" — is that right?' }] } },
+    { type: 'user', cwd: WORK, timestamp: at(870_000), message: { role: 'user', content: [{
+      type: 'tool_result', tool_use_id: 'toolu_never_seen',
+      content: 'Created a new Artifact at https://claude.ai/artifact/orphaned (version 1)' }] } },
     { type: 'assistant', message: { stop_reason: 'end_turn' }, cwd: WORK, timestamp: at(300_000) },
   ]);
 
@@ -293,7 +398,7 @@ const main = async () => {
   try {
     await waitForUp(proc);
     const payload: any = await (await fetch(`${BASE}/api/sessions?force=1`)).json();
-    check('all synthetic sessions are scanned', payload.sessions.length === 12, `got ${payload.sessions.length}`);
+    check('all synthetic sessions are scanned', payload.sessions.length === 15, `got ${payload.sessions.length}`);
 
     const get = async (id: string) =>
       (await (await fetch(`${BASE}/api/sessions/${id}/artifacts`)).json()).artifacts;
@@ -321,6 +426,30 @@ const main = async () => {
     check('  and it is the right one', big[0]?.title === 'Stranded Mid-File', big[0]?.title);
 
     check('a session with no artifacts returns none', (await get(S.none)).length === 0);
+
+    // ---- artifacts made from an Artifact type ----
+    const typed = await get(S.typed);
+    check('a typed artifact is found without any frame-link', typed.length === 1, JSON.stringify(typed));
+    check('  and takes its url from the tool_result',
+      typed[0]?.url === 'https://claude.ai/artifact/MkMnwbSvfzp', typed[0]?.url);
+    check('  and its title from the tool_use',
+      typed[0]?.title === 'Staging DB Bottleneck RCA', typed[0]?.title);
+    check('  and reports one revision, not one per monitor record',
+      typed[0]?.revisions === 1, String(typed[0]?.revisions));
+    check('  with no local path, because its content is a document',
+      typed[0]?.path === '', JSON.stringify(typed[0]?.path));
+    check('  and a usable timestamp', typed[0]?.updatedAt > 0, String(typed[0]?.updatedAt));
+
+    const both = await get(S.bothRecords);
+    check('a file publish is still exactly one artifact', both.length === 1, JSON.stringify(both));
+    check('  counted once, not once per record type',
+      both[0]?.revisions === 1, String(both[0]?.revisions));
+    check('  keeping the frame-link title and path',
+      both[0]?.title === 'A Real Page' && both[0]?.path === '/tmp/A Real Page.html',
+      JSON.stringify([both[0]?.title, both[0]?.path]));
+
+    check('the create sentence in prose is not an artifact',
+      (await get(S.talksAboutOne)).length === 0, JSON.stringify(await get(S.talksAboutOne)));
 
     const unknown = await fetch(`${BASE}/api/sessions/not-a-session/artifacts`);
     check('an unknown session is a 404, not a crash', unknown.status === 404, String(unknown.status));

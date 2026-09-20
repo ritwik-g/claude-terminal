@@ -298,9 +298,17 @@ Republishing an artifact keeps one entry and bumps its version count, because
 the URL is the artifact's identity — a document you have revised four times is
 one row marked `v4`, not four rows.
 
-These are read from `frame-link` transcript records, and deliberately *not*
-through the shared scanner. That scanner samples the first 256KB and the last
-1MB of each transcript, which is sound for titles and PR links because Claude
+These come from two different traces, because Claude Code leaves two. A page
+published from a local file writes a `frame-link` record carrying the URL, the
+title and the file. An artifact created from an Artifact *type* — a deck, a
+document — writes no `frame-link` at all: the URL is stated only in the tool
+result, the title only on the call, so the two are paired by `tool_use_id`.
+Reading `frame-link` alone showed nothing for those sessions while Claude
+Code's own status line still carried the pill. A document-backed artifact is
+an ordinary row; it simply has no local file behind it.
+
+Neither goes through the shared scanner. That scanner samples the first
+256KB and the last 1MB of each transcript, which is sound for titles and PR links because Claude
 Code re-emits those as they change. A `frame-link` is written once, when you
 publish, and never again: across this corpus 51 of the 71 artifacts in
 transcripts larger than that window fall between the two sampled ranges. So
@@ -555,7 +563,8 @@ System Settings > Privacy & Security.
 | `npm run smoke` | the HTTP surface, including every input that must be *rejected* before it reaches node-pty | a running server |
 | `npm run test:search` | id and text matching against your real session set — that every id is reachable, and that ordinary words do not start matching ids | a running server |
 | `npm run test:restore` | the working-set round trip across two full server lifetimes | nothing |
-| `npm run test:artifacts` | artifact extraction and review detection, including an artifact stranded mid-file where the sampled scanner is blind | nothing |
+| `npm run test:artifacts` | artifact extraction and review detection, including an artifact stranded mid-file where the sampled scanner is blind, and one published from an Artifact type that leaves no `frame-link` behind | nothing |
+| `npm run test:title` | which name a row shows — that a session which cd's into a subdirectory or a worktree keeps its title instead of renaming itself to the folder it started in | nothing |
 | `npm run test:branch` | that a terminal follows its session across a `/branch`, and the slash-command route the Branch and Rename buttons drive | nothing |
 | `npm run test:usage` | the usage round trip — that a probe is skipped inside Claude Code's write throttle, and that a stale or another account's cache is never served as your current number | nothing |
 | `npm run test:hook` | the cleanup hook — that it marks on the command and **not** on prose that merely says "clean up", and that it exits silently on every failure it can meet | nothing |
@@ -578,6 +587,13 @@ deliberately larger than the scanner's sampling window with its only artifact
 buried in the middle. That case is the reason the module exists: swap the
 whole-file read for head-only sampling and every other check in the file still
 passes.
+
+`test:title` builds a throwaway `HOME` with a synthetic live registry as well,
+because the name a row shows is a negotiation between the registry and the
+transcript: Claude Code's invented `<dirname>-<2-4 hex>` fallback must lose to
+an ai-title, and a name you chose must win. The fallback is minted once, from
+the directory the session *started* in, so the test moves sessions away from
+there — which is what used to break it.
 
 ### Cutting a release
 **Cutting a release.** `.github/workflows/release.yml` builds both macOS
