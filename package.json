@@ -29,6 +29,7 @@
     "test:branch": "tsx scripts/test-branch.ts",
     "test:restore": "tsx scripts/test-restore.ts",
     "test:usage": "tsx scripts/test-usage.ts",
+    "test:hook": "tsx scripts/test-hook.ts",
     "app:cli": "bash bin/claude-terminal"
   },
   "dependencies": {

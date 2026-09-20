@@ -37,6 +37,7 @@ yourself. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **Tells you when something finished** | A session that stops working raises a desktop notification and a dock badge, and puts a pulsing dot on the row until you open it. Debounced, so a gap between turns is not reported as a finish. |
 | **Usage at a glance** | How much of your 5-hour window is gone and the clock time it resets at, in the header. Hover or click for both windows in full, with their reset times, and a refresh button of its own. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
 | **Mark a session cleaned up** | `c` tints the row and chips it, so the session you tidied up is findable again among a dozen that look identical. A **Cleanup** filter in the sidebar collects them, to close and archive in one pass. |
+| **The cleanup mark can set itself** | Ship `/cleanup` and a one-line hook, and the session marks itself the moment you run it — see [Marking cleanup automatically](#marking-cleanup-automatically). |
 | **Your working set survives a quit** | The terminals you had open are offered back on the next launch, in one click. |
 | **Active only, by default** | Opens showing just what's running — one click to see everything, and searching overrides it, so nothing is ever unreachable. |
 
@@ -178,6 +179,58 @@ On a 135-session corpus that is a 1.9MB index answering in under 30ms.
 
 Keys never fire while the terminal has focus — Escape is the most-pressed key in
 Claude Code, and it belongs to the session, not to this app.
+
+### Marking cleanup automatically
+
+`c` marks a session cleaned up by hand. If you wind sessions down with a command
+of your own, the mark can set itself instead — `hooks/` carries the two files:
+
+```bash
+mkdir -p ~/.claude/hooks ~/.claude/commands
+cp hooks/ct-cleanup-mark.sh ~/.claude/hooks/
+cp hooks/cleanup.md ~/.claude/commands/
+```
+
+Then register it in `~/.claude/settings.json`, merging with whatever is already
+there rather than replacing it:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/ct-cleanup-mark.sh",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Typing `/cleanup` in any session now marks it here, because Claude Code hands
+the hook the prompt as typed and the session id, and the hook makes the same
+write the `c` key makes. Sessions already open do not pick it up — settings are
+read at startup — so open `/hooks` once or start a new session.
+
+`cleanup.md` is a starting point for what the command should *do*; edit it to
+match how you actually wind a session down. The hook does not read it — it only
+cares that you typed `/cleanup`.
+
+The trigger is deliberately the slash command alone, so nothing is marked by
+accident: "clean up the dead code in utils.ts" does not match. `TRIGGER` at the
+top of the script widens it if you would rather catch prose, at the cost of
+false positives. `npm run test:hook` covers both halves of that.
+
+It fails silently and on purpose. No app running, no token, a session the
+server has not scanned: each one makes the hook exit 0 without a word, because
+it stands in front of every prompt you type and a marker missed is a far
+smaller problem than a prompt broken. Set `CT_PORT` if the app is not on 7777.
 
 Use **+ New** to start a fresh session in any directory. It runs before Claude
 has registered a session id, and adopts itself into the list once it does.
@@ -505,6 +558,7 @@ System Settings > Privacy & Security.
 | `npm run test:artifacts` | artifact extraction and review detection, including an artifact stranded mid-file where the sampled scanner is blind | nothing |
 | `npm run test:branch` | that a terminal follows its session across a `/branch`, and the slash-command route the Branch and Rename buttons drive | nothing |
 | `npm run test:usage` | the usage round trip — that a probe is skipped inside Claude Code's write throttle, and that a stale or another account's cache is never served as your current number | nothing |
+| `npm run test:hook` | the cleanup hook — that it marks on the command and **not** on prose that merely says "clean up", and that it exits silently on every failure it can meet | nothing |
 | `npm run probe:usage` | the usage probe against your real Claude Code, printing what came back — for when the numbers stop moving and you need to see which half broke | Claude Code, logged in |
 
 `test:restore` builds a throwaway `HOME` with synthetic transcripts and a stub
