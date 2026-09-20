@@ -36,6 +36,7 @@ export const SessionRow = React.memo(function SessionRow({
   // always off-screen. Spelling the whole set out in words gives the hover a
   // job beyond decoration — it is the only place the hidden chips are legible.
   const chipWords = [
+    s.user.cleanup ? 'cleaned up — ready to close and archive' : null,
     s.user.pinned ? 'pinned' : null,
     s.user.priority ? s.user.priority.toUpperCase() : null,
     s.attached ? 'terminal open' : null,
@@ -48,6 +49,7 @@ export const SessionRow = React.memo(function SessionRow({
     <div
       className={
         `row${selected ? ' sel' : ''}${atCursor ? ' cursor' : ''}` +
+        (s.user.cleanup ? ' cleanup' : '') +
         (s.user.priority ? ` pri-${s.user.priority}` : '')
       }
       onClick={onClick}
@@ -96,6 +98,15 @@ export const SessionRow = React.memo(function SessionRow({
       <div className="row-meta">
         <span className="row-age">{relTime(s.lastActivity, now)}</span>
         <div className="chips" title={chipWords.length ? chipWords.join(' · ') : undefined}>
+          {/* First in the strip, and paired with a tint on the row itself.
+              This is the marker you come back looking for once a handful of
+              sessions are done with — a chip alone would be the thing that
+              scrolls out of sight on exactly the busy row that has one. */}
+          {s.user.cleanup && (
+            <span className="chip cleanup" title="Cleaned up — ready to close and archive">
+              cleanup
+            </span>
+          )}
           {s.user.pinned && <span className="chip pin">pin</span>}
           {s.user.priority && <span className={`chip pri ${s.user.priority}`}>{s.user.priority.toUpperCase()}</span>}
           {s.attached && <span className="chip live">term</span>}

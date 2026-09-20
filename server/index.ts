@@ -12,7 +12,7 @@ import { readArtifacts } from './artifacts.js';
 import { saveCache, searchIds } from './scan.js';
 import { loadStore, setUserState, flushStore, isSafeKey, hasUserState, isReadOnly } from './store.js';
 import { readLiveSessions } from './live.js';
-import { readUsage, refreshUsage, refreshInFlight, needsRefresh } from './usage.js';
+import { readUsage, refreshUsage, refreshInFlight, needsRefresh, refreshableAt } from './usage.js';
 import { pickFolder } from './pick-folder.js';
 import {
   startTerm, writeTerm, resizeTerm, killTerm, disposeTerm,
@@ -204,9 +204,21 @@ app.get('/api/health', (_req, res) => {
  * front end can poll this as often as it likes.
  */
 app.get('/api/usage', (_req, res) => {
-  const usage = readUsage();
-  res.json({ usage, refreshing: refreshInFlight(), refreshable: needsRefresh(usage) });
+  res.json(usagePayload(readUsage()));
 });
+
+/**
+ * One shape for both usage routes, so the refresh reply can update the button
+ * that triggered it instead of leaving it stale until the next poll.
+ */
+function usagePayload(usage: ReturnType<typeof readUsage>) {
+  return {
+    usage,
+    refreshing: refreshInFlight(),
+    refreshable: needsRefresh(usage),
+    refreshableAt: refreshableAt(usage),
+  };
+}
 
 /**
  * Bring the numbers up to date, which means starting a throwaway Claude Code
@@ -216,7 +228,7 @@ app.get('/api/usage', (_req, res) => {
  */
 app.post('/api/usage/refresh', async (_req, res) => {
   try {
-    res.json({ usage: await refreshUsage(), refreshing: false });
+    res.json(usagePayload(await refreshUsage()));
   } catch (err: any) {
     res.status(500).json({ error: String(err?.message ?? err) });
   }
@@ -296,6 +308,7 @@ function buildPatch(body: any): Partial<UserState> {
   }
   if ('pinned' in body) patch.pinned = parseBool(body.pinned, 'pinned');
   if ('archived' in body) patch.archived = parseBool(body.archived, 'archived');
+  if ('cleanup' in body) patch.cleanup = parseBool(body.cleanup, 'cleanup');
   if ('note' in body) {
     if (typeof body.note !== 'string') throw new BadRequest('note must be a string');
     if (body.note.length > MAX_NOTE_LEN) throw new BadRequest(`note longer than ${MAX_NOTE_LEN} chars`);

@@ -102,7 +102,8 @@ export function setUserState(id: string, patch: Partial<UserState>): UserState {
     !next.pinned &&
     (next.snoozedUntil === null || next.snoozedUntil <= 0) &&
     !next.note &&
-    !next.archived;
+    !next.archived &&
+    !next.cleanup;
   if (isEmpty) delete data.sessions[id];
   else data.sessions[id] = next;
   dirty = true;

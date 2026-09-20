@@ -151,6 +151,15 @@ const main = async () => {
     check('reading again is the same answer without starting anything',
       read.usage?.fetchedAt === refreshed.usage?.fetchedAt);
     check('  and it reports there is nothing worth refreshing yet', read.refreshable === false);
+    // The refresh button is disabled on exactly this pair and says WHEN it
+    // lifts, so a missing or past timestamp would leave it dead with no reason
+    // given. Bounded above by the throttle itself — a value further out than
+    // that would sit there disabled long after a refresh would have worked.
+    check('  and says when refreshing becomes possible again',
+      typeof read.refreshableAt === 'number' &&
+      read.refreshableAt > Date.now() &&
+      read.refreshableAt <= Date.now() + 5 * 60_000,
+      String(read.refreshableAt));
 
     // Inside the throttle a probe cannot succeed, so it must not be started:
     // an 8-second spawn that always times out is the failure this prevents.
@@ -167,6 +176,9 @@ const main = async () => {
     check('an hour-old cache is served, but marked stale',
       old.usage?.fiveHour?.percent === 42 && old.usage?.stale === true,
       JSON.stringify(old.usage));
+    check('  and refreshing it is offered, not held back',
+      old.refreshable === true && old.refreshableAt === null,
+      JSON.stringify({ refreshable: old.refreshable, refreshableAt: old.refreshableAt }));
 
     await settle();
     fs.writeFileSync(CONFIG, config({ fetchedAtMs: Date.now(), account: 'bbbbbbbb-2222-4222-8222-222222222222', fiveHour: 99, weekly: 99, pad: 'other-account' }));

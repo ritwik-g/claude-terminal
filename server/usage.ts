@@ -204,6 +204,21 @@ export function needsRefresh(snapshot: UsageSnapshot | null): boolean {
   return Date.now() - snapshot.fetchedAt >= REFRESH_THROTTLE_MS;
 }
 
+/**
+ * When `needsRefresh` will start returning true, epoch ms, or null when it
+ * already does.
+ *
+ * Sent to the front end so a disabled refresh button can say how long the wait
+ * is. The alternative — the client keeping its own copy of REFRESH_THROTTLE_MS
+ * — would be a second source of truth for a number that exists to match Claude
+ * Code's, and the two would drift the first time Claude Code changed its own.
+ */
+export function refreshableAt(snapshot: UsageSnapshot | null): number | null {
+  if (!snapshot) return null;
+  const at = snapshot.fetchedAt + REFRESH_THROTTLE_MS;
+  return at > Date.now() ? at : null;
+}
+
 export function refreshInFlight(): boolean {
   return inFlight !== null;
 }

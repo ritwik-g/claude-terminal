@@ -4,8 +4,12 @@ import { authHeaders } from './token';
 
 export interface UsagePayload {
   usage: UsageSnapshot | null;
+  /** A probe is running somewhere — started by this tab or another one. */
   refreshing: boolean;
+  /** False while Claude Code would throttle the refresh away, doing nothing. */
   refreshable?: boolean;
+  /** When that throttle lifts, epoch ms; null when it already has. */
+  refreshableAt?: number | null;
 }
 
 export interface DirListing {

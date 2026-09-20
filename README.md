@@ -35,7 +35,8 @@ yourself. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **Search that reads the conversation** | Titles, ids, tags, branches, cwds, PR numbers — **and the messages themselves**, so a phrase you remember typing finds the session. |
 | **Branch and rename from the app** | Runs Claude Code's own `/branch` and `/rename` in the live session, so it stays the source of truth for its own title and lineage. |
 | **Tells you when something finished** | A session that stops working raises a desktop notification and a dock badge, and puts a pulsing dot on the row until you open it. Debounced, so a gap between turns is not reported as a finish. |
-| **Usage at a glance** | How much of your 5-hour window is gone and when it resets, in the header. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
+| **Usage at a glance** | How much of your 5-hour window is gone and the clock time it resets at, in the header. Hover or click for both windows in full, with their reset times, and a refresh button of its own. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
+| **Mark a session cleaned up** | `c` tints the row and chips it, so the session you tidied up is findable again among a dozen that look identical. A **Cleanup** filter in the sidebar collects them, to close and archive in one pass. |
 | **Your working set survives a quit** | The terminals you had open are offered back on the next launch, in one click. |
 | **Active only, by default** | Opens showing just what's running — one click to see everything, and searching overrides it, so nothing is ever unreachable. |
 
@@ -168,6 +169,7 @@ On a 135-session corpus that is a 1.9MB index answering in under 30ms.
 | `p` | cycle priority |
 | `x` | pin |
 | `t` | add a tag |
+| `c` | mark cleaned up |
 | `s` | snooze 4h |
 | `r` | refresh |
 | `[` | hide / show the session list |

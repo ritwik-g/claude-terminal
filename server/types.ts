@@ -123,6 +123,22 @@ export interface UserState {
   snoozedUntil: number | null;
   note: string;
   archived: boolean;
+  /**
+   * Marked as cleaned up and ready to be closed and archived.
+   *
+   * Set by hand and never derived, unlike `ReviewInfo`. A review announces
+   * itself — it opens with a command whose name says so — but the tidying-up
+   * pass someone runs before shutting a session down is whatever they happen
+   * to type that day, so there is no command name or phrase to match on and a
+   * guess would be wrong in both directions: silence on the sessions that were
+   * cleaned, a marker on the ones that were not.
+   *
+   * It is not a tag, because it is not a category: it is a step in getting rid
+   * of the session, it applies to at most a handful at a time, and it is meant
+   * to be cleared. Tags are the long-lived filing system, and burying this
+   * among a dozen customer names is exactly how it goes unnoticed.
+   */
+  cleanup: boolean;
 }
 
 export interface Session {
@@ -204,4 +220,5 @@ export const EMPTY_USER_STATE: UserState = {
   snoozedUntil: null,
   note: '',
   archived: false,
+  cleanup: false,
 };

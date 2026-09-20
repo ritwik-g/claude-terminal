@@ -149,6 +149,9 @@ export function matches(s: Session, q: string): boolean {
     // number of the second PR in a two-PR review finds nothing.
     (s.review?.prs ?? []).map((p) => `pr #${p.number} ${p.repository}`).join(' '),
     s.user.priority ?? '',
+    // So 'cleanup' in the search box finds the marked sessions, the same way
+    // 'review' finds the derived review ones.
+    s.user.cleanup ? 'cleanup' : '',
     s.shape,
   ].join(' ').toLowerCase();
   const id = s.id.toLowerCase();

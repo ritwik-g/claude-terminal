@@ -33,6 +33,7 @@ const SHORTCUTS: { keys: string; what: string }[] = [
   { keys: 'p', what: 'cycle priority \u2014 p0, p1, p2, none' },
   { keys: 'x', what: 'pin or unpin' },
   { keys: 't', what: 'add a tag' },
+  { keys: 'c', what: 'mark cleaned up \u2014 tints the row so it is findable when you come back to close and archive it' },
   { keys: 's', what: 'snooze for 4 hours' },
   { keys: 'r', what: 'refresh now' },
   { keys: '[', what: 'hide or show the session list' },
@@ -98,6 +99,11 @@ export function App() {
   const [tagsOpen, setTagsOpen] = useState(false);
   const [tagQuery, setTagQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
+  // Sessions marked cleaned-up and ready to close. Not persisted: it is a
+  // "show me what is left to archive" pass you make and then leave, so a
+  // filter that survived a restart would be a list mysteriously missing most
+  // of its rows the next morning.
+  const [cleanupOnly, setCleanupOnly] = useState(false);
   const [activeOnly, setActiveOnly] = useState(
     () => { try { return localStorage.getItem('ct.activeOnly') !== '0'; } catch { return true; } },
   );
@@ -330,11 +336,12 @@ export function App() {
       sessions.filter(
         (s) =>
           (showArchived ? s.user.archived : !s.user.archived) &&
+          (!cleanupOnly || s.user.cleanup) &&
           (!shapeFilter || s.shape === shapeFilter) &&
           (!tagFilters.length || s.user.tags.some((t) => tagFilters.includes(t))) &&
           hits(s),
       ),
-    [sessions, hits, shapeFilter, tagFilters, showArchived],
+    [sessions, hits, shapeFilter, tagFilters, showArchived, cleanupOnly],
   );
 
   /**
@@ -347,9 +354,14 @@ export function App() {
    * session you mean to come back to, so it is almost always a QUIET one this
    * would hide. Without this, half the tag menu read "0" and every one of
    * those rows was a click to an empty list.
+   *
+   * The cleanup filter is the sharpest case of all: a session you have cleaned
+   * up is by definition finished, so every row it is looking for is one
+   * "active only" hides. Leaving it out would make that button always show an
+   * empty list.
    */
   const activeApplies =
-    activeOnly && !query.trim() && !bucketFilter && !tagFilters.length;
+    activeOnly && !query.trim() && !bucketFilter && !tagFilters.length && !cleanupOnly;
 
   const visible = useMemo(
     () => (activeApplies ? baseVisible.filter(isActive) : baseVisible),
@@ -445,7 +457,7 @@ export function App() {
   useEffect(() => {
     setCursorId(flat[0]?.id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, shapeFilter, tagFilters, bucketFilter, showArchived, activeOnly]);
+  }, [query, shapeFilter, tagFilters, bucketFilter, showArchived, activeOnly, cleanupOnly]);
 
   // If the last use of a tag is removed it leaves the menu — so drop it from
   // the selection too, or the filter stays on with no control left to clear it
@@ -471,6 +483,7 @@ export function App() {
       // otherwise the chips describe the active list while the bucket chips
       // describe the archived one.
       if (showArchived ? !s.user.archived : s.user.archived) continue;
+      if (cleanupOnly && !s.user.cleanup) continue;
       if (tagFilters.length && !s.user.tags.some((t) => tagFilters.includes(t))) continue;
       if (bucketFilter && bucketOf(s, now) !== bucketFilter) continue;
       if (activeApplies && !isActive(s)) continue;
@@ -478,7 +491,7 @@ export function App() {
       c[s.shape]++;
     }
     return c;
-  }, [sessions, hits, tagFilters, showArchived, bucketFilter, now, activeApplies]);
+  }, [sessions, hits, tagFilters, showArchived, bucketFilter, now, activeApplies, cleanupOnly]);
 
   /**
    * How many sessions each tag would bring in, counted in the same scope as
@@ -489,6 +502,7 @@ export function App() {
     const c = new Map<string, number>();
     for (const s of sessions) {
       if (showArchived ? !s.user.archived : s.user.archived) continue;
+      if (cleanupOnly && !s.user.cleanup) continue;
       if (shapeFilter && s.shape !== shapeFilter) continue;
       if (bucketFilter && bucketOf(s, now) !== bucketFilter) continue;
       // Deliberately NOT filtered by `activeApplies`: picking a tag switches
@@ -498,7 +512,27 @@ export function App() {
       for (const t of s.user.tags) c.set(t, (c.get(t) ?? 0) + 1);
     }
     return c;
-  }, [sessions, hits, shapeFilter, showArchived, bucketFilter, now]);
+  }, [sessions, hits, shapeFilter, showArchived, bucketFilter, now, cleanupOnly]);
+
+  /**
+   * How many sessions the cleanup filter would show — counted WITHOUT the
+   * cleanup filter itself, and without "active only", for the same reason the
+   * tag counts are: turning it on must not zero the number on the button you
+   * would turn it off with, and every row it offers is one "active only" hides.
+   */
+  const cleanupCount = useMemo(
+    () =>
+      sessions.filter(
+        (s) =>
+          s.user.cleanup &&
+          (showArchived ? s.user.archived : !s.user.archived) &&
+          (!shapeFilter || s.shape === shapeFilter) &&
+          (!tagFilters.length || s.user.tags.some((t) => tagFilters.includes(t))) &&
+          (!bucketFilter || bucketOf(s, now) === bucketFilter) &&
+          hits(s),
+      ).length,
+    [sessions, hits, shapeFilter, tagFilters, showArchived, bucketFilter, now],
+  );
 
   /** The menu's rows: what the search box allows, chosen ones held at the top. */
   const tagOptions = useMemo(() => {
@@ -811,6 +845,7 @@ export function App() {
       else if (e.key === 'x') { e.preventDefault(); void patch(s.id, { pinned: !s.user.pinned }); }
       else if (e.key === 'p') { e.preventDefault(); cyclePriority(s); }
       else if (e.key === 't') { e.preventDefault(); setSelectedId(s.id); setTimeout(() => tagRef.current?.focus(), 30); }
+      else if (e.key === 'c') { e.preventDefault(); void patch(s.id, { cleanup: !s.user.cleanup }); }
       else if (e.key === 's') {
         e.preventDefault();
         advanceCursorPast(s.id);
@@ -1166,6 +1201,25 @@ export function App() {
               </div>
             </>
           )}
+          {/* Rendered whenever the filter is on OR there is anything to find,
+              so turning it on can never leave a button-less empty list — the
+              same rule the archived toggle below follows. */}
+          {(cleanupOnly || cleanupCount > 0) && (
+            <div className="filter-row">
+              <button
+                className={`btn sm cleanup${cleanupOnly ? ' on' : ''}`}
+                aria-pressed={cleanupOnly}
+                onClick={() => setCleanupOnly((v) => !v)}
+                title={
+                  cleanupOnly
+                    ? 'Showing only sessions marked cleaned up. Click to show the rest again.'
+                    : 'Show only the sessions you marked cleaned up, to close and archive in one pass  c'
+                }
+              >
+                {cleanupOnly ? '\u25cf' : '\u25cb'} Cleanup {cleanupCount}
+              </button>
+            </div>
+          )}
           {/* The exit must render whenever the view is open, not only while
               something is archived — unarchiving the last item used to remove
               the only way back out. */}
@@ -1179,12 +1233,13 @@ export function App() {
               </button>
             </div>
           )}
-          {(query || shapeFilter || tagFilters.length || bucketFilter) && (
+          {(query || shapeFilter || tagFilters.length || bucketFilter || cleanupOnly) && (
             <div className="filter-row">
               <button
                 className="btn sm"
                 onClick={() => {
                   setQuery(''); setShapeFilter(null); setTagFilters([]); setBucketFilter(null);
+                  setCleanupOnly(false);
                 }}
               >
                 Clear filters
@@ -1257,15 +1312,16 @@ export function App() {
                 ? 'Every group is collapsed — expand one above.'
                 : bucketFilter && visible.length
                 ? <>Nothing in <strong>{BUCKET_LABEL[bucketFilter]}</strong> matches the current filters.</>
-                : query || shapeFilter || tagFilters.length
+                : query || shapeFilter || tagFilters.length || cleanupOnly
                   ? 'No session matches these filters.'
                   : showArchived ? 'Nothing archived.' : 'No sessions found.'}
-              {(query || shapeFilter || tagFilters.length || bucketFilter) && (
+              {(query || shapeFilter || tagFilters.length || bucketFilter || cleanupOnly) && (
                 <div style={{ marginTop: 10 }}>
                   <button
                     className="btn sm"
                     onClick={() => {
                       setQuery(''); setShapeFilter(null); setTagFilters([]); setBucketFilter(null);
+                      setCleanupOnly(false);
                     }}
                   >
                     Clear filters
@@ -1491,6 +1547,21 @@ export function App() {
                   onClick={() => void patch(selected.id, { pinned: !selected.user.pinned })}
                 >
                   {selected.user.pinned ? '★ Pinned' : '☆ Pin'}
+                </button>
+                {/* Sits beside Archive rather than among the priority buttons,
+                    because it is the step before it: mark it cleaned up, close
+                    the terminal, then archive when you next sweep through. */}
+                <button
+                  className={`btn sm cleanup${selected.user.cleanup ? ' on' : ''}`}
+                  aria-pressed={selected.user.cleanup}
+                  onClick={() => void patch(selected.id, { cleanup: !selected.user.cleanup })}
+                  title={
+                    selected.user.cleanup
+                      ? 'Marked cleaned up. Click to unmark  c'
+                      : 'Mark cleaned up, so this row stands out when you come back to close and archive it  c'
+                  }
+                >
+                  {selected.user.cleanup ? '\u2713 Cleaned up' : 'Mark cleaned up'}
                 </button>
                 <span className="detail-label" style={{ marginLeft: 6 }}>Snooze</span>
                 {SNOOZE_OPTIONS.map(([label, ms]) => (
