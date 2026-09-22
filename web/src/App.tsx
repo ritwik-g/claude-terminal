@@ -4,12 +4,18 @@ import { api, type SessionsPayload } from './api';
 import {
   BUCKET_COLOR, BUCKET_HELP, BUCKET_LABEL, BUCKET_ORDER, STATE_COLOR, STATE_LABEL,
   SHAPE_GLYPH, SHAPE_HINT, SHAPE_LABEL, SHAPE_ORDER,
-  bucketOf, matches, relTime, shortPath, type Bucket,
+  bucketOf, clockTime, formatTokens, isActive, matches, relTime, shortPath,
+  wakeAt, wokeAgo, worthCompacting, type Bucket,
 } from './util';
 import { SessionRow } from './components/SessionRow';
 import { UsagePill } from './components/UsagePill';
+import { SettingsPop } from './components/SettingsPop';
+import { UsageAlertBar } from './components/UsageAlertBar';
 import { FolderBrowser } from './components/FolderBrowser';
 import { TerminalPane } from './components/TerminalPane';
+import { useUsage } from './useUsage';
+import { useUsageAlerts } from './alerts';
+import { usePrefs } from './prefs';
 
 const POLL_MS = 2500;
 /**
@@ -41,18 +47,6 @@ const SHORTCUTS: { keys: string; what: string }[] = [
   { keys: '\u2318F', what: 'find inside the terminal (Ctrl+F on Linux)' },
 ];
 
-/**
- * What "active" means: a Claude Code process is running for this session right
- * now — either registered in ~/.claude/sessions, or attached to a terminal in
- * this app.
- *
- * `attached` is not redundant. A session you have just opened here spawns its
- * PTY immediately but takes a second or two to register itself as live, and
- * without this the row would vanish from under you at the exact moment you
- * opened it.
- */
-const isActive = (s: Session): boolean => !!s.live || s.attached;
-
 /** Identity of one completion marker: the session AND when it stopped. */
 const doneKey = (c: { sessionId: string; at: number }): string => `${c.sessionId}:${c.at}`;
 
@@ -65,11 +59,40 @@ function clampSidebar(px: number): number {
   return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Math.round(px)));
 }
 
-const SNOOZE_OPTIONS: [string, number][] = [
-  ['1h', 3600_000],
-  ['4h', 4 * 3600_000],
-  ['tomorrow', 24 * 3600_000],
-  ['1w', 7 * 24 * 3600_000],
+/**
+ * The snooze presets, as functions of "now" rather than fixed durations.
+ *
+ * The two short ones really are durations — "not for an hour" means an hour.
+ * The two long ones are not: "tomorrow" names the next time you will be at
+ * your desk, which is a morning, not a point 24 hours from whenever you
+ * happened to click. Adding 24h to a Friday 6pm snooze wakes it on Saturday
+ * evening, which is neither tomorrow nor useful.
+ */
+const SNOOZE_OPTIONS: {
+  label: string;
+  /** `wake` is the configured wake time, in minutes past midnight. */
+  at: (now: number, wake: number) => number;
+  hint: string;
+}[] = [
+  { label: '1h', at: (now) => now + 3600_000, hint: 'Back in an hour' },
+  { label: '4h', at: (now) => now + 4 * 3600_000, hint: 'Back in four hours' },
+  {
+    label: 'tomorrow',
+    at: (now, wake) => wakeAt(now, 1, wake),
+    hint: 'Back at the start of the next working day',
+  },
+  {
+    label: 'next week',
+    at: (now, wake) => wakeAt(now, 7, wake),
+    hint: 'Back a week from now, at the start of that working day',
+  },
+];
+
+/** Units offered by the custom snooze field, in milliseconds. */
+const CUSTOM_UNITS: [string, number][] = [
+  ['minutes', 60_000],
+  ['hours', 3600_000],
+  ['days', 24 * 3600_000],
 ];
 
 export function App() {
@@ -163,6 +186,29 @@ export function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameText, setRenameText] = useState('');
+  // The custom-snooze popover, and its two draft fields.
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
+  const [snoozeQty, setSnoozeQty] = useState('30');
+  const [snoozeUnit, setSnoozeUnit] = useState(CUSTOM_UNITS[0][1]);
+  const [snoozeUntil, setSnoozeUntil] = useState('');
+  /**
+   * Terminal ids we have typed /compact into, so the button that sent it can
+   * say so.
+   *
+   * Local and unpersisted on purpose: this is "I just pressed that", not a
+   * fact about the session. Whether the compaction actually happened shows up
+   * where it should — in the session's context size, which drops on the next
+   * scan and takes it off the candidate list by itself.
+   */
+  const [compactSent, setCompactSent] = useState<Set<string>>(() => new Set());
+
+  const [prefs, patchPrefs] = usePrefs();
+  /**
+   * One poller for the account-wide windows, shared by the pill that draws
+   * them and the alerts that watch them — see useUsage.
+   */
+  const usageState = useUsage();
+  const { active: usageAlerts, dismiss: dismissAlert } = useUsageAlerts(usageState.usage, prefs, now);
   const renameRef = useRef<HTMLInputElement>(null);
   // Artifacts are fetched per selected session rather than arriving with the
   // poll payload, because finding them means reading a transcript whole.
@@ -615,6 +661,61 @@ export function App() {
     [refresh],
   );
 
+  /**
+   * Type /compact at a session's prompt.
+   *
+   * Sent, not forced: this writes the command the way you would, into a
+   * terminal this app owns, and Claude Code decides the rest — a busy session
+   * simply queues it. Nothing here waits for a result, because compaction
+   * takes a turn of its own and the evidence arrives on its own schedule, as
+   * the session's context size dropping on a later scan.
+   */
+  const compact = useCallback(
+    async (s: Session) => {
+      if (!s.termId) return;
+      const termId = s.termId;
+      setCompactSent((prev) => new Set(prev).add(termId));
+      try {
+        await api.termCommand(termId, 'compact');
+      } catch (e: any) {
+        // Put the button back rather than leaving a tick over a command that
+        // never landed.
+        setCompactSent((prev) => {
+          const next = new Set(prev);
+          next.delete(termId);
+          return next;
+        });
+        setError(String(e?.message ?? e));
+      }
+    },
+    [],
+  );
+
+  /**
+   * Opening a session that has come back from a snooze clears its marker.
+   *
+   * Clearing means dropping `snoozedUntil` outright, which is honest: the
+   * snooze is over, you have seen that it is over, and there is nothing left
+   * for the field to record. That also makes the marker survive a reload
+   * without a second store of "seen" ids — the absence of the timestamp IS the
+   * acknowledgement.
+   *
+   * The ref guards the gap between the PATCH and the poll that reflects it, so
+   * a selection held across two polls sends one write rather than three.
+   */
+  // Every transient surface in the detail panel belongs to the session it was
+  // opened over, so moving to another one must not leave it hanging there.
+  useEffect(() => { setSnoozeOpen(false); }, [selectedId]);
+
+  const clearedWoke = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!selectedId || clearedWoke.current.has(selectedId)) return;
+    const s = payload?.sessions.find((x) => x.id === selectedId);
+    if (!s || wokeAgo(s, Date.now()) === null) return;
+    clearedWoke.current.add(selectedId);
+    void patch(selectedId, { snoozedUntil: null });
+  }, [selectedId, payload, patch]);
+
   const restorable = restoreDone ? [] : (payload?.restore ?? []);
 
   const dismissRestore = useCallback(async () => {
@@ -978,7 +1079,8 @@ export function App() {
             );
           })}
         </div>
-        <UsagePill />
+        <UsagePill state={usageState} now={now} />
+        <SettingsPop prefs={prefs} patch={patchPrefs} />
         <button
           className="btn sm"
           onClick={() => { setNewCwd(selected?.cwd ?? knownCwds[0] ?? ''); setNewOpen((v) => !v); }}
@@ -1040,6 +1142,23 @@ export function App() {
           </>
         )}
       </div>
+
+      {/* One at a time. Two windows crossing a threshold in the same minute is
+          normal — the weekly one is usually behind the 5-hour one — and two
+          stacked bars would push the list down the screen to say one thing
+          twice. `alertsFor` has already ranked them, so this is the one that
+          matters; dismissing it reveals the next. */}
+      {usageAlerts.length > 0 && (
+        <UsageAlertBar
+          alert={usageAlerts[0]}
+          sessions={sessions}
+          compactAbove={prefs.compactAtKTokens * 1000}
+          sent={compactSent}
+          onCompact={(s) => void compact(s)}
+          onSelect={(s) => select(s)}
+          onDismiss={() => dismissAlert(usageAlerts[0].key)}
+        />
+      )}
 
       {restorable.length > 0 && (
         <div className="restore-bar" role="status">
@@ -1295,6 +1414,8 @@ export function App() {
                       selected={s.id === selectedId}
                       atCursor={flat[cursor]?.id === s.id}
                       unseenDone={unseenDone.has(s.id)}
+                      wokeMsAgo={wokeAgo(s, now)}
+                      compactAbove={prefs.compactAtKTokens * 1000}
                       onClick={() => select(s)}
                     />
                   ))}
@@ -1455,6 +1576,22 @@ export function App() {
                   {selected.branch ? ` · ${selected.branch}` : ''}
                   {selected.git?.isWorktree ? ' · worktree' : ''}
                   {` · ${relTime(selected.lastActivity, now)} ago`}
+                  {/* Context size, not file size: what the model is carrying
+                      and paying for on every turn. Shown here rather than on a
+                      row of its own because it belongs with the other facts
+                      about where this session has got to. */}
+                  {selected.contextTokens > 0 && (
+                    <span
+                      // The size is shown whatever the session is doing — you
+                      // asked about this one. The amber only comes on when it
+                      // is RUNNING and big, which is the same test the row
+                      // chip and the alert bar use.
+                      className={worthCompacting(selected, prefs.compactAtKTokens * 1000) ? 'ctx heavy' : 'ctx'}
+                      title={`${selected.contextTokens.toLocaleString()} tokens of context on the last turn — re-sent in full on every turn this session takes`}
+                    >
+                      {` · ${formatTokens(selected.contextTokens)} ctx`}
+                    </span>
+                  )}
                 </span>
                 <div className="detail-actions">
                   {selected.review && (
@@ -1513,6 +1650,22 @@ export function App() {
                       >
                         Rename
                       </button>
+                      {/* Only where a terminal of ours is listening. The
+                          session's own context size is right there in the line
+                          above, so the decision and the button are in the same
+                          place. */}
+                      <button
+                        className="btn"
+                        disabled={selected.termId !== null && compactSent.has(selected.termId)}
+                        onClick={() => void compact(selected)}
+                        title={
+                          selected.termId !== null && compactSent.has(selected.termId)
+                            ? '/compact has been sent to this session'
+                            : 'Run /compact here — Claude Code summarises the conversation so far and drops the rest, which is what shrinks the context it re-sends every turn'
+                        }
+                      >
+                        {selected.termId !== null && compactSent.has(selected.termId) ? '✓ Compacting' : 'Compact'}
+                      </button>
                       <button className="btn" disabled={busy} onClick={() => void restart(selected)}>Restart</button>
                       <button className="btn danger" disabled={busy} onClick={() => void closeTerm(selected)}>Close</button>
                     </>
@@ -1564,16 +1717,120 @@ export function App() {
                   {selected.user.cleanup ? '\u2713 Cleaned up' : 'Mark cleaned up'}
                 </button>
                 <span className="detail-label" style={{ marginLeft: 6 }}>Snooze</span>
-                {SNOOZE_OPTIONS.map(([label, ms]) => (
-                  <button key={label} className="btn sm"
-                          onClick={() => void patch(selected.id, { snoozedUntil: Date.now() + ms })}>
-                    {label}
+                {SNOOZE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.label}
+                    className="btn sm"
+                    // The preset says '1h'; the tooltip says what time that is.
+                    // For 'tomorrow' and 'next week' those are different
+                    // questions, and the second is the one you are asking.
+                    title={`${opt.hint} — ${clockTime(opt.at(now, prefs.wakeMinutes), now)}`}
+                    onClick={() =>
+                      void patch(selected.id, { snoozedUntil: opt.at(Date.now(), prefs.wakeMinutes) })}
+                  >
+                    {opt.label}
                   </button>
                 ))}
-                {selected.user.snoozedUntil && selected.user.snoozedUntil > now && (
-                  <button className="btn sm on" onClick={() => void patch(selected.id, { snoozedUntil: null })}>
-                    Unsnooze
+                <span className="snooze-group">
+                  <button
+                    className={`btn sm${snoozeOpen ? ' on' : ''}`}
+                    aria-expanded={snoozeOpen}
+                    aria-haspopup="true"
+                    onClick={() => setSnoozeOpen((v) => !v)}
+                    title="Snooze for a length of time you choose, or until an exact moment"
+                  >
+                    {'custom…'}
                   </button>
+                  {snoozeOpen && (
+                    <>
+                      <div className="scrim" onClick={() => setSnoozeOpen(false)} />
+                      <div className="snooze-pop" role="group" aria-label="Custom snooze">
+                        <div className="detail-label">Snooze for</div>
+                        <div className="snooze-line">
+                          <input
+                            className="tag-input snooze-qty"
+                            type="number"
+                            min={1}
+                            autoFocus
+                            value={snoozeQty}
+                            onChange={(e) => setSnoozeQty(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key !== 'Enter') return;
+                              const n = Number(snoozeQty);
+                              if (!(n > 0)) return;
+                              setSnoozeOpen(false);
+                              void patch(selected.id, { snoozedUntil: Date.now() + n * snoozeUnit });
+                            }}
+                          />
+                          <select
+                            className="snooze-unit"
+                            value={snoozeUnit}
+                            onChange={(e) => setSnoozeUnit(Number(e.target.value))}
+                          >
+                            {CUSTOM_UNITS.map(([label, ms]) => (
+                              <option key={label} value={ms}>{label}</option>
+                            ))}
+                          </select>
+                          <button
+                            className="btn sm primary"
+                            disabled={!(Number(snoozeQty) > 0)}
+                            onClick={() => {
+                              const n = Number(snoozeQty);
+                              if (!(n > 0)) return;
+                              setSnoozeOpen(false);
+                              void patch(selected.id, { snoozedUntil: Date.now() + n * snoozeUnit });
+                            }}
+                          >
+                            Snooze
+                          </button>
+                        </div>
+                        <div className="detail-label">Or until</div>
+                        <div className="snooze-line">
+                          {/* A local datetime, read back in local time by
+                              Date's own parser — the same clock the wake-time
+                              presets and the list's ages are in. */}
+                          <input
+                            className="tag-input"
+                            style={{ flex: 1, minWidth: 0 }}
+                            type="datetime-local"
+                            value={snoozeUntil}
+                            onChange={(e) => setSnoozeUntil(e.target.value)}
+                          />
+                          <button
+                            className="btn sm"
+                            disabled={!snoozeUntil || !(Date.parse(snoozeUntil) > Date.now())}
+                            onClick={() => {
+                              const at = Date.parse(snoozeUntil);
+                              if (!(at > Date.now())) return;
+                              setSnoozeOpen(false);
+                              void patch(selected.id, { snoozedUntil: at });
+                            }}
+                          >
+                            Set
+                          </button>
+                        </div>
+                        {snoozeUntil && !(Date.parse(snoozeUntil) > Date.now()) && (
+                          <div className="snooze-hint warn">That moment has already passed.</div>
+                        )}
+                        <div className="snooze-hint">
+                          Snoozed sessions drop to the bottom of the list until they wake,
+                          and are marked for a while afterwards so you can see they came back.
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </span>
+                {selected.user.snoozedUntil !== null && selected.user.snoozedUntil > now && (
+                  <>
+                    <button className="btn sm on" onClick={() => void patch(selected.id, { snoozedUntil: null })}>
+                      Unsnooze
+                    </button>
+                    {/* The one fact the buttons above cannot show: what the
+                        snooze you already set actually resolved to. */}
+                    <span className="snooze-when">
+                      wakes {clockTime(selected.user.snoozedUntil, now)}
+                    </span>
+                  </>
                 )}
                 <button
                   className="btn sm"

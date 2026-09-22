@@ -59,7 +59,7 @@ export const api = {
     json<{ artifacts: Artifact[] }>(`/api/sessions/${encodeURIComponent(id)}/artifacts`),
 
   /** Run one of Claude Code's own slash commands inside a terminal we own. */
-  termCommand: (id: string, command: 'branch' | 'rename', arg?: string) =>
+  termCommand: (id: string, command: 'branch' | 'rename' | 'compact', arg?: string) =>
     json<{ ok: boolean; sent: string }>(`/api/terms/${encodeURIComponent(id)}/command`, {
       method: 'POST',
       body: JSON.stringify(arg === undefined ? { command } : { command, arg }),

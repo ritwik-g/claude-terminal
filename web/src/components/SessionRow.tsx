@@ -1,6 +1,9 @@
 import React from 'react';
 import type { Session } from '../../../server/types';
-import { STATE_COLOR, STATE_LABEL, SHAPE_GLYPH, SHAPE_HINT, relTime, shortId, shortPath } from '../util';
+import {
+  STATE_COLOR, STATE_LABEL, SHAPE_GLYPH, SHAPE_HINT,
+  formatTokens, relTime, shortId, shortPath, worthCompacting,
+} from '../util';
 
 /** How many of a review's PRs get their own chip before the rest collapse. */
 const PR_CHIPS = 3;
@@ -12,11 +15,23 @@ interface Props {
   now: number;
   /** Finished while you were away and not opened since — see App's seenDone. */
   unseenDone: boolean;
+  /**
+   * How long ago this session's snooze ran out, or null when it has not
+   * recently woken — see wokeAgo. A woken session rejoins the list silently,
+   * in whatever position its score earns, and this is what says so.
+   */
+  wokeMsAgo: number | null;
+  /**
+   * Context size at which a RUNNING session is worth compacting, in tokens.
+   * An idle session is not spending anything, so it is never flagged — see
+   * worthCompacting.
+   */
+  compactAbove: number;
   onClick: () => void;
 }
 
 export const SessionRow = React.memo(function SessionRow({
-  s, selected, atCursor, now, unseenDone, onClick,
+  s, selected, atCursor, now, unseenDone, wokeMsAgo, compactAbove, onClick,
 }: Props) {
   const dotColor = STATE_COLOR[s.state];
   // The primary line under the title is the single most useful fact we have:
@@ -35,13 +50,16 @@ export const SessionRow = React.memo(function SessionRow({
   // The strip is a fixed width and scrolls, so on a busy row some of it is
   // always off-screen. Spelling the whole set out in words gives the hover a
   // job beyond decoration — it is the only place the hidden chips are legible.
+  const heavy = worthCompacting(s, compactAbove);
   const chipWords = [
+    wokeMsAgo !== null ? `woke ${relTime(now - wokeMsAgo, now)} ago` : null,
     s.user.cleanup ? 'cleaned up — ready to close and archive' : null,
     s.user.pinned ? 'pinned' : null,
     s.user.priority ? s.user.priority.toUpperCase() : null,
     s.attached ? 'terminal open' : null,
     s.review ? `review · /${s.review.command}` : null,
     ...(s.pr ? [`PR #${s.pr.number}`] : reviewPrs.map((p) => `${p.repository} #${p.number}`)),
+    heavy ? `${formatTokens(s.contextTokens)} of context, running now — worth compacting` : null,
     ...s.user.tags,
   ].filter(Boolean) as string[];
 
@@ -49,6 +67,7 @@ export const SessionRow = React.memo(function SessionRow({
     <div
       className={
         `row${selected ? ' sel' : ''}${atCursor ? ' cursor' : ''}` +
+        (wokeMsAgo !== null ? ' woke' : '') +
         (s.user.cleanup ? ' cleanup' : '') +
         (s.user.priority ? ` pri-${s.user.priority}` : '')
       }
@@ -75,6 +94,7 @@ export const SessionRow = React.memo(function SessionRow({
       <span className="sr-only">
         {STATE_LABEL[s.state]}
         {unseenDone ? ', stopped since you last looked' : ''}
+        {wokeMsAgo !== null ? `, came back from a snooze ${relTime(now - wokeMsAgo, now)} ago` : ''}
       </span>
       <div className="row-main">
         <div className="row-title">
@@ -102,6 +122,18 @@ export const SessionRow = React.memo(function SessionRow({
               This is the marker you come back looking for once a handful of
               sessions are done with — a chip alone would be the thing that
               scrolls out of sight on exactly the busy row that has one. */}
+          {/* Ahead of everything else, and paired with a tint on the row.
+              Everything else in this strip is a state the session has been in
+              for a while; this one is the one thing that CHANGED since you
+              last looked at the list, and it is gone again in a few hours. */}
+          {wokeMsAgo !== null && (
+            <span
+              className="chip woke"
+              title={`Snooze ran out ${relTime(now - wokeMsAgo, now)} ago — open it to clear this`}
+            >
+              woke {relTime(now - wokeMsAgo, now)}
+            </span>
+          )}
           {s.user.cleanup && (
             <span className="chip cleanup" title="Cleaned up — ready to close and archive">
               cleanup
@@ -129,6 +161,18 @@ export const SessionRow = React.memo(function SessionRow({
           {!s.pr && reviewPrs.length > PR_CHIPS && (
             <span className="chip pr" title={`${reviewPrs.length} PRs under review`}>
               +{reviewPrs.length - PR_CHIPS}
+            </span>
+          )}
+          {/* Only on a running session big enough to be worth doing something
+              about. Every session has a context size, and printing all of them
+              — or every big one, running or not — is a column of numbers
+              nobody reads. */}
+          {heavy && (
+            <span
+              className="chip ctx"
+              title={`${s.contextTokens.toLocaleString()} tokens of context, re-sent on every turn this session takes — worth compacting`}
+            >
+              {formatTokens(s.contextTokens)}
             </span>
           )}
           {/* All of them, not the first: the strip scrolls now, so a second

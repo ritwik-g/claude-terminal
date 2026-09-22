@@ -36,6 +36,10 @@ yourself. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **Branch and rename from the app** | Runs Claude Code's own `/branch` and `/rename` in the live session, so it stays the source of truth for its own title and lineage. |
 | **Tells you when something finished** | A session that stops working raises a desktop notification and a dock badge, and puts a pulsing dot on the row until you open it. Debounced, so a gap between turns is not reported as a finish. |
 | **Usage at a glance** | How much of your 5-hour window is gone and the clock time it resets at, in the header. Hover or click for both windows in full, with their reset times, and a refresh button of its own. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
+| **And it warns you before it bites** | A bar across the top when a window passes 80%, or 30 minutes before one resets — with a desktop notification when the app is not focused. Both numbers are settings. |
+| **…with the fix attached** | The same bar lists the **running** sessions carrying the most context, biggest first, each with a **Compact** button that runs `/compact` in that session. A big session is re-sent in full on every turn it takes, so it is what the window is mostly spent on — and an idle one is not spending anything, so it is never flagged. |
+| **Snoozes wake when your day does** | *tomorrow* and *next week* mean 9am on the next working day, not "+24h" and "+7d" — a Friday evening snooze comes back on Monday morning. The hour is a setting, and **custom…** takes any duration or an exact moment. |
+| **A woken session says so** | A session whose snooze ran out rejoins the list in whatever position its score earns, which is silent. It now carries a *woke 41m* chip and a tinted edge until you open it. |
 | **Mark a session cleaned up** | `c` tints the row and chips it, so the session you tidied up is findable again among a dozen that look identical. A **Cleanup** filter in the sidebar collects them, to close and archive in one pass. |
 | **The cleanup mark can set itself** | Ship `/cleanup` and a one-line hook, and the session marks itself the moment you run it — see [Marking cleanup automatically](#marking-cleanup-automatically). |
 | **Your working set survives a quit** | The terminals you had open are offered back on the next launch, in one click. |
@@ -408,6 +412,53 @@ cannot oscillate.
 </details>
 
 <details>
+<summary><b>The usage warning arrives with something to do about it</b></summary>
+
+A bar appears across the top when a window passes your threshold (80% by
+default), or within your lead time of resetting (30 minutes). It fires **once**
+per condition per window: the de-duplication key carries the window's own reset
+timestamp, so the same 80% cannot nag you every thirty seconds, and the *next*
+window's 80% is a different key and is free to fire again. Nothing has to be
+cleaned up on a schedule. When the app is not focused the same thing arrives as
+a desktop notification; when it is, you are already looking at the bar and a
+popup would only teach you to turn popups off.
+
+The reset warning is independent of how fresh the numbers are. A reset time is
+a fixed timestamp, so it stays correct however old the reading behind it is —
+where a *percentage* whose own window has already rolled over describes a window
+that no longer exists, and is suppressed rather than shown.
+
+Attached to the bar is the thing you would actually do: the sessions carrying
+the most context, biggest first, each with a **Compact** button that types
+`/compact` at that session's prompt. It is sent the way you would type it, into
+a terminal this app owns — a busy session simply queues it — and nothing waits
+for a result, because the evidence arrives on its own schedule as the session's
+context size dropping on a later scan.
+
+Only **running** sessions are offered, and only running sessions get the chip on
+their row. An 800k-token session that nothing is executing against is not
+spending anything — it is a fact about a conversation you might resume one day,
+not a cost you are paying now. On a real tree most big sessions are of that
+kind, and flagging them all buried the two or three actually burning the window
+under a column of numbers nobody reads. A session running in a terminal of your
+own is still listed, because it is still spending; it just says *elsewhere*
+instead of offering a button, since there is nothing here to type into.
+
+That size is read from the last assistant turn's own `usage` block —
+`input + cache_creation + cache_read` — not from the transcript's size on disk.
+The file counts tool output and thinking the model is no longer carrying, and
+after a `/compact` it keeps growing while the context it describes has just
+collapsed. Subagent turns are skipped: their `usage` is the subagent's own
+conversation, which disappears with it, so counting one would make a session
+that just ran a Task look enormous. The threshold is absolute rather than a
+percentage of the model's limit, because the transcript does not record which
+limit applies — a 1M-context run and a 200k one both write `claude-opus-5` —
+and because what you are managing is cost, which tracks the size of the context
+you re-send every turn, not how close it is to overflowing.
+
+</details>
+
+<details>
 <summary><b>Manual state is an override, never load-bearing</b></summary>
 
 Tags, P0/P1/P2, pin and
@@ -416,6 +467,20 @@ the sidebar's tag menu as soon as you create one, where any number of them can
 be filtered on at once; priority colours the row's left edge,
 because it outranks every derived signal and you should be able to see why a row
 is on top.
+
+A snooze until *tomorrow* or *next week* names the next time you will be at your
+desk, not an interval: it resolves to 9am (a setting) on the next working day,
+skipping weekends, and is built by mutating a local `Date` rather than by adding
+milliseconds so that 9am stays 9am across a DST boundary. `now + 24h` from a
+Friday evening wakes on a Saturday, which is neither tomorrow nor useful.
+**custom…** takes any duration or an exact moment for the cases the presets miss.
+
+`snoozedUntil` is never cleared when it lapses — ranking simply stops honouring
+it — so the record of "this was set aside until now" is still there to read.
+That is what lets a woken row say *woke 41m* for a few hours instead of
+rejoining the list in silence, and opening the session drops the timestamp for
+good: the absence of it **is** the acknowledgement, so the marker survives a
+reload without a second store of what you have seen.
 
 </details>
 
@@ -475,8 +540,13 @@ priority, pins, snoozes, and the working set of open terminals),
 `~/.claude`**; that directory is read-only as far as this tool is concerned.
 
 The browser keeps a little of its own: `ct.selected`, `ct.activeOnly`,
-`ct.sidebarW`, `ct.sidebarOpen`, and `ct.seenDone` — which completion markers
-you have already looked at, so a window reload does not resurrect them.
+`ct.sidebarW`, `ct.sidebarOpen`, `ct.seenDone` — which completion markers you
+have already looked at, so a window reload does not resurrect them — and
+`ct.prefs`, the alert thresholds, compaction threshold and snooze wake hour.
+Those live here rather than in `state.json` because none of them describe a
+session: they are per-person, and every value is range-checked on the way back
+in, so a hand-edited file cannot put the alerts into a state where they fire
+constantly or never.
 
 If `state.json` exists but cannot be read, the server refuses to write over it
 and goes read-only for the session, saying so in the UI. A whole-file
@@ -567,6 +637,7 @@ System Settings > Privacy & Security.
 | `npm run test:title` | which name a row shows — that a session which cd's into a subdirectory or a worktree keeps its title instead of renaming itself to the folder it started in | nothing |
 | `npm run test:branch` | that a terminal follows its session across a `/branch`, and the slash-command route the Branch and Rename buttons drive | nothing |
 | `npm run test:usage` | the usage round trip — that a probe is skipped inside Claude Code's write throttle, and that a stale or another account's cache is never served as your current number | nothing |
+| `npm run test:alerts` | the usage alerts, the snooze wake times, and context sizing — that an alert fires once per window and again in the next one, that no wake time lands on a weekend or drifts across a DST boundary, and that context sizes read out of your real transcripts are still sane | nothing |
 | `npm run test:hook` | the cleanup hook — that it marks on the command and **not** on prose that merely says "clean up", and that it exits silently on every failure it can meet | nothing |
 | `npm run probe:usage` | the usage probe against your real Claude Code, printing what came back — for when the numbers stop moving and you need to see which half broke | Claude Code, logged in |
 

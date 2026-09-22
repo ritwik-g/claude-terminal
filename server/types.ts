@@ -158,6 +158,11 @@ export interface Session {
   lastActivity: number;
   sizeBytes: number;
   messages: number;
+  /**
+   * Tokens the last assistant turn carried — the session's live context size.
+   * See ScannedSession.contextTokens for why this and not `sizeBytes`.
+   */
+  contextTokens: number;
   version: string;
   tail: TailInfo;
   live: LiveInfo | null;

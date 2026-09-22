@@ -430,6 +430,17 @@ app.delete('/api/restore', (_req, res) => {
 const TERM_COMMANDS: Record<string, { takesArg: boolean }> = {
   branch: { takesArg: false },
   rename: { takesArg: true },
+  /**
+   * Compacting is Claude Code's own summarise-and-drop pass. It is offered
+   * here because the app is the only place that can see WHICH session is worth
+   * compacting — the account-wide usage windows and every session's context
+   * size sit side by side in one window, and nowhere else do.
+   *
+   * It is sent, never forced: this writes the command at the prompt of a
+   * terminal this app owns, exactly as typing it would, and Claude Code
+   * decides the rest. A busy session simply queues it.
+   */
+  compact: { takesArg: false },
 };
 const MAX_COMMAND_ARG = 200;
 

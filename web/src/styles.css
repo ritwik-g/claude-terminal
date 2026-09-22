@@ -68,10 +68,10 @@ input  { font-family: inherit; font-size: inherit; }
   /* Driven by an inline custom property so a drag is one style write on one
      element, rather than a React re-render per pointer event. */
   grid-template-columns: var(--sidebar-w, 380px) 1fr;
-  /* The restore row is `auto`, so it takes no height at all on the ordinary
-     launch where there is nothing to reopen. */
-  grid-template-rows: 44px auto 1fr;
-  grid-template-areas: "topbar topbar" "restore restore" "sidebar main";
+  /* The alert and restore rows are `auto`, so they take no height at all on
+     the ordinary launch where there is nothing to warn about or reopen. */
+  grid-template-rows: 44px auto auto 1fr;
+  grid-template-areas: "topbar topbar" "alert alert" "restore restore" "sidebar main";
   height: 100%;
 }
 
@@ -1052,3 +1052,182 @@ kbd {
 }
 .rename-hint { font-size: 10.5px; line-height: 1.5; color: var(--fg-dim); }
 .rename-hint code { font-family: var(--mono); color: var(--fg-muted); }
+
+/* ------------------------------------------------------------ usage alerts */
+
+/* Spans both columns, like the restore bar and for the same reason: a usage
+   window is an account-wide fact, not a property of the list. The accent comes
+   in as a custom property so one rule serves an amber 80%, a red 95% and the
+   blue "resets soon" without three near-identical blocks. */
+.alert-bar {
+  grid-area: alert;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 14px;
+  background: color-mix(in srgb, var(--alert-color) 11%, var(--bg-raised));
+  border-bottom: 1px solid color-mix(in srgb, var(--alert-color) 45%, transparent);
+  font-size: 12px;
+}
+.alert-icon { color: var(--alert-color); font-size: 14px; flex: none; }
+.alert-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: none; }
+.alert-text strong { font-size: 12px; font-weight: 600; color: var(--fg); }
+.alert-detail { font-size: 11px; color: var(--fg-dim); }
+
+/* The candidates scroll rather than wrap: the bar must stay one row high, or
+   it shoves the list down the screen every time a window crosses 80%. */
+.alert-cands {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.alert-cands-label { font-size: 11px; color: var(--fg-dim); white-space: nowrap; flex: none; }
+.alert-cands-list {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.alert-cands-list::-webkit-scrollbar { display: none; }
+.alert-cand {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 3px 2px 0;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.alert-cand-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 200px;
+  padding: 2px 6px;
+  background: none;
+  border: 0;
+  color: var(--fg-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.alert-cand-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.alert-cand-name:hover { color: var(--fg); }
+.alert-cand-ctx {
+  color: var(--st-needs);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.alert-cand-note { font-size: 10px; color: var(--fg-faint); padding-right: 4px; white-space: nowrap; }
+
+@media (max-width: 1100px) { .alert-cands { display: none; } }
+
+/* ---------------------------------------------------------------- settings */
+
+.set-group { position: relative; display: inline-flex; }
+.set-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 300px;
+  max-width: calc(100vw - 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  font-size: 12px;
+  cursor: default;
+}
+.set-head {
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  padding-top: 2px;
+}
+.set-head + .set-row, .set-head + .set-check { margin-top: -2px; }
+.set-row { display: flex; align-items: center; gap: 6px; }
+.set-check { cursor: pointer; }
+.set-label { color: var(--fg-muted); flex: 1; min-width: 0; }
+.set-num, .set-time {
+  width: 62px;
+  flex: none;
+  padding: 3px 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* Wide enough for '09:00 AM' — at 92px a 12-hour locale clipped the meridiem. */
+.set-time { width: 112px; }
+.set-num:focus, .set-time:focus { outline: 1px solid var(--accent-dim); border-color: var(--accent-dim); }
+.set-suffix { color: var(--fg-dim); font-size: 11px; flex: none; }
+.set-note { color: var(--fg-faint); font-size: 11px; line-height: 1.45; }
+.set-note.warn { color: var(--st-needs); }
+
+/* ------------------------------------------------------------ custom snooze */
+
+.snooze-group { position: relative; display: inline-flex; }
+.snooze-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 268px;
+  max-width: calc(100vw - 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  cursor: default;
+}
+.snooze-line { display: flex; align-items: center; gap: 6px; }
+.snooze-qty { width: 64px; flex: none; font-variant-numeric: tabular-nums; }
+.snooze-unit {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+}
+.snooze-hint { color: var(--fg-faint); font-size: 11px; line-height: 1.45; }
+.snooze-hint.warn { color: var(--st-crashed); }
+.snooze-when { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+
+/* ----------------------------------------------------------- woke / context */
+
+/* A left edge rather than a background wash: the row already uses its
+   background for selection and the cursor, and a third one competing with
+   those made the selected row ambiguous. */
+.row.woke { box-shadow: inset 2px 0 0 var(--accent); }
+.chip.woke { color: var(--accent); border-color: var(--accent-dim); }
+.chip.ctx {
+  color: var(--st-needs);
+  border-color: color-mix(in srgb, var(--st-needs) 42%, transparent);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.detail-path .ctx { font-variant-numeric: tabular-nums; }
+.detail-path .ctx.heavy { color: var(--st-needs); }

@@ -24,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 7;
+const CACHE_VERSION = 8;
 
 export interface ScannedSession {
   id: string;
@@ -44,6 +44,20 @@ export interface ScannedSession {
   messages: number;
   version: string;
   tail: TailInfo;
+  /**
+   * How big the conversation was on the last assistant turn, in tokens.
+   *
+   * Read from that turn's own `usage` block rather than derived from the file:
+   * `sizeBytes` counts tool output and thinking that the model is no longer
+   * carrying, and after a /compact the file keeps growing while the context it
+   * describes has just collapsed. This is the number that decides whether a
+   * session is worth compacting, and it is the one that actually moves when
+   * you do.
+   *
+   * 0 when no assistant turn in the sampled windows carried usage — a brand
+   * new session, or a transcript from a version that did not record it.
+   */
+  contextTokens: number;
   /**
    * Lowercased message text, for searching what was actually said rather than
    * only the metadata around it. Held server-side and stripped before the
@@ -249,6 +263,28 @@ function safeParse(line: string): any | null {
   }
 }
 
+/**
+ * Context carried INTO one assistant turn, from its own `usage` block.
+ *
+ * All three input figures count: a cache read is prompt the model was given
+ * just as much as a fresh one, and cache creation is the part of the prompt
+ * being written into the cache on this turn. Only `output_tokens` is new text,
+ * so it is left out — the question here is how much conversation is being
+ * carried, not how much was produced.
+ *
+ * Null rather than 0 when the record carries no usable usage, so a stub entry
+ * leaves the last real reading standing instead of wiping it.
+ */
+function contextTokensOf(usage: any): number | null {
+  if (!usage || typeof usage !== 'object') return null;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+  const total =
+    n(usage.input_tokens) +
+    n(usage.cache_creation_input_tokens) +
+    n(usage.cache_read_input_tokens);
+  return total > 0 ? total : null;
+}
+
 function extract(
   headStr: string,
   tailStr: string,
@@ -274,6 +310,7 @@ function extract(
     lastActivity: 0,
     sizeBytes: st.size,
     messages: 0,
+    contextTokens: 0,
     version: '',
     tail: {
       lastStopReason: null,
@@ -382,9 +419,19 @@ function extract(
         }
         break;
       }
-      case 'assistant':
+      case 'assistant': {
         addSearchText(rec.message?.content, false);
+        // A subagent's turn reports the SUBAGENT's context, which is its own
+        // conversation and disappears with it. Counting one would make a
+        // session that just ran a Task look enormous — or tiny, if the file
+        // happens to end on a freshly started one — and neither is a fact
+        // about the session you would be compacting.
+        if (rec.isSidechain !== true) {
+          const ctx = contextTokensOf(rec.message?.usage);
+          if (ctx !== null) s.contextTokens = ctx;
+        }
         break;
+      }
     }
   };
 

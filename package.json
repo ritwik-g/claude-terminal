@@ -30,6 +30,7 @@
     "test:title": "tsx scripts/test-title.ts",
     "test:restore": "tsx scripts/test-restore.ts",
     "test:usage": "tsx scripts/test-usage.ts",
+    "test:alerts": "tsx scripts/test-alerts.ts",
     "test:hook": "tsx scripts/test-hook.ts",
     "app:cli": "bash bin/claude-terminal"
   },
