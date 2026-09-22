@@ -89,6 +89,19 @@ Do **not** move it to the Bin. Run the command above, which strips the
 quarantine flag from that one app, and it will open normally from then on. You
 need it once per download, so it applies again after every update.
 
+**Or let a script do all of it.** `scripts/install-release.sh` is the whole
+sequence above in one command — download the build for your chip, check it
+against the published digest, replace the app, strip quarantine:
+
+```bash
+scripts/install-release.sh            # latest release
+scripts/install-release.sh 0.12.1     # a specific one
+```
+
+It needs the [GitHub CLI](https://cli.github.com), refuses to install anything
+whose digest does not match, quits a running Claude Terminal first, and keeps
+the app it is replacing until the new one is in place.
+
 Two things that do *not* work here, though both are the usual advice:
 **right-click → Open** (that path exists for apps that are signed but not
 notarized — this one has no Open option at all), and a free Apple developer
