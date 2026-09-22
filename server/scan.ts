@@ -24,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 9;
+const CACHE_VERSION = 10;
 
 export interface ScannedSession {
   id: string;
@@ -391,6 +391,17 @@ function extract(
       case 'system':
         if (rec.subtype === 'away_summary' && typeof rec.content === 'string') {
           s.recap = stripRecapHint(rec.content);
+        }
+        // A compact drops context but writes no assistant `usage` block of
+        // its own — the next one only arrives on your following prompt. Left
+        // alone, contextTokens would keep reporting the pre-compact size
+        // until then. The boundary record carries the true post-compact
+        // count directly, so trust it until a fresh assistant turn supersedes it.
+        if (rec.subtype === 'compact_boundary') {
+          const post = rec.compactMetadata?.postTokens;
+          if (typeof post === 'number' && Number.isFinite(post) && post >= 0) {
+            s.contextTokens = post;
+          }
         }
         break;
       case 'user': {
