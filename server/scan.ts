@@ -24,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 8;
+const CACHE_VERSION = 9;
 
 export interface ScannedSession {
   id: string;
@@ -500,12 +500,14 @@ function stripRecapHint(text: string): string {
 function textOf(content: any): string {
   if (typeof content === 'string') return cleanPromptText(content);
   if (Array.isArray(content)) {
+    const parts: string[] = [];
     for (const part of content) {
       if (part?.type === 'text' && typeof part.text === 'string') {
         const t = cleanPromptText(part.text);
-        if (t) return t;
+        if (t) parts.push(t);
       }
     }
+    return parts.join(' ');
   }
   return '';
 }
@@ -534,7 +536,10 @@ function cleanPromptText(raw: string): string {
     const n = String(name).trim().replace(/^\/+/, '');
     return n ? ` /${n} ` : ' ';
   });
-  t = t.replace(/<[^>]{1,40}>/g, ' ');
+  // Skip anything that looks like a bare autolink (`<https://...>`) — this
+  // pass is for stripping leftover XML-ish envelope tags, not for eating a
+  // URL the person actually typed.
+  t = t.replace(/<(?!https?:\/\/)[^>]{1,40}>/g, ' ');
   return t.replace(/\s+/g, ' ').trim();
 }
 
