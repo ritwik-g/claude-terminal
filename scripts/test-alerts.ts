@@ -21,7 +21,10 @@
  */
 import { alertsFor } from '../web/src/alerts';
 import { DEFAULT_PREFS, type Prefs } from '../web/src/prefs';
-import { cacheExpiresAt, cacheExpiring, cacheLeftMs, formatTokens, wakeAt, worthCompacting } from '../web/src/util';
+import {
+  BREAK_WINDOW_MS, breakCandidates, breakDue, cacheExpiresAt, compactBeforeSnooze, cacheExpiring, cacheLeftMs, formatTokens, wakeAt,
+  worthCompacting,
+} from '../web/src/util';
 import { scanAll } from '../server/scan';
 import { EMPTY_USER_STATE, type Session } from '../server/types';
 import type { UsageSnapshot } from '../server/usage';
@@ -173,23 +176,22 @@ function fakeSession(over: Partial<Session> & { id: string }): Session {
 const LIVE = { pid: 1, status: 'idle' as const, name: '', statusUpdatedAt: 0, startedAt: 0 };
 
 function candidateChecks(): void {
-  console.log('\nworthCompacting — what is actually costing you\n');
+  console.log('\nworthCompacting — big, running, and its cache about to go\n');
 
-  const ABOVE = 250_000;
-  const idleBig = fakeSession({ id: 'idle-big', contextTokens: 800_000 });
-  const attachedBig = fakeSession({ id: 'attached-big', contextTokens: 400_000, attached: true, termId: 't1' });
-  const liveBig = fakeSession({ id: 'live-big', contextTokens: 600_000, live: LIVE });
-  const attachedSmall = fakeSession({ id: 'attached-small', contextTokens: 9_000, attached: true, termId: 't2' });
-  const archivedBig = fakeSession({
-    id: 'archived-big', contextTokens: 900_000, attached: true, termId: 't3',
-    user: { ...EMPTY_USER_STATE, archived: true },
-  });
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const MIN = 60_000;
+  const risk = { leadMs: 20 * MIN, minTokens: 100_000 };
+  const at = (id: string, ago: number, over: Partial<Session> = {}) =>
+    fakeSession({ id, contextTokens: 400_000, live: LIVE, lastApiAt: now - ago * MIN, cacheTtlMs: 60 * MIN, ...over });
 
-  check('an idle session is never flagged, however big', !worthCompacting(idleBig, ABOVE));
-  check('a session attached here is flagged', worthCompacting(attachedBig, ABOVE));
-  check('a session live in your own terminal is flagged', worthCompacting(liveBig, ABOVE));
-  check('a running session under the threshold is not', !worthCompacting(attachedSmall, ABOVE));
-  check('an archived session is not, even running', !worthCompacting(archivedBig, ABOVE));
+  check('a big running session with its cache about to expire is flagged', worthCompacting(at('soon', 50), risk, now));
+  check('a big one with plenty of cache left is not — nothing is lost yet', !worthCompacting(at('fresh', 10), risk, now));
+  check('one whose cache has expired is not — compacting now costs a full rewrite',
+    !worthCompacting(at('gone', 70), risk, now));
+  check('a session under the size floor is not', !worthCompacting(at('small', 50, { contextTokens: 9_000 }), risk, now));
+  check('an idle session is never flagged, however big', !worthCompacting(at('idle', 50, { live: null }), risk, now));
+  check('an archived session is not, even running',
+    !worthCompacting(at('archived', 50, { user: { ...EMPTY_USER_STATE, archived: true } }), risk, now));
 }
 
 function cacheChecks(): void {
@@ -233,6 +235,81 @@ function cacheChecks(): void {
     cacheExpiring(Array.from({ length: 7 }, (_, i) => at(`m${i}`, 45 + i)), opts, now).length === 4);
 }
 
+function breakChecks(): void {
+  console.log('\nbreak reminders — lunch and the end of the day\n');
+
+  const times = { lunch: 12 * 60, 'day-end': 16 * 60 };
+  const local = (h: number, m = 0) => new Date(2026, 8, 23, h, m).getTime();
+
+  check('nothing is due in the morning', breakDue(local(10), times) === null);
+  check('lunch is due at 12:00', breakDue(local(12), times)?.kind === 'lunch');
+  check('and still at 12:59', breakDue(local(12, 59), times)?.kind === 'lunch');
+  check('but not an hour later', breakDue(local(13), times) === null);
+  const end = breakDue(local(16, 20), times);
+  check('the end of the day is due at 16:20', end?.kind === 'day-end');
+  check('its key names the day, so it fires once a day', end?.key === 'day-end:2026-9-23', end?.key);
+  check('a reminder that is off never fires', breakDue(local(12, 10), { ...times, lunch: null }) === null);
+  check('when two overlap the later one wins',
+    breakDue(local(12, 40), { lunch: 12 * 60, 'day-end': 12 * 60 + 30 })?.kind === 'day-end');
+  check('the window is an hour', BREAK_WINDOW_MS === 60 * 60_000);
+
+  const now = local(16, 5);
+  const MIN = 60_000;
+  const s = (id: string, tokens: number, ago: number, over: Partial<Session> = {}) =>
+    fakeSession({ id, contextTokens: tokens, live: LIVE, lastApiAt: now - ago * MIN, cacheTtlMs: 60 * MIN, ...over });
+  const warm = {
+    active: true, enabledAt: 0, until: now + 60 * MIN, untilSend: false, pausePct: null, pings: 0,
+    lastPingAt: null, awaitingReply: false, nextPingAt: null, lastResult: null, held: null,
+    heldSince: null, unsentSince: null, stopped: null,
+  };
+  const all = [
+    s('mid', 200_000, 5),
+    s('big', 600_000, 40),
+    s('expired', 900_000, 70),
+    s('small', 50_000, 5),
+    s('closed', 500_000, 5, { live: null }),
+    s('kept', 300_000, 5, { keepWarm: warm }),
+  ];
+  const lunch = breakCandidates(all, 'lunch', 100_000, now).map((x) => x.id);
+  const dayEnd = breakCandidates(all, 'day-end', 100_000, now).map((x) => x.id);
+  check('lunch lists warm, big, running caches, biggest first — not ones kept warm',
+    lunch.join(',') === 'big,mid', lunch.join(','));
+  check('the end of the day also lists one kept warm, since that stops before morning',
+    dayEnd.join(',') === 'big,kept,mid', dayEnd.join(','));
+  check('with a cache still fresh — it will not be by the time you are back', lunch.includes('mid'));
+}
+
+function snoozeChecks(): void {
+  console.log('\ncompactBeforeSnooze — ask before a warm cache is snoozed away\n');
+
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+  // Last API call 10 minutes ago: the cache expires at now + 50m.
+  const s = (over: Partial<Session> = {}) => fakeSession({
+    id: 'big', contextTokens: 400_000, attached: true, termId: 't1', live: LIVE,
+    lastApiAt: now - 10 * MIN, cacheTtlMs: HOUR, ...over,
+  });
+  const kw = (until: number) => ({
+    active: true, enabledAt: 0, until, untilSend: false, pausePct: null, pings: 0,
+    lastPingAt: null, awaitingReply: false, nextPingAt: null, lastResult: null, held: null,
+    heldSince: null, unsentSince: null, stopped: null,
+  });
+  const MINTOK = 100_000;
+
+  check('a big warm session snoozed past its cache is asked about', compactBeforeSnooze(s(), now + 4 * HOUR, MINTOK, now));
+  check('not when it wakes before the cache expires', !compactBeforeSnooze(s(), now + 30 * MIN, MINTOK, now));
+  check('not under the size floor', !compactBeforeSnooze(s({ contextTokens: 50_000 }), now + 4 * HOUR, MINTOK, now));
+  check('not once the cache has expired — compacting then costs a rewrite too',
+    !compactBeforeSnooze(s({ lastApiAt: now - 2 * HOUR }), now + 4 * HOUR, MINTOK, now));
+  check('not in someone else\'s terminal — there is nothing here to type into',
+    !compactBeforeSnooze(s({ attached: false, termId: null }), now + 4 * HOUR, MINTOK, now));
+  check('not when keep-warm covers the whole snooze',
+    !compactBeforeSnooze(s({ keepWarm: kw(now + 8 * HOUR) }), now + 4 * HOUR, MINTOK, now));
+  check('but yes when the snooze outlasts keep-warm',
+    compactBeforeSnooze(s({ keepWarm: kw(now + 2 * HOUR) }), now + 4 * HOUR, MINTOK, now));
+}
+
 async function contextChecks(): Promise<void> {
   console.log('\ncontextTokens — read from your real transcripts\n');
 
@@ -274,6 +351,8 @@ const main = async () => {
   alertChecks();
   candidateChecks();
   cacheChecks();
+  breakChecks();
+  snoozeChecks();
   await contextChecks();
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

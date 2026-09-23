@@ -448,6 +448,22 @@ console.log('keep-warm\n');
 
   kw.disableKeepWarm(SID);
   check('turning it off forgets it', kw.keepWarmView(SID) === null);
+
+  // Snoozing: pings past the snooze would keep a cache that has gone by the
+  // time the session wakes.
+  world();
+  writeLog([sent(T0), reply(T0 + MIN)]);
+  kw.enableKeepWarm(SID, FILE, { ...OPTS, minutes: 120 }, T0 + 2 * MIN);
+  check('a snooze that ends before keep-warm does leaves it on',
+    !kw.snoozeKeepWarm(SID, T0 + 60 * MIN, T0 + 3 * MIN) && !!view().active);
+  check('one that outlasts it stops it', kw.snoozeKeepWarm(SID, T0 + 24 * 60 * MIN, T0 + 3 * MIN));
+  check('  with the reason, so the row can say why', view().stopped?.reason === 'snoozed');
+  check('  and it is not a warning stop — you did it', !kw.WARN_STOPS.has('snoozed'));
+  writes = [];
+  kw.tickKeepWarm(T0 + 50 * MIN);
+  check('  and sends nothing after', writes.length === 0, JSON.stringify(writes));
+  check('snoozing a session with no keep-warm is a no-op', !kw.snoozeKeepWarm('nope', T0 + 99 * MIN, T0));
+  kw.disableKeepWarm(SID);
 }
 
 // ------------------------------------------------------- the ping's own turn

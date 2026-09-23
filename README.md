@@ -42,11 +42,11 @@ like any other turn. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **Tells you when something finished** | A session that stops working raises a desktop notification and a dock badge, and puts a pulsing dot on the row until you open it. Debounced, so a gap between turns is not reported as a finish. |
 | **Usage at a glance** | How much of your 5-hour window is gone and the clock time it resets at, in the header. Hover or click for both windows in full, with their reset times, and a refresh button of its own. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
 | **And it warns you before it bites** | A bar across the top when a window passes 80%, or 30 minutes before one resets — with a desktop notification when the app is not focused. Both numbers are settings. |
-| **…and before a session's cache runs out** | Each running session shows how long its prompt cache has left (`⏱ 34m`). When a big one is 20 minutes from expiring and isn't being kept warm, a bar and a desktop notification offer **Keep warm** and **Compact**, while the cache still makes either one cheap. Once it has expired it isn't listed, because the next turn pays for the rewrite whatever you do. The lead time, the size floor and the switch are all settings. |
+| **…and before a session's cache runs out** | Each running session shows how long its prompt cache has left (`⏱ 34m`). When a big one is 20 minutes from expiring and isn't being kept warm, a bar and a desktop notification offer **Keep warm** and **Compact**, while the cache still makes either one cheap. Once it has expired it isn't listed, because the next turn pays for the rewrite whatever you do. The lead time, the size floor and the switch are all settings. A reminder at 12:00 and 16:00 lists every big session with a warm cache, so you can compact before lunch or the end of the day. |
 | **Keep a session's cache warm while you step away** | Claude Code's prompt cache expires an hour after a session's last turn, and your next message then pays to write the whole conversation back into it. **Keep warm** (2h / 4h / 8h / until you reply) sends a one-line message about 45 minutes after the last turn, so the cache is read, at a tenth of the price, instead of rebuilt. It only types when the session is idle, isn't showing a dialog or question, and has nothing unsent in its input box. If you've typed without sending, it turns itself off and says so rather than type on top of your draft. |
 | **Context size, where it costs** | A running session with a large context shows its size on the row (`412k`), read from the last turn's own token usage rather than the transcript's size on disk. Idle sessions don't show it, because they aren't costing anything. |
 | **Triage by hand when you want to** | Priority, pin, tags and snooze are one key each. They adjust the derived ranking but never replace it, so the list still works if you never set any of them. |
-| **Snoozes wake when your day does** | *tomorrow* and *next week* mean 9am on the next working day, not "+24h" and "+7d" — a Friday evening snooze comes back on Monday morning. The hour is a setting, and **custom…** takes any duration or an exact moment. |
+| **Snoozes wake when your day does** | *tomorrow* and *next week* mean 9am on the next working day, not "+24h" and "+7d" — a Friday evening snooze comes back on Monday morning. The hour is a setting, and **custom…** takes any duration or an exact moment. Snoozing a big session whose cache would expire before it wakes asks whether to compact it first. |
 | **A woken session says so** | A session whose snooze ran out rejoins the list in whatever position its score earns, which is silent. It now carries a *woke 41m* chip and a tinted edge until you open it. |
 | **Mark a session cleaned up** | `c` tints the row and chips it, so the session you tidied up is findable again among a dozen that look identical. A **Cleanup** filter in the sidebar collects them, to close and archive in one pass. |
 | **The cleanup mark can set itself** | Ship `/cleanup` and a one-line hook, and the session marks itself the moment you run it — see [Marking cleanup automatically](#marking-cleanup-automatically). |
@@ -463,13 +463,33 @@ a terminal this app owns — a busy session simply queues it — and nothing wai
 for a result, because the evidence arrives on its own schedule as the session's
 context size dropping on a later scan.
 
-Only **running** sessions get the context chip on their row. An 800k-token session that nothing is executing against is not
-spending anything — it is a fact about a conversation you might resume one day,
-not a cost you are paying now. On a real tree most big sessions are of that
-kind, and flagging them all buried the two or three actually burning the window
-under a column of numbers nobody reads. A session running in a terminal of your
-own is still listed, because it is still spending; it just says *elsewhere*
-instead of offering a button, since there is nothing here to type into.
+The context chip on a row follows the same rule: it appears on a big running
+session whose cache is about to expire, which is exactly when compacting is both
+cheap and worth it. Size alone doesn't earn it any more. An 800k-token session
+with a fresh cache has nothing to lose yet, and one whose cache has already
+gone gains nothing from a compact. A session running in a terminal of your own
+is still listed in the bar, because it is still spending; it just says
+*elsewhere* instead of offering a button, since there is nothing here to type into.
+
+**Break reminders.** At 12:00 and 16:00 each day (both times, and whether each
+is on, are settings), a bar and a desktop notification list the running
+sessions that still have a warm cache and pass the size floor, biggest first.
+An hour for lunch or overnight will let those caches expire, so this is the
+moment to compact them. The lunch reminder also offers **Keep warm**, which
+covers a short break. The end-of-day one offers only **Compact**: keep-warm
+stops after 12 hours at most, and pinging a big context all night costs about
+what the rewrite it saves would. On a Friday it asks whether you're wrapping up
+for the weekend. It stays for an hour unless you dismiss it, fires once a day
+even if you reopen the app, and says nothing when there is nothing to compact.
+
+**Snoozing a big session.** Snoozing a session past the point its cache
+expires first asks whether to compact it, with **Compact and snooze**, **Just
+snooze** and **Cancel**. It only asks when the session is above the size floor,
+its cache is still warm, a terminal here can take the `/compact`, and keep-warm
+isn't covering the whole snooze. The `s` key asks too. And if keep-warm is on
+and the snooze outlasts it, keep-warm stops (*snoozed*): the cache would have
+expired before the session woke, so the pings in between would buy nothing. A
+snooze that ends first leaves it running.
 
 That size is read from the last assistant turn's own `usage` block —
 `input + cache_creation + cache_read` — not from the transcript's size on disk.

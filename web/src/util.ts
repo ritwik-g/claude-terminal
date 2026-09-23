@@ -90,6 +90,12 @@ export function bucketOf(s: Session, now = Date.now()): Bucket {
   return 'quiet';
 }
 
+/** "just now" or "5m ago", for a sentence — relTime alone reads "now ago". */
+export function agoText(ts: number, now = Date.now()): string {
+  const r = relTime(ts, now);
+  return r === 'now' ? 'just now' : `${r} ago`;
+}
+
 export function relTime(ts: number, now = Date.now()): string {
   const d = Math.max(0, now - ts);
   const m = d / 60_000;
@@ -265,23 +271,6 @@ export function formatTokens(n: number): string {
   return k < 10 ? `${k.toFixed(1)}k` : `${Math.round(k)}k`;
 }
 
-/**
- * Whether this session is one worth offering to compact.
- *
- * ACTIVE only. A 800k-token session that nothing is running against is not
- * spending anything — it is a fact about a conversation you might resume one
- * day, not a cost you are paying now — and on a real tree most big sessions
- * are of that kind. Flagging them all buried the two or three that are
- * actually burning the window under a column of numbers nobody reads, which is
- * the precise failure this predicate exists to avoid.
- *
- * The same test backs the row chip and the alert bar's list, so the marker on
- * a row and the offer in the bar can never disagree about what counts.
- */
-export function worthCompacting(s: Session, above: number): boolean {
-  return above > 0 && s.contextTokens >= above && !s.user.archived && isActive(s);
-}
-
 /* -------------------------------------------------------------- prompt cache */
 
 /**
@@ -303,35 +292,147 @@ export function cacheLeftMs(s: Session, now: number): number | null {
 /** How many sessions the cache bar lists at once. */
 const MAX_EXPIRING = 4;
 
+/** What makes a cache worth a warning: how close, and how big. */
+export interface CacheRisk {
+  leadMs: number;
+  minTokens: number;
+}
+
 /**
- * Running sessions whose cache is about to expire and that nothing is keeping
- * warm, soonest first.
+ * Whether this session is worth compacting right now: running, big, nothing
+ * keeping it warm, and its prompt cache about to expire.
  *
- * Only while the cache is still there. Once it has gone, the next turn pays
- * the rewrite whatever you do — compacting then costs a full rewrite of its
- * own — so an expired session is not a warning, it is history.
+ * Tied to the cache rather than to size alone. A compact reads the whole
+ * context, so while the cache is there it costs about a tenth of the input
+ * price and leaves a small context to come back to; once the cache has gone it
+ * costs a full rewrite of its own, and simply carrying on is no dearer. Size
+ * on its own said nothing about which of those you were in.
  *
  * Only live sessions, because a closed one is not going to take a turn soon,
  * and only big ones: Claude Code's own system prompt is cached separately, so
  * a small conversation's rebuild costs next to nothing.
+ *
+ * The same test backs the row chip and the cache bar, so the marker on a row
+ * and the offer in the bar never disagree.
  */
-export function cacheExpiring(
+export function worthCompacting(s: Session, risk: CacheRisk, now: number): boolean {
+  if (!s.live || s.user.archived || s.keepWarm?.active) return false;
+  if (s.contextTokens < risk.minTokens) return false;
+  const left = cacheLeftMs(s, now);
+  return left !== null && left > 0 && left <= risk.leadMs;
+}
+
+/**
+ * Running sessions whose cache is about to expire and that nothing is keeping
+ * warm, soonest first — worthCompacting, minus the ones you have snoozed.
+ *
+ * Only while the cache is still there. Once it has gone, the next turn pays
+ * the rewrite whatever you do, so an expired session is not a warning, it is
+ * history.
+ */
+export function cacheExpiring(sessions: Session[], risk: CacheRisk, now: number): Session[] {
+  return sessions
+    .filter((s) => worthCompacting(s, risk, now) && !(s.user.snoozedUntil && s.user.snoozedUntil > now))
+    .sort((a, b) =>
+      (cacheExpiresAt(a) ?? 0) - (cacheExpiresAt(b) ?? 0) || (a.id < b.id ? -1 : 1))
+    .slice(0, MAX_EXPIRING);
+}
+
+/**
+ * Whether snoozing this session until `until` is worth a "compact first?"
+ * question: it is big, its cache is still warm, a terminal of ours can take
+ * the /compact, and the cache will have expired before the session wakes.
+ *
+ * Not when keep-warm covers the whole snooze, and not once the cache has gone:
+ * then compacting costs a full rewrite of its own, and carrying on later is
+ * no dearer.
+ */
+export function compactBeforeSnooze(s: Session, until: number, minTokens: number, now: number): boolean {
+  if (!s.attached || !s.termId || s.user.archived) return false;
+  if (s.contextTokens < minTokens) return false;
+  const at = cacheExpiresAt(s);
+  if (at === null || at <= now || until <= at) return false;
+  if (s.keepWarm?.active && until <= s.keepWarm.until) return false;
+  return true;
+}
+
+/* ----------------------------------------------------------- break reminders */
+
+export type BreakKind = 'lunch' | 'day-end';
+
+/** How long after its time a break reminder stays up, unless dismissed. */
+export const BREAK_WINDOW_MS = 60 * 60_000;
+
+/** How many sessions a break reminder lists at once. */
+const MAX_BREAK = 6;
+
+export interface BreakSlot {
+  kind: BreakKind;
+  /** When it was due today, epoch ms. */
+  at: number;
+  /** Identity: the kind and the local date, so each fires once a day. */
+  key: string;
+}
+
+/**
+ * The break reminder that is due now, or null.
+ *
+ * `times` are minutes past local midnight, null for a reminder that is off.
+ * Due from its time for BREAK_WINDOW_MS: long enough to still catch you if the
+ * app was not open at the minute itself, short enough that an evening's work
+ * is not interrupted by the afternoon's reminder. When two overlap, the later
+ * one wins.
+ */
+export function breakDue(
+  now: number,
+  times: Record<BreakKind, number | null>,
+): BreakSlot | null {
+  let best: BreakSlot | null = null;
+  for (const kind of ['lunch', 'day-end'] as BreakKind[]) {
+    const mins = times[kind];
+    if (mins === null) continue;
+    // Built on a local Date, not by adding milliseconds to midnight, so 4 PM
+    // stays 4 PM on the day the clocks change.
+    const d = new Date(now);
+    d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+    const at = d.getTime();
+    if (at > now || now - at >= BREAK_WINDOW_MS) continue;
+    if (best && best.at >= at) continue;
+    const day = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    best = { kind, at, key: `${kind}:${day}` };
+  }
+  return best;
+}
+
+/**
+ * Running sessions that still have a warm cache and are big enough to matter,
+ * biggest first: what is worth dealing with before you step away.
+ *
+ * Unlike the expiry warning this does not wait for the cache to be nearly
+ * gone — at the start of a break, one with 50 minutes left will still have
+ * expired by the time you are back. Sessions kept warm are left out of a
+ * lunch reminder, since keep-warm already covers a short break, but not out of
+ * the end-of-day one: keep-warm stops after 12 hours at most, which is not the
+ * morning, and pinging a big context all night costs about what the rewrite
+ * it saves would.
+ */
+export function breakCandidates(
   sessions: Session[],
-  opts: { leadMs: number; minTokens: number },
+  kind: BreakKind,
+  minTokens: number,
   now: number,
 ): Session[] {
   return sessions
     .filter((s) => {
       if (!s.live || s.user.archived) return false;
       if (s.user.snoozedUntil && s.user.snoozedUntil > now) return false;
-      if (s.keepWarm?.active) return false;
-      if (s.contextTokens < opts.minTokens) return false;
+      if (kind === 'lunch' && s.keepWarm?.active) return false;
+      if (s.contextTokens < minTokens) return false;
       const left = cacheLeftMs(s, now);
-      return left !== null && left > 0 && left <= opts.leadMs;
+      return left !== null && left > 0;
     })
-    .sort((a, b) =>
-      (cacheExpiresAt(a) ?? 0) - (cacheExpiresAt(b) ?? 0) || (a.id < b.id ? -1 : 1))
-    .slice(0, MAX_EXPIRING);
+    .sort((a, b) => b.contextTokens - a.contextTokens || (a.id < b.id ? -1 : 1))
+    .slice(0, MAX_BREAK);
 }
 
 /** "34m", "1h 5m" — how long a cache has left, for a chip. */
@@ -448,6 +549,7 @@ export const KEEPWARM_STOP_TEXT: Record<KeepWarmStop, string> = {
   'no-reply': 'a ping did not start a turn. Check the input box for leftover text before turning it back on',
   expired: 'its time ran out',
   sent: 'you sent a message',
+  snoozed: 'you snoozed this session past when keep-warm would end, so the cache would have expired before it woke anyway',
 };
 
 /** Stops that are a problem, not keep-warm finishing what you asked. Mirrors the server's WARN_STOPS. */
@@ -469,11 +571,13 @@ export function keepWarmChip(
 ): { label: string; cls: string; title: string } | null {
   if (!kw) return null;
   if (kw.stopped) {
-    if (!KEEPWARM_WARN.has(kw.stopped.reason)) return null;
+    // Snoozed is not a warning, but it is worth a chip: it is the one stop
+    // you caused without asking for it by name.
+    if (!KEEPWARM_WARN.has(kw.stopped.reason) && kw.stopped.reason !== 'snoozed') return null;
     return {
       label: 'warm off',
       cls: 'chip kw off',
-      title: `Keep-warm stopped ${relTime(kw.stopped.at, now)} ago: ${KEEPWARM_STOP_TEXT[kw.stopped.reason]}`,
+      title: `Keep-warm stopped ${agoText(kw.stopped.at, now)}: ${KEEPWARM_STOP_TEXT[kw.stopped.reason]}`,
     };
   }
   if (kw.held) {

@@ -531,6 +531,25 @@ export function enableKeepWarm(
   return viewOf(e);
 }
 
+/**
+ * The session has just been snoozed until `until`. If that is after keep-warm
+ * would have ended anyway, stop it now: the cache will have expired long
+ * before the session wakes, so every ping between now and then buys nothing.
+ * A snooze that ends first leaves it running — out of sight and warm when it
+ * comes back is the point of pairing the two.
+ *
+ * A stop, not a delete, so the keep-warm row can say why and offer to turn it
+ * back on. Not a warning stop: you did this, so there is no popup about it.
+ */
+export function snoozeKeepWarm(sessionId: string, until: number, now = Date.now()): boolean {
+  const e = entries.get(sessionId);
+  if (!e || e.stopped || until <= e.until) return false;
+  stop(e, 'snoozed', now);
+  const term = termFor(sessionId);
+  if (term) typedAt.delete(term.id);
+  return true;
+}
+
 /** Off, and forgotten — also how a stopped entry's warning is dismissed. */
 export function disableKeepWarm(sessionId: string): boolean {
   const term = termFor(sessionId);

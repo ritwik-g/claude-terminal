@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import type { Session } from '../../server/types';
 import type { UsageSnapshot, UsageWindow } from '../../server/usage';
 import type { Prefs } from './prefs';
-import { cacheExpiresAt, cacheExpiring, clockTime, formatLeft, resetsIn, windowExpired } from './util';
+import {
+  breakCandidates, breakDue, cacheExpiresAt, cacheExpiring, clockTime, formatLeft, formatTokens, resetsIn,
+  windowExpired, type BreakKind, type BreakSlot,
+} from './util';
 
 export type AlertKind = 'threshold' | 'reset-soon';
 export type WindowKey = 'fiveHour' | 'weekly';
@@ -232,5 +235,88 @@ export function useCacheAlerts(
       for (const k of keys) next.add(k);
       return next;
     }),
+  };
+}
+
+export interface BreakReminder extends BreakSlot {
+  /** Running sessions with a warm cache worth dealing with — see breakCandidates. */
+  sessions: Session[];
+}
+
+/**
+ * Where a break reminder's dismissal and popup are remembered. In
+ * localStorage, not in memory, so reopening the app at 4:05 does not raise the
+ * 4:00 reminder a second time. One key each is enough: only today's latest
+ * reminder can be due.
+ */
+const BREAK_DISMISSED = 'ct.break.dismissed';
+const BREAK_NOTIFIED = 'ct.break.notified';
+
+const readKey = (k: string): string | null => {
+  try { return localStorage.getItem(k); } catch { return null; }
+};
+const writeKey = (k: string, v: string): void => {
+  try { localStorage.setItem(k, v); } catch { /* private mode: it may repeat */ }
+};
+
+const BREAK_TEXT: Record<BreakKind, (n: number) => string> = {
+  lunch: (n) => `${n === 1 ? 'A session still has' : `${n} sessions still have`} a warm cache. Keep ${n === 1 ? 'it' : 'them'} warm over lunch, or compact now while that is cheap.`,
+  'day-end': (n) => `${n === 1 ? 'A session still has' : `${n} sessions still have`} a warm cache. Compact now while that is cheap — after an hour away, the next turn rewrites the whole context.`,
+};
+
+/** The headline, which knows a Friday afternoon from any other. */
+export function breakHeadline(kind: BreakKind, at: number): string {
+  if (kind === 'lunch') return 'Stepping away for lunch?';
+  return new Date(at).getDay() === 5 ? 'Wrapping up for the weekend?' : 'Wrapping up for the day?';
+}
+
+export function breakDetail(kind: BreakKind, count: number): string {
+  return BREAK_TEXT[kind](count);
+}
+
+/**
+ * The break reminder due now, if it has anything to say and you have not
+ * dismissed it, with a desktop notification once per reminder when the window
+ * is not focused.
+ *
+ * It says nothing when no running session has a warm cache worth the trouble:
+ * a reminder to compact nothing is how reminders get turned off.
+ */
+export function useBreakReminder(
+  sessions: Session[],
+  prefs: Prefs,
+  now: number,
+): { reminder: BreakReminder | null; dismiss: () => void } {
+  const [dismissed, setDismissed] = useState<string | null>(() => readKey(BREAK_DISMISSED));
+
+  const slot = breakDue(now, { lunch: prefs.lunchReminder, 'day-end': prefs.dayEndReminder });
+  const list = slot ? breakCandidates(sessions, slot.kind, prefs.cacheAlertAtKTokens * 1000, now) : [];
+  const reminder = slot && list.length > 0 && dismissed !== slot.key ? { ...slot, sessions: list } : null;
+
+  const key = reminder?.key ?? null;
+  useEffect(() => {
+    if (!reminder || readKey(BREAK_NOTIFIED) === reminder.key) return;
+    writeKey(BREAK_NOTIFIED, reminder.key);
+    if (document.hasFocus() || notifyPermission() !== 'granted') return;
+    const big = reminder.sessions.map((s) => `${s.title} (${formatTokens(s.contextTokens)})`).join(', ');
+    try {
+      new Notification(breakHeadline(reminder.kind, reminder.at), {
+        body: `${breakDetail(reminder.kind, reminder.sessions.length)} ${big}`,
+        tag: 'ct-break',
+      });
+    } catch {
+      // The bar says the same thing.
+    }
+    // Once per reminder; the list inside it changing is not a new one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return {
+    reminder,
+    dismiss: () => {
+      if (!slot) return;
+      writeKey(BREAK_DISMISSED, slot.key);
+      setDismissed(slot.key);
+    },
   };
 }

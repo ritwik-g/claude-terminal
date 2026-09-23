@@ -4,10 +4,10 @@ import { api, type SessionsPayload } from './api';
 import {
   BUCKET_COLOR, BUCKET_HELP, BUCKET_LABEL, BUCKET_ORDER, STATE_COLOR, STATE_LABEL,
   SHAPE_GLYPH, SHAPE_HINT, SHAPE_LABEL, SHAPE_ORDER,
-  bucketOf, clockTime, formatTokens, isActive, matches, relTime, shortPath,
+  agoText, bucketOf, clockTime, formatTokens, isActive, matches, relTime, shortPath,
   wakeAt, wokeAgo, worthCompacting, type Bucket,
   KEEPWARM_HOLD_TEXT, KEEPWARM_OPTIONS, KEEPWARM_OVERRIDABLE, KEEPWARM_RESULT_TEXT,
-  KEEPWARM_STOP_TEXT, KEEPWARM_WARN, cacheExpiresAt, cacheLeftMs, formatLeft,
+  KEEPWARM_STOP_TEXT, KEEPWARM_WARN, cacheExpiresAt, cacheLeftMs, compactBeforeSnooze, formatLeft,
 } from './util';
 import { SessionRow } from './components/SessionRow';
 import { UsagePill } from './components/UsagePill';
@@ -17,7 +17,7 @@ import { CacheAlertBar } from './components/CacheAlertBar';
 import { FolderBrowser } from './components/FolderBrowser';
 import { TerminalPane } from './components/TerminalPane';
 import { useUsage } from './useUsage';
-import { cacheKey, useCacheAlerts, useUsageAlerts } from './alerts';
+import { breakDetail, breakHeadline, cacheKey, useBreakReminder, useCacheAlerts, useUsageAlerts } from './alerts';
 import { usePrefs } from './prefs';
 
 const POLL_MS = 2500;
@@ -348,7 +348,17 @@ export function App() {
   }, [selectedId]);
 
   const sessions = payload?.sessions ?? [];
-  const { active: cacheAlerts, dismiss: dismissCache } = useCacheAlerts(sessions, prefs, now);
+  const { active: expiring, dismiss: dismissCache } = useCacheAlerts(sessions, prefs, now);
+  const { reminder: breakReminder, dismiss: dismissBreak } = useBreakReminder(sessions, prefs, now);
+  // A session the break reminder already lists is not repeated in the expiry
+  // bar underneath it: one offer per session is enough.
+  const cacheAlerts = breakReminder
+    ? expiring.filter((s) => !breakReminder.sessions.some((b) => b.id === s.id))
+    : expiring;
+  const cacheRisk = useMemo(
+    () => ({ leadMs: prefs.cacheLeadMin * 60_000, minTokens: prefs.cacheAlertAtKTokens * 1000 }),
+    [prefs.cacheLeadMin, prefs.cacheAlertAtKTokens],
+  );
 
   /**
    * Ids whose MESSAGE text matches the query. The payload deliberately does
@@ -696,6 +706,34 @@ export function App() {
   );
 
   /**
+   * A snooze, with one question first when it is worth asking: a big session
+   * whose cache will have expired before it wakes is cheapest to compact now,
+   * while reading it still costs a tenth. See compactBeforeSnooze.
+   */
+  const [snoozeAsk, setSnoozeAsk] = useState<{ s: Session; until: number } | null>(null);
+  const doSnooze = useCallback(
+    async (s: Session, until: number) => {
+      setSnoozeAsk(null);
+      await patch(s.id, { snoozedUntil: until });
+      // The server may have stopped keep-warm for it (snoozed past its end);
+      // the row should say so now, not on the next poll.
+      if (s.keepWarm?.active) await refresh(true);
+    },
+    [patch, refresh],
+  );
+  const snooze = useCallback(
+    (s: Session, until: number) => {
+      const asked = s.termId !== null && compactSent.has(s.termId);
+      if (!asked && compactBeforeSnooze(s, until, prefs.cacheAlertAtKTokens * 1000, Date.now())) {
+        setSnoozeAsk({ s, until });
+        return;
+      }
+      void doSnooze(s, until);
+    },
+    [compactSent, prefs.cacheAlertAtKTokens, doSnooze],
+  );
+
+  /**
    * Keep-warm: the server pings the session before its prompt cache expires,
    * and decides when that is safe — see server/keepwarm.ts. These only ask.
    *
@@ -1002,12 +1040,12 @@ export function App() {
       else if (e.key === 's') {
         e.preventDefault();
         advanceCursorPast(s.id);
-        void patch(s.id, { snoozedUntil: Date.now() + 4 * 3600_000 });
+        snooze(s, Date.now() + 4 * 3600_000);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flat, cursor, attach, patch, cyclePriority, refresh, newOpen, helpOpen, renameOpen, sidebarOpen, tagsOpen]);
+  }, [flat, cursor, attach, patch, snooze, cyclePriority, refresh, newOpen, helpOpen, renameOpen, sidebarOpen, tagsOpen]);
 
   /**
    * Drive one of Claude Code's own slash commands in the attached terminal.
@@ -1195,31 +1233,90 @@ export function App() {
         )}
       </div>
 
-      {/* One at a time. Two windows crossing a threshold in the same minute is
-          normal — the weekly one is usually behind the 5-hour one — and two
-          stacked bars would push the list down the screen to say one thing
-          twice. `alertsFor` has already ranked them, so this is the one that
-          matters; dismissing it reveals the next. */}
-      {usageAlerts.length > 0 && (
-        <UsageAlertBar
-          alert={usageAlerts[0]}
-          onDismiss={() => dismissAlert(usageAlerts[0].key)}
-        />
-      )}
+      {/* The bars share one grid row and stack inside it. Each used to claim
+          the row for itself, so two at once were drawn on top of each other. */}
+      {(usageAlerts.length > 0 || breakReminder || cacheAlerts.length > 0 || snoozeAsk) && (
+        <div className="alert-stack">
+        {/* One at a time. Two windows crossing a threshold in the same minute is
+            normal — the weekly one is usually behind the 5-hour one — and two
+            stacked bars would push the list down the screen to say one thing
+            twice. `alertsFor` has already ranked them, so this is the one that
+            matters; dismissing it reveals the next. */}
+        {usageAlerts.length > 0 && (
+          <UsageAlertBar
+            alert={usageAlerts[0]}
+            onDismiss={() => dismissAlert(usageAlerts[0].key)}
+          />
+        )}
 
-      {/* Sessions whose prompt cache is about to lapse. Its own bar, because
-          it is about a session rather than the account, and it comes and goes
-          on a clock of its own. */}
-      {cacheAlerts.length > 0 && (
-        <CacheAlertBar
-          sessions={cacheAlerts}
-          now={now}
-          sent={compactSent}
-          onCompact={(s) => void compact(s)}
-          onKeepWarm={(s) => void keepWarm(s, 120, false)}
-          onSelect={(s) => select(s)}
-          onDismiss={() => dismissCache(cacheAlerts.map(cacheKey))}
-        />
+        {/* The daily lunch and end-of-day reminder: what still has a warm cache
+            before you step away. Above the expiry bar, because at that moment
+            it is the more complete of the two. */}
+        {breakReminder && (
+          <CacheAlertBar
+            sessions={breakReminder.sessions}
+            icon="☕"
+            headline={breakHeadline(breakReminder.kind, breakReminder.at)}
+            detail={breakDetail(breakReminder.kind, breakReminder.sessions.length)}
+            keepWarmMinutes={breakReminder.kind === 'lunch' ? 120 : null}
+            now={now}
+            sent={compactSent}
+            onCompact={(s) => void compact(s)}
+            onKeepWarm={(s) => void keepWarm(s, 120, false)}
+            onSelect={(s) => select(s)}
+            onDismiss={dismissBreak}
+          />
+        )}
+
+        {/* Sessions whose prompt cache is about to lapse. Its own bar, because
+            it is about a session rather than the account, and it comes and goes
+            on a clock of its own. */}
+        {cacheAlerts.length > 0 && (
+          <CacheAlertBar
+            sessions={cacheAlerts}
+            now={now}
+            sent={compactSent}
+            onCompact={(s) => void compact(s)}
+            onKeepWarm={(s) => void keepWarm(s, 120, false)}
+            onSelect={(s) => select(s)}
+            onDismiss={() => dismissCache(cacheAlerts.map(cacheKey))}
+          />
+        )}
+
+        {/* The question a big, warm session gets before it is snoozed past its
+            cache. A bar rather than a dialog, so nothing blocks, and the
+            keyboard snooze gets it too. */}
+        {snoozeAsk && (
+          <div className="alert-bar" role="status" style={{ ['--alert-color' as string]: 'var(--warm)' }}>
+            <span className="alert-icon" aria-hidden>⏾</span>
+            <div className="alert-text">
+              <strong>Compact “{snoozeAsk.s.title}” before snoozing it?</strong>
+              <span className="alert-detail">
+                {formatTokens(snoozeAsk.s.contextTokens)} of context, and its cache expires at{' '}
+                {clockTime(cacheExpiresAt(snoozeAsk.s), now)}, before it wakes at {clockTime(snoozeAsk.until, now)}.
+                Compacting now reads it at cache prices; afterwards, the next turn rewrites all of it.
+              </span>
+            </div>
+            <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, flex: 'none' }}>
+              <button
+                className="btn sm primary"
+                onClick={() => {
+                  const { s, until } = snoozeAsk;
+                  void compact(s);
+                  void doSnooze(s, until);
+                }}
+                title="Type /compact at its prompt, then snooze it"
+              >
+                Compact and snooze
+              </button>
+              <button className="btn sm" onClick={() => void doSnooze(snoozeAsk.s, snoozeAsk.until)}>
+                Just snooze
+              </button>
+              <button className="btn sm" onClick={() => setSnoozeAsk(null)}>Cancel</button>
+            </span>
+          </div>
+        )}
+        </div>
       )}
 
       {restorable.length > 0 && (
@@ -1477,8 +1574,7 @@ export function App() {
                       atCursor={flat[cursor]?.id === s.id}
                       unseenDone={unseenDone.has(s.id)}
                       wokeMsAgo={wokeAgo(s, now)}
-                      compactAbove={prefs.compactAtKTokens * 1000}
-                      cacheWarnMs={prefs.cacheLeadMin * 60_000}
+                      cacheRisk={cacheRisk}
                       onClick={() => select(s)}
                     />
                   ))}
@@ -1764,7 +1860,7 @@ export function App() {
                     // questions, and the second is the one you are asking.
                     title={`${opt.hint} — ${clockTime(opt.at(now, prefs.wakeMinutes), now)}`}
                     onClick={() =>
-                      void patch(selected.id, { snoozedUntil: opt.at(Date.now(), prefs.wakeMinutes) })}
+                      snooze(selected, opt.at(Date.now(), prefs.wakeMinutes))}
                   >
                     {opt.label}
                   </button>
@@ -1797,7 +1893,7 @@ export function App() {
                               const n = Number(snoozeQty);
                               if (!(n > 0)) return;
                               setSnoozeOpen(false);
-                              void patch(selected.id, { snoozedUntil: Date.now() + n * snoozeUnit });
+                              snooze(selected, Date.now() + n * snoozeUnit);
                             }}
                           />
                           <select
@@ -1816,7 +1912,7 @@ export function App() {
                               const n = Number(snoozeQty);
                               if (!(n > 0)) return;
                               setSnoozeOpen(false);
-                              void patch(selected.id, { snoozedUntil: Date.now() + n * snoozeUnit });
+                              snooze(selected, Date.now() + n * snoozeUnit);
                             }}
                           >
                             Snooze
@@ -1841,7 +1937,7 @@ export function App() {
                               const at = Date.parse(snoozeUntil);
                               if (!(at > Date.now())) return;
                               setSnoozeOpen(false);
-                              void patch(selected.id, { snoozedUntil: at });
+                              snooze(selected, at);
                             }}
                           >
                             Set
@@ -1946,7 +2042,7 @@ export function App() {
                     {kw?.stopped && (
                       <>
                         <span className={`kw-state${KEEPWARM_WARN.has(kw.stopped.reason) ? ' warn' : ''}`}>
-                          Stopped {relTime(kw.stopped.at, now)} ago: {KEEPWARM_STOP_TEXT[kw.stopped.reason]}.
+                          Stopped {agoText(kw.stopped.at, now)}: {KEEPWARM_STOP_TEXT[kw.stopped.reason]}.
                         </span>
                         {canRun && (
                           <button
@@ -1999,11 +2095,11 @@ export function App() {
                   {selected.reasons.join(' · ')}
                   {/* Context size, not file size: what the model is carrying
                       and paying for on every turn. The amber only comes on
-                      when it is RUNNING and big, the same test the row chip
-                      uses. */}
+                      when it is big and its cache about to expire, the same
+                      test the row chip uses. */}
                   {selected.contextTokens > 0 && (
                     <span
-                      className={worthCompacting(selected, prefs.compactAtKTokens * 1000) ? 'ctx heavy' : 'ctx'}
+                      className={worthCompacting(selected, cacheRisk, now) ? 'ctx heavy' : 'ctx'}
                       title={`${selected.contextTokens.toLocaleString()} tokens of context on the last turn — re-sent in full on every turn this session takes`}
                     >
                       {` · ${formatTokens(selected.contextTokens)} ctx`}
@@ -2017,7 +2113,7 @@ export function App() {
                     const at = cacheExpiresAt(selected)!;
                     return left > 0 ? (
                       <span
-                        className={`cache-left${left <= prefs.cacheLeadMin * 60_000 ? ' soon' : ''}`}
+                        className={`cache-left${left <= cacheRisk.leadMs ? ' soon' : ''}`}
                         title={`The prompt cache expires at ${clockTime(at, now)}. Until then the next turn reads this context at about a tenth of the price; after, it rewrites it.`}
                       >
                         {` · cache ${formatLeft(left)} left`}

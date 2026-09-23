@@ -96,7 +96,7 @@ export function SettingsPop({ prefs, patch }: Props): JSX.Element {
         aria-expanded={open}
         aria-haspopup="true"
         onClick={() => setOpen((v) => !v)}
-        title="Alerts, compaction and snooze settings"
+        title="Alerts, reminders and snooze settings"
         aria-label="Settings"
       >
         {'⚙'}
@@ -178,23 +178,30 @@ export function SettingsPop({ prefs, patch }: Props): JSX.Element {
             <div className="set-note">
               Once a cache expires, the next turn rewrites the whole context at about
               twice the input price. Before then, keeping it warm or compacting it is cheap.
-              Sessions with keep-warm on are never warned about.
+              A big session whose cache is about to expire also gets a context chip on
+              its row. Sessions with keep-warm on are never warned about.
             </div>
 
-            <div className="set-head">Compaction</div>
-            <NumField
-              label="Suggest compacting above"
-              value={prefs.compactAtKTokens}
-              min={10}
-              max={900}
-              suffix="k tokens"
-              title="A session's context size, read from its last assistant turn"
-              onCommit={(n) => patch({ compactAtKTokens: n })}
+            <div className="set-head">Break reminders</div>
+            <ReminderField
+              label="Lunch"
+              value={prefs.lunchReminder}
+              fallback={12 * 60}
+              title="Offers to keep warm or compact the running sessions whose cache is still warm"
+              onChange={(v) => patch({ lunchReminder: v })}
+            />
+            <ReminderField
+              label="End of day"
+              value={prefs.dayEndReminder}
+              fallback={16 * 60}
+              title="Offers to compact the running sessions whose cache is still warm"
+              onChange={(v) => patch({ dayEndReminder: v })}
             />
             <div className="set-note">
-              Big sessions are re-sent in full every turn, so they are what a usage
-              window is mostly spent on. A running session above this size gets a
-              context chip on its row.
+              Every day at these times, a bar lists the running sessions that still
+              have a warm cache and pass the size floor above, so you can compact them
+              before an hour away lets the cache expire. It stays for an hour, and says
+              nothing when there is nothing to compact.
             </div>
 
             <div className="set-head">Snooze</div>
@@ -218,5 +225,45 @@ export function SettingsPop({ prefs, patch }: Props): JSX.Element {
         </>
       )}
     </div>
+  );
+}
+
+/** A daily reminder: a checkbox to turn it on and the time it fires. */
+function ReminderField({
+  label, value, fallback, title, onChange,
+}: {
+  label: string;
+  value: number | null;
+  /** The time it comes back at when turned on again. */
+  fallback: number;
+  title: string;
+  onChange: (v: number | null) => void;
+}): JSX.Element {
+  // Remembered while off, so unticking and reticking does not lose a custom time.
+  const [last, setLast] = useState(value ?? fallback);
+  return (
+    <label className="set-row" title={title}>
+      <span className="set-label">
+        <input
+          type="checkbox"
+          checked={value !== null}
+          onChange={(e) => onChange(e.target.checked ? last : null)}
+          style={{ marginRight: 6 }}
+        />
+        {label}
+      </span>
+      <input
+        className="set-time"
+        type="time"
+        disabled={value === null}
+        value={minutesToHHMM(value ?? last)}
+        onChange={(e) => {
+          const m = hhmmToMinutes(e.target.value);
+          if (m === null) return;
+          setLast(m);
+          onChange(m);
+        }}
+      />
+    </label>
   );
 }

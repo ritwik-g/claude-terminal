@@ -230,7 +230,7 @@ export type KeepWarmHold =
  */
 export const KEEPWARM_MARKER = '[keep-warm]';
 
-export type KeepWarmStop = 'typed' | 'cache-miss' | 'terminal-closed' | 'no-reply' | 'expired' | 'sent';
+export type KeepWarmStop = 'typed' | 'cache-miss' | 'terminal-closed' | 'no-reply' | 'expired' | 'sent' | 'snoozed';
 
 export interface KeepWarmView {
   /** False once it has stopped; `stopped` then says why. */

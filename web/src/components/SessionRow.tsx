@@ -3,7 +3,7 @@ import type { Session } from '../../../server/types';
 import {
   STATE_COLOR, STATE_LABEL, SHAPE_GLYPH, SHAPE_HINT,
   cacheExpiresAt, cacheLeftMs, clockTime, formatLeft, formatTokens, keepWarmChip, relTime, shortId,
-  shortPath, worthCompacting,
+  shortPath, worthCompacting, type CacheRisk,
 } from '../util';
 
 /** How many of a review's PRs get their own chip before the rest collapse. */
@@ -23,18 +23,16 @@ interface Props {
    */
   wokeMsAgo: number | null;
   /**
-   * Context size at which a RUNNING session is worth compacting, in tokens.
-   * An idle session is not spending anything, so it is never flagged — see
-   * worthCompacting.
+   * When a cache is worth warning about: its chip turns to a warning inside
+   * the lead, and a big running session gets a context chip offering to
+   * compact — see worthCompacting.
    */
-  compactAbove: number;
-  /** Cache time left, in ms, below which its chip turns to a warning. */
-  cacheWarnMs: number;
+  cacheRisk: CacheRisk;
   onClick: () => void;
 }
 
 export const SessionRow = React.memo(function SessionRow({
-  s, selected, atCursor, now, unseenDone, wokeMsAgo, compactAbove, cacheWarnMs, onClick,
+  s, selected, atCursor, now, unseenDone, wokeMsAgo, cacheRisk, onClick,
 }: Props) {
   const dotColor = STATE_COLOR[s.state];
   // The primary line under the title is the single most useful fact we have:
@@ -53,7 +51,7 @@ export const SessionRow = React.memo(function SessionRow({
   // The strip is a fixed width and scrolls, so on a busy row some of it is
   // always off-screen. Spelling the whole set out in words gives the hover a
   // job beyond decoration — it is the only place the hidden chips are legible.
-  const heavy = worthCompacting(s, compactAbove);
+  const heavy = worthCompacting(s, cacheRisk, now);
   const warm = keepWarmChip(s.keepWarm, now);
   // How long the prompt cache has left. Not shown once it has expired — the
   // next turn rewrites it whatever you do — nor while keep-warm is on, whose
@@ -62,7 +60,7 @@ export const SessionRow = React.memo(function SessionRow({
   const cache = left !== null && left > 0 && !s.keepWarm?.active
     ? {
         label: `⏱ ${formatLeft(left)}`,
-        soon: left <= cacheWarnMs,
+        soon: left <= cacheRisk.leadMs,
         title: `Prompt cache expires at ${clockTime(cacheExpiresAt(s), now)} (in ${formatLeft(left)}). ` +
           'After that, the next turn rewrites the whole context.',
       }
@@ -77,7 +75,7 @@ export const SessionRow = React.memo(function SessionRow({
     s.attached ? 'terminal open' : null,
     s.review ? `review · /${s.review.command}` : null,
     ...(s.pr ? [`PR #${s.pr.number}`] : reviewPrs.map((p) => `${p.repository} #${p.number}`)),
-    heavy ? `${formatTokens(s.contextTokens)} of context, running now — worth compacting` : null,
+    heavy ? `${formatTokens(s.contextTokens)} of context and the cache about to expire — worth compacting now` : null,
     ...s.user.tags,
   ].filter(Boolean) as string[];
 
@@ -187,13 +185,14 @@ export const SessionRow = React.memo(function SessionRow({
             </span>
           )}
           {/* Only on a running session big enough to be worth doing something
-              about. Every session has a context size, and printing all of them
-              — or every big one, running or not — is a column of numbers
+              about, and only while its cache is about to expire: that is when
+              compacting is cheap and still worth it. Every session has a
+              context size, and printing all of them is a column of numbers
               nobody reads. */}
           {heavy && (
             <span
               className="chip ctx"
-              title={`${s.contextTokens.toLocaleString()} tokens of context, re-sent on every turn this session takes — worth compacting`}
+              title={`${s.contextTokens.toLocaleString()} tokens of context and the cache about to expire — compact now, while reading it is cheap`}
             >
               {formatTokens(s.contextTokens)}
             </span>

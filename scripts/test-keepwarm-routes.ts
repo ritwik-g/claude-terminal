@@ -224,6 +224,16 @@ const main = async () => {
     const late = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm/ping`, { method: 'POST' });
     check('  and Ping anyway is refused once it is off', late.status === 409, String(late.status));
 
+    // ---- snoozing ----
+    const snooze = (id: string, until: number) =>
+      fetch(`${BASE}/api/sessions/${id}/state`, { method: 'PATCH', body: JSON.stringify({ snoozedUntil: until }) });
+    await enable(IDLE, { minutes: 120, untilSend: false, pausePct: null });
+    await snooze(IDLE, Date.now() + 60 * MIN);
+    check('a snooze inside keep-warm\'s time leaves it on', (await session(IDLE))?.keepWarm?.active === true);
+    await snooze(IDLE, Date.now() + 24 * 60 * MIN);
+    const snoozed = (await session(IDLE))?.keepWarm;
+    check('one past it stops keep-warm and says why', snoozed?.stopped?.reason === 'snoozed', JSON.stringify(snoozed));
+
     // ---- a closed terminal ----
     await fetch(`${BASE}/api/terms/${SID}?hard=1`, { method: 'DELETE' });
     check('closing the terminal stops keep-warm and says why',

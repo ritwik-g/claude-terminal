@@ -10,7 +10,7 @@ import { initSessions, getSessions, fileForSession, titleForSession } from './se
 import { tickCompletions, completionEvents } from './completions.js';
 import { readArtifacts } from './artifacts.js';
 import {
-  tickKeepWarm, noteInput, enableKeepWarm, disableKeepWarm, pingNow, keepWarmEvents,
+  tickKeepWarm, noteInput, enableKeepWarm, disableKeepWarm, pingNow, snoozeKeepWarm, keepWarmEvents,
   KeepWarmError, MIN_MINUTES, MAX_MINUTES, type KeepWarmStoppedEvent,
 } from './keepwarm.js';
 import { saveCache, searchIds } from './scan.js';
@@ -364,6 +364,9 @@ app.patch('/api/sessions/:id/state', async (req, res) => {
       }
     }
     const next = setUserState(id, patch);
+    // Snoozed past when keep-warm ends: its pings would keep a cache that has
+    // expired by the time the session wakes. See snoozeKeepWarm.
+    if (typeof patch.snoozedUntil === 'number') snoozeKeepWarm(id, patch.snoozedUntil);
     return res.json({ id, user: next });
   } catch (err) {
     if (err instanceof BadRequest) return res.status(400).json({ error: err.message });

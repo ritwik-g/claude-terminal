@@ -22,25 +22,6 @@ export interface Prefs {
   /** Minutes of warning before a window rolls over. */
   resetLeadMin: number;
   /**
-   * Context size, in thousands of tokens, above which a session is offered as
-   * worth compacting.
-   *
-   * Absolute rather than a percentage of the model's limit, because the
-   * transcript does not record which limit applies — a 1M-context run and a
-   * 200k one both write `claude-opus-5` — and because what you are managing
-   * here is cost, which tracks the size of the context you re-send every turn,
-   * not how close it is to overflowing.
-   *
-   * The default sits just past a full standard context window: at 250k the
-   * session is carrying more conversation than a 200k model could hold at all,
-   * which is a fair definition of "big enough to be worth spending a turn on".
-   * Measured against a real 100-session tree it marks about half of them and
-   * 4 in 10 of the last week's. That ratio is the point — a threshold two
-   * thirds of every row clears is a decoration, not a signal — so tune it down
-   * if your sessions run smaller than this one's author's do.
-   */
-  compactAtKTokens: number;
-  /**
    * Warn before a running session's prompt cache expires. Separate from the
    * usage alerts: those are about the account's windows, this is about one
    * session's next turn costing a full rewrite of its context.
@@ -56,6 +37,17 @@ export interface Prefs {
    */
   cacheAlertAtKTokens: number;
   /**
+   * A daily reminder, as minutes past local midnight, to compact or keep warm
+   * the running sessions whose cache is still warm before you step away for
+   * lunch. Null is off.
+   */
+  lunchReminder: number | null;
+  /**
+   * The same at the end of the day, when compacting is the answer: nothing
+   * keeps a cache warm until the next morning at a price worth paying.
+   */
+  dayEndReminder: number | null;
+  /**
    * When a "tomorrow" or "next week" snooze wakes, as minutes past local
    * midnight. Weekends are skipped — see wakeAt() in util.ts.
    */
@@ -66,10 +58,11 @@ export const DEFAULT_PREFS: Prefs = {
   alertsEnabled: true,
   usageThresholdPct: 80,
   resetLeadMin: 30,
-  compactAtKTokens: 250,
   cacheAlertsEnabled: true,
   cacheLeadMin: 20,
   cacheAlertAtKTokens: 100,
+  lunchReminder: 12 * 60,
+  dayEndReminder: 16 * 60,
   wakeMinutes: 9 * 60,
 };
 
@@ -77,6 +70,10 @@ const KEY = 'ct.prefs';
 
 const clamp = (v: unknown, lo: number, hi: number, fallback: number): number =>
   typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : fallback;
+
+/** A time of day, null for off, or the default when the field was never set. */
+const reminder = (v: unknown, fallback: number | null): number | null =>
+  v === null ? null : typeof v === 'number' ? clamp(v, 0, 23 * 60 + 59, 0) : fallback;
 
 /**
  * Every field is range-checked on the way in, not just on the way out of the
@@ -91,10 +88,11 @@ function sanitize(raw: any): Prefs {
     alertsEnabled: raw.alertsEnabled !== false,
     usageThresholdPct: clamp(raw.usageThresholdPct, 10, 99, DEFAULT_PREFS.usageThresholdPct),
     resetLeadMin: clamp(raw.resetLeadMin, 1, 240, DEFAULT_PREFS.resetLeadMin),
-    compactAtKTokens: clamp(raw.compactAtKTokens, 10, 900, DEFAULT_PREFS.compactAtKTokens),
     cacheAlertsEnabled: raw.cacheAlertsEnabled !== false,
     cacheLeadMin: clamp(raw.cacheLeadMin, 1, 55, DEFAULT_PREFS.cacheLeadMin),
     cacheAlertAtKTokens: clamp(raw.cacheAlertAtKTokens, 0, 900, DEFAULT_PREFS.cacheAlertAtKTokens),
+    lunchReminder: reminder(raw.lunchReminder, DEFAULT_PREFS.lunchReminder),
+    dayEndReminder: reminder(raw.dayEndReminder, DEFAULT_PREFS.dayEndReminder),
     wakeMinutes: clamp(raw.wakeMinutes, 0, 23 * 60 + 59, DEFAULT_PREFS.wakeMinutes),
   };
 }

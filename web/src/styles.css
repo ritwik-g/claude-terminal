@@ -1063,8 +1063,8 @@ kbd {
    window is an account-wide fact, not a property of the list. The accent comes
    in as a custom property so one rule serves an amber 80%, a red 95% and the
    blue "resets soon" without three near-identical blocks. */
+.alert-stack { grid-area: alert; display: flex; flex-direction: column; min-width: 0; }
 .alert-bar {
-  grid-area: alert;
   display: flex;
   align-items: center;
   gap: 12px;
