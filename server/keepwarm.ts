@@ -16,7 +16,9 @@ import { KEEPWARM_MARKER, type KeepWarmHold, type KeepWarmStop, type KeepWarmVie
  * the hour — so a tiny turn sent before the hour is up keeps the cache alive
  * for a small fraction of what rebuilding it costs. About twenty pings cost
  * what one cold resume does, which makes this right for "back after lunch"
- * and wrong for "back tomorrow"; hence the durations, and no open-ended mode.
+ * and marginal for "back tomorrow": a full day is about thirty pings, worth it
+ * only for a big context you would rather not have rebuilt. Hence durations,
+ * a day at most, and no open-ended mode.
  *
  * The ping is an ordinary message typed at the prompt of a terminal this app
  * owns, exactly as you would type it. That is the only way in — and it means
@@ -51,7 +53,7 @@ export const CACHE_TTL_MS = 60 * 60_000;
  */
 export const MISSES_TO_STOP = 2;
 /** The longest keep-warm will run, whatever was asked for. */
-export const MAX_MINUTES = 12 * 60;
+export const MAX_MINUTES = 24 * 60;
 export const MIN_MINUTES = 30;
 /** A ping with no reply by now did not start a turn. */
 const REPLY_WAIT_MS = 5 * 60_000;

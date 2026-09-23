@@ -169,6 +169,8 @@ export interface Session {
    * See ScannedSession.contextTokens for why this and not `sizeBytes`.
    */
   contextTokens: number;
+  /** How much of `contextTokens` is in the prompt cache. See ScannedSession.cachedTokens. */
+  cachedTokens: number;
   /** Last main-thread API call, epoch ms; 0 when none. See ScannedSession.lastApiAt. */
   lastApiAt: number;
   /** How long the prompt cache lives from `lastApiAt`. See ScannedSession.cacheTtlMs. */

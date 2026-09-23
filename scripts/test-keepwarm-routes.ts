@@ -161,6 +161,8 @@ const main = async () => {
     // ---- validation ----
     const bad = await enable(SID, { minutes: 5, untilSend: false, pausePct: null });
     check('a duration below the minimum is refused', bad.status === 400, String(bad.status));
+    const long = await enable(SID, { minutes: 25 * 60, untilSend: false, pausePct: null });
+    check('one past a day is refused', long.status === 400, String(long.status));
     const unknown = await enable('eeeeeeee-5555-4555-8555-555555555555', { minutes: 120, untilSend: false, pausePct: null });
     check('an unknown session is refused', unknown.status === 404, String(unknown.status));
     const noTerm = await enable(SID, { minutes: 120, untilSend: false, pausePct: null });
@@ -222,6 +224,11 @@ const main = async () => {
     const clear = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm/clear`, { method: 'POST' });
     check('Dismiss on the typing warning keeps it running',
       clear.ok && (await clear.json()).keepWarm?.active === true, String(clear.status));
+    const asked = Date.now();
+    const day = await enable(IDLE, { minutes: 24 * 60, untilSend: false, pausePct: null });
+    const dayView = (await day.json()).keepWarm;
+    check('a full day is accepted', day.ok && Math.abs(dayView.until - asked - 24 * 60 * MIN) < 5000,
+      `${day.status} ${JSON.stringify(dayView)}`);
     const off = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm`, { method: 'DELETE' });
     check('turning it off forgets it', off.ok && (await session(IDLE)).keepWarm === null);
     const late = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm/ping`, { method: 'POST' });

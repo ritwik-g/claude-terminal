@@ -164,7 +164,7 @@ function fakeSession(over: Partial<Session> & { id: string }): Session {
   return {
     file: '', projectKey: '', cwd: '', branch: '', title: over.id, titleSource: 'id',
     lastPrompt: '', recap: '', pr: null, review: null, startedAt: 0, lastActivity: 0,
-    sizeBytes: 0, messages: 0, contextTokens: 0, lastApiAt: 0, cacheTtlMs: 3600_000, version: '',
+    sizeBytes: 0, messages: 0, contextTokens: 0, cachedTokens: 0, lastApiAt: 0, cacheTtlMs: 3600_000, version: '',
     tail: { lastStopReason: null, lastRole: null, lastUserWasToolResult: false,
             endedMidTool: false, pendingTools: [], pendingQuestion: null },
     live: null, git: null, user: { ...EMPTY_USER_STATE }, shape: 'task', state: 'quiet',

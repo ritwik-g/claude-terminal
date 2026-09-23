@@ -412,9 +412,9 @@ export function breakDue(
  * gone — at the start of a break, one with 50 minutes left will still have
  * expired by the time you are back. Sessions kept warm are left out of a
  * lunch reminder, since keep-warm already covers a short break, but not out of
- * the end-of-day one: keep-warm stops after 12 hours at most, which is not the
- * morning, and pinging a big context all night costs about what the rewrite
- * it saves would.
+ * the end-of-day one: pinging a big context all night costs about what the
+ * rewrite it saves would, so compacting is the better default there, even
+ * though keep-warm can now run for up to a day.
  */
 export function breakCandidates(
   sessions: Session[],
@@ -514,16 +514,23 @@ export function wokeAgo(s: Session, now: number): number | null {
 /**
  * Keep-warm durations offered in the detail pane. Every one ends: about twenty
  * pings cost what one cold resume does, so "keep it warm forever" is the one
- * option that is never the cheap one. "Until I reply" still has a ceiling, the
- * server's own 12 hours.
+ * option that is never the cheap one. The longest, "Until I reply" included,
+ * is a day — the server's own ceiling.
  */
 export const KEEPWARM_OPTIONS: { label: string; minutes: number; untilSend: boolean; hint: string }[] = [
   { label: '2h', minutes: 120, untilSend: false, hint: 'Keep the cache warm for the next 2 hours' },
   { label: '4h', minutes: 240, untilSend: false, hint: 'Keep the cache warm for the next 4 hours' },
   { label: '8h', minutes: 480, untilSend: false, hint: 'Keep the cache warm for the next 8 hours' },
+  { label: '12h', minutes: 720, untilSend: false, hint: 'Keep the cache warm for the next 12 hours' },
+  { label: '16h', minutes: 960, untilSend: false, hint: 'Keep the cache warm for the next 16 hours' },
   {
-    label: 'until I reply', minutes: 720, untilSend: true,
-    hint: 'Keep the cache warm until you next send a message here, for at most 12 hours',
+    label: '24h', minutes: 1440, untilSend: false,
+    hint: 'Keep the cache warm for the next 24 hours. About 30 pings, which costs more than one rebuild of a ' +
+      'small context — worth it for a big one',
+  },
+  {
+    label: 'until I reply', minutes: 1440, untilSend: true,
+    hint: 'Keep the cache warm until you next send a message here, for at most 24 hours',
   },
 ];
 

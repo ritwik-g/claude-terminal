@@ -546,6 +546,12 @@ console.log('keep-warm\n');
   check('  or become its last prompt', s.lastPrompt === 'the real question', s.lastPrompt);
   check('  or its searchable text', !s.searchText.includes('cache refresh'), s.searchText);
   check('  but its reply still reads the context size', s.contextTokens === 90_203, String(s.contextTokens));
+  check('  and how much of it is cached', s.cachedTokens === 90_200, String(s.cachedTokens));
+
+  appendLog(sent(T0 + 49 * MIN, '/compact'), { type: 'system', subtype: 'compact_boundary', timestamp: iso(T0 + 50 * MIN), compactMetadata: { postTokens: 12_000 } });
+  const c = (await scanAll()).find((x) => x.id === SID)!;
+  check('a compact leaves nothing of the new context cached',
+    c.contextTokens === 12_000 && c.cachedTokens === 0, `${c.contextTokens} ${c.cachedTokens}`);
 }
 
 kw.setKeepWarmDeps(null);

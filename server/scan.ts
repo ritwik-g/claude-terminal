@@ -24,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 12;
+const CACHE_VERSION = 13;
 
 export interface ScannedSession {
   id: string;
@@ -58,6 +58,13 @@ export interface ScannedSession {
    * new session, or a transcript from a version that did not record it.
    */
   contextTokens: number;
+  /**
+   * How much of that context the last turn left in the prompt cache: what it
+   * read from the cache plus what it wrote into it. The rest (uncached input)
+   * is paid at full price on every turn. 0 after a /compact, whose new context
+   * is not cached until the next turn, and when no usage was recorded.
+   */
+  cachedTokens: number;
   /**
    * When the session last made an API call — its last main-thread assistant
    * record, keep-warm pings included, since those read the cache too. The
@@ -288,6 +295,13 @@ function safeParse(line: string): any | null {
  * Null rather than 0 when the record carries no usable usage, so a stub entry
  * leaves the last real reading standing instead of wiping it.
  */
+/** The part of contextTokensOf() that the turn left in the prompt cache. */
+function cachedTokensOf(usage: any): number {
+  if (!usage || typeof usage !== 'object') return 0;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+  return n(usage.cache_creation_input_tokens) + n(usage.cache_read_input_tokens);
+}
+
 function contextTokensOf(usage: any): number | null {
   if (!usage || typeof usage !== 'object') return null;
   const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
@@ -336,6 +350,7 @@ function extract(
     sizeBytes: st.size,
     messages: 0,
     contextTokens: 0,
+    cachedTokens: 0,
     lastApiAt: 0,
     cacheTtlMs: HOUR_MS,
     version: '',
@@ -414,7 +429,7 @@ function extract(
       // Context size still counts: the reply's usage is a true reading of it.
       if (rec.type === 'assistant' && rec.isSidechain !== true) {
         const ctx = contextTokensOf(rec.message?.usage);
-        if (ctx !== null) s.contextTokens = ctx;
+        if (ctx !== null) { s.contextTokens = ctx; s.cachedTokens = cachedTokensOf(rec.message.usage); }
         // A ping's reply is a real cache read — the whole point of it.
         noteApiCall(rec);
       }
@@ -462,6 +477,7 @@ function extract(
           const post = rec.compactMetadata?.postTokens;
           if (typeof post === 'number' && Number.isFinite(post) && post >= 0) {
             s.contextTokens = post;
+            s.cachedTokens = 0;
           }
         }
         break;
@@ -500,7 +516,7 @@ function extract(
         // about the session you would be compacting.
         if (rec.isSidechain !== true) {
           const ctx = contextTokensOf(rec.message?.usage);
-          if (ctx !== null) s.contextTokens = ctx;
+          if (ctx !== null) { s.contextTokens = ctx; s.cachedTokens = cachedTokensOf(rec.message.usage); }
           noteApiCall(rec);
         }
         break;

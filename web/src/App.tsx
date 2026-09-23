@@ -2127,7 +2127,9 @@ export function App() {
                     </span>
                   )}
                   {/* What that context costs on the next turn depends on this:
-                      read from cache while it lasts, rewritten after. */}
+                      read from cache while it lasts, rewritten after. How much
+                      of it is cached shows only while the cache is alive —
+                      once it expires, none of it is. */}
                   {(() => {
                     const left = cacheLeftMs(selected, now);
                     if (left === null) return null;
@@ -2135,9 +2137,16 @@ export function App() {
                     return left > 0 ? (
                       <span
                         className={`cache-left${left <= cacheRisk.leadMs ? ' soon' : ''}`}
-                        title={`The prompt cache expires at ${clockTime(at, now)}. Until then the next turn reads this context at about a tenth of the price; after, it rewrites it.`}
+                        title={
+                          (selected.cachedTokens > 0
+                            ? `${selected.cachedTokens.toLocaleString()} of ${selected.contextTokens.toLocaleString()} context tokens are in the prompt cache. `
+                            : '') +
+                          `The cache expires at ${clockTime(at, now)}. Until then the next turn reads this context at about a tenth of the price; after, it rewrites it.`
+                        }
                       >
-                        {` · cache ${formatLeft(left)} left`}
+                        {selected.cachedTokens > 0
+                          ? ` · ${formatTokens(selected.cachedTokens)} cached, ${formatLeft(left)} left`
+                          : ` · cache ${formatLeft(left)} left`}
                       </span>
                     ) : (
                       <span className="cache-left gone" title={`The prompt cache expired at ${clockTime(at, now)}; the next turn rewrites the whole context.`}>

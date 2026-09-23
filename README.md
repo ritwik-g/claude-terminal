@@ -43,7 +43,7 @@ like any other turn. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **Usage at a glance** | How much of your 5-hour window is gone and the clock time it resets at, in the header. Hover or click for both windows in full, with their reset times, and a refresh button of its own. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
 | **And it warns you before it bites** | A bar across the top when a window passes 80%, or 30 minutes before one resets — with a desktop notification when the app is not focused. Both numbers are settings. |
 | **…and before a session's cache runs out** | Each running session shows how long its prompt cache has left (`⏱ 34m`). When a big one is 20 minutes from expiring and isn't being kept warm, a bar and a desktop notification offer **Keep warm** and **Compact**, while the cache still makes either one cheap. Once it has expired it isn't listed, because the next turn pays for the rewrite whatever you do. The lead time, the size floor and the switch are all settings. A reminder at 12:00 and 16:00 lists every big session with a warm cache, so you can compact before lunch or the end of the day. |
-| **Keep a session's cache warm while you step away** | Claude Code's prompt cache expires an hour after a session's last turn, and your next message then pays to write the whole conversation back into it. **Keep warm** (2h / 4h / 8h / until you reply) sends a one-line message about 45 minutes after the last turn, so the cache is read, at a tenth of the price, instead of rebuilt. It only types when the session is idle, isn't showing a dialog or question, and has nothing unsent in its input box. If you've typed without sending, it warns you, and unless you dismiss the warning it turns itself off rather than type on top of your draft. |
+| **Keep a session's cache warm while you step away** | Claude Code's prompt cache expires an hour after a session's last turn, and your next message then pays to write the whole conversation back into it. **Keep warm** (2h to 24h, or until you reply) sends a one-line message about 45 minutes after the last turn, so the cache is read, at a tenth of the price, instead of rebuilt. It only types when the session is idle, isn't showing a dialog or question, and has nothing unsent in its input box. If you've typed without sending, it warns you, and unless you dismiss the warning it turns itself off rather than type on top of your draft. |
 | **Context size, where it costs** | A running session with a large context shows its size on the row (`412k`), read from the last turn's own token usage rather than the transcript's size on disk. Idle sessions don't show it, because they aren't costing anything. |
 | **Triage by hand when you want to** | Priority, pin, tags and snooze are one key each. They adjust the derived ranking but never replace it, so the list still works if you never set any of them. |
 | **Snoozes wake when your day does** | *tomorrow* and *next week* mean 9am on the next working day, not "+24h" and "+7d" — a Friday evening snooze comes back on Monday morning. The hour is a setting, and **custom…** takes any duration or an exact moment. Snoozing a big session whose cache would expire before it wakes asks whether to compact it first. |
@@ -477,8 +477,8 @@ sessions that still have a warm cache and pass the size floor, biggest first.
 An hour for lunch or overnight will let those caches expire, so this is the
 moment to compact them. The lunch reminder also offers **Keep warm**, which
 covers a short break. The end-of-day one offers only **Compact**: keep-warm
-stops after 12 hours at most, and pinging a big context all night costs about
-what the rewrite it saves would. On a Friday it asks whether you're wrapping up
+can run for up to a day, but pinging a big context all night costs about what
+the rewrite it saves would. On a Friday it asks whether you're wrapping up
 for the weekend. It stays for an hour unless you dismiss it, fires once a day
 even if you reopen the app, and says nothing when there is nothing to compact.
 
@@ -515,12 +515,12 @@ twice the price. Measured across 80 real sessions, a prompt sent within the hour
 hit the cache 93% of the time (564 of 605), and one sent after it missed 140
 times out of 145. That miss is what this avoids.
 
-Turn it on from the session's **Keep warm** row: 2h, 4h, 8h, or *until I reply*
-(until you next send a message, 12h at most). About 45 minutes after the last
+Turn it on from the session's **Keep warm** row: 2h, 4h, 8h, 12h, 16h, 24h, or *until I reply*
+(until you next send a message, 24h at most). About 45 minutes after the last
 API call, the server types a one-line message at the session's prompt, telling
 Claude to reply only "ok". Roughly twenty of those cost what one cold rebuild
-does, so it is worth it for a lunch break and not overnight, which is why every
-option ends. It runs on the server's own clock, so a hidden or throttled
+does, so it is worth it for a lunch break. A full day is about thirty, which
+only pays off for a big context. Every option ends. It runs on the server's own clock, so a hidden or throttled
 window does not delay it.
 
 Because the ping is typed, it goes wherever the cursor is. So it is held, never
