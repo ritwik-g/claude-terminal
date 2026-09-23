@@ -2043,20 +2043,20 @@ export function App() {
                         )}
                         <button className="btn sm on" onClick={() => void keepWarmOff(selected)}>Stop</button>
                         {kw.unsentSince !== null && (
-                          <span className="kw-note warn">
-                            You have typed here since your last message. If it is still unsent
-                            {kw.nextPingAt ? ` at ${clockTime(kw.nextPingAt, now)}` : ' when the next ping is due'},
-                            keep-warm turns off rather than type on top of it.
-                          </span>
-                        )}
-                        {kw.unsentSince !== null && (
-                          <button
-                            className="btn sm"
-                            onClick={() => void keepWarmClear(selected)}
-                            title="The input box is empty — a stray key, or a draft you have since deleted. Forget the typing and keep pinging."
-                          >
-                            Dismiss
-                          </button>
+                          <div className="kw-warn-row">
+                            <span className="kw-note warn">
+                              You have typed here since your last message. If it is still unsent
+                              {kw.nextPingAt ? ` at ${clockTime(kw.nextPingAt, now)}` : ' when the next ping is due'},
+                              keep-warm turns off rather than type on top of it.
+                            </span>
+                            <button
+                              className="btn sm warn"
+                              onClick={() => void keepWarmClear(selected)}
+                              title="The input box is empty — a stray key, or a draft you have since deleted. Forget the typing and keep pinging."
+                            >
+                              Dismiss
+                            </button>
+                          </div>
                         )}
                       </>
                     )}

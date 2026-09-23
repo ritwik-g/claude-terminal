@@ -1251,7 +1251,22 @@ kbd {
 .kw-state.held { color: var(--fg-dim); }
 .kw-state.warn { color: var(--st-crashed); }
 .kw-note { color: var(--fg-faint); font-size: 11px; line-height: 1.45; }
-.kw-note.warn { color: var(--st-needs); flex-basis: 100%; }
+.kw-note.warn { color: var(--st-needs); }
+/* The warning takes its own line, with its Dismiss beside it rather than
+   wrapped below where it reads as just another control in the row. */
+.kw-warn-row { flex-basis: 100%; display: flex; align-items: center; gap: 10px; }
+.btn.warn {
+  color: var(--st-needs);
+  border-color: var(--st-needs);
+  background: color-mix(in srgb, var(--st-needs) 16%, var(--bg-inset));
+  font-weight: 600;
+  flex: none;
+}
+.btn.warn:hover:not(:disabled) {
+  color: var(--bg);
+  border-color: var(--st-needs);
+  background: var(--st-needs);
+}
 
 /* Prompt cache time left. Quiet while there is plenty; the warm orange once it
    is inside the warning lead, because that is when it wants a decision. */
