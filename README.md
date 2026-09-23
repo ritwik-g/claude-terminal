@@ -30,8 +30,11 @@ like any other turn. See [SECURITY.md](SECURITY.md) for the full trust model.
 |---|---|
 | **Ranked by attention, not recency** | Sessions group into *Needs you / Working / Parked / Quiet / Snoozed*. Every row carries a `reasons` trail, so the ranking is always inspectable — never a black box. |
 | **Questions surface first** | A session stopped on a question — a permission prompt, a multiple-choice ask, a plan waiting for approval — sorts to the top of *Needs you* and says what was asked. Nothing in it can move until you answer. |
+| **Work left behind is noticed** | Uncommitted files and unpushed commits move a session up and are named on its row, but only when they belong to that session, so a shared checkout doesn't flag every session opened in it. |
 | **Session types, derived** | `✓ review`, `⚡ errand`, `◆ task`, `∞ thread` — read off the transcript and filterable. No tagging required. |
 | **Terminals in the same window** | Real PTYs, native scrolling, a real scrollbar, and search across the whole buffer. No tmux. |
+| **Start a session anywhere** | **+ New** opens Claude Code in any folder: type a path, browse to it inline, or use the OS folder picker. The new session joins the list once Claude Code registers it. |
+| **A dropped connection is not a dropped session** | After a laptop sleep or a network gap, a terminal pane reconnects on its own and replays its scrollback. The running process is never touched. |
 | **Reviews link what they review** | A session opened with a review command links **every** PR it covers, not just the first. |
 | **Artifacts, front and centre** | What a session *published* leads its detail pane and opens on claude.ai in a click. Revisions collapse into one row with a version count. |
 | **Search that reads the conversation** | Titles, ids, tags, branches, cwds, PR numbers — **and the messages themselves**, so a phrase you remember typing finds the session. |
@@ -41,12 +44,16 @@ like any other turn. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **And it warns you before it bites** | A bar across the top when a window passes 80%, or 30 minutes before one resets — with a desktop notification when the app is not focused. Both numbers are settings. |
 | **…and before a session's cache runs out** | Each running session shows how long its prompt cache has left (`⏱ 34m`). When a big one is 20 minutes from expiring and isn't being kept warm, a bar and a desktop notification offer **Keep warm** and **Compact**, while the cache still makes either one cheap. Once it has expired it isn't listed, because the next turn pays for the rewrite whatever you do. The lead time, the size floor and the switch are all settings. |
 | **Keep a session's cache warm while you step away** | Claude Code's prompt cache expires an hour after a session's last turn, and your next message then pays to write the whole conversation back into it. **Keep warm** (2h / 4h / 8h / until you reply) sends a one-line message about 45 minutes after the last turn, so the cache is read, at a tenth of the price, instead of rebuilt. It only types when the session is idle, isn't showing a dialog or question, and has nothing unsent in its input box. If you've typed without sending, it turns itself off and says so rather than type on top of your draft. |
+| **Context size, where it costs** | A running session with a large context shows its size on the row (`412k`), read from the last turn's own token usage rather than the transcript's size on disk. Idle sessions don't show it, because they aren't costing anything. |
+| **Triage by hand when you want to** | Priority, pin, tags and snooze are one key each. They adjust the derived ranking but never replace it, so the list still works if you never set any of them. |
 | **Snoozes wake when your day does** | *tomorrow* and *next week* mean 9am on the next working day, not "+24h" and "+7d" — a Friday evening snooze comes back on Monday morning. The hour is a setting, and **custom…** takes any duration or an exact moment. |
 | **A woken session says so** | A session whose snooze ran out rejoins the list in whatever position its score earns, which is silent. It now carries a *woke 41m* chip and a tinted edge until you open it. |
 | **Mark a session cleaned up** | `c` tints the row and chips it, so the session you tidied up is findable again among a dozen that look identical. A **Cleanup** filter in the sidebar collects them, to close and archive in one pass. |
 | **The cleanup mark can set itself** | Ship `/cleanup` and a one-line hook, and the session marks itself the moment you run it — see [Marking cleanup automatically](#marking-cleanup-automatically). |
 | **Your working set survives a quit** | The terminals you had open are offered back on the next launch, in one click. |
 | **Active only, by default** | Opens showing just what's running — one click to see everything, and searching overrides it, so nothing is ever unreachable. |
+| **A list that holds still** | Rows stay in place while your pointer is over the list, so a live re-rank can't move a row before you click it. The list can be resized or hidden to give the terminal the full width. |
+| **Keyboard first** | `j`/`k`, `Enter`, `/` and single keys for every triage action ([Keys](#keys)). The shortcuts never fire while the terminal has focus, so Escape always reaches the session. |
 
 ## Install
 
