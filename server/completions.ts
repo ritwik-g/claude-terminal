@@ -56,6 +56,34 @@ interface Pending {
   at: number;
 }
 
+/**
+ * How long a turn we started ourselves stays unannounced. A keep-warm ping is
+ * answered in seconds; a turn still going after this is Claude doing real work
+ * — a Stop hook or a loop picked the ping up and carried on — and finishing
+ * that IS worth telling you about.
+ */
+export const QUIET_TURN_MS = 3 * 60_000;
+
+/** Sessions whose next turn the app started itself, id -> deadline. */
+let quiet = new Map<string, number>();
+
+/**
+ * Do not announce the turn this session is about to take.
+ *
+ * Keep-warm types a message into an idle session so its prompt cache is read
+ * before it expires. That turn is not news — nothing you asked for finished —
+ * and announcing it every 45 minutes would put a notification, a dock badge
+ * and an unseen dot on every session being kept warm.
+ */
+export function quietNextTurn(id: string, now = Date.now()): void {
+  quiet.set(id, now + QUIET_TURN_MS);
+}
+
+/** The turn it was set for is over — whether or not the 2s tick ever saw it running. */
+export function clearQuietTurn(id: string): void {
+  quiet.delete(id);
+}
+
 /** Last status we saw per session. Absent means we have never seen it. */
 let seen = new Map<string, LiveInfo['status']>();
 /** Stopped, but not yet held long enough to be believed. */
@@ -87,7 +115,17 @@ export function tickCompletions(now = Date.now(), live = readLiveSessions()): vo
       // a completion — cancelling it here is the entire point of the hold.
       pending.delete(id);
     } else if (seen.get(id) === 'busy') {
-      pending.set(id, { to: info.status, at: now });
+      const deadline = quiet.get(id);
+      quiet.delete(id);
+      // A turn the app started itself, over quickly: nothing to announce. One
+      // that stopped on a dialog is announced regardless — that wants you.
+      if (deadline !== undefined && now <= deadline && info.status !== 'waiting') {
+        seen.set(id, info.status);
+        continue;
+      }
+      // A background shell left running is still a finished turn; the event
+      // vocabulary has no need to tell the two apart.
+      pending.set(id, { to: info.status === 'shell' ? 'idle' : info.status, at: now });
     }
     seen.set(id, info.status);
   }
@@ -102,6 +140,9 @@ export function tickCompletions(now = Date.now(), live = readLiveSessions()): vo
     // with no previous status, so it cannot fire spuriously on arrival.
     seen.delete(id);
   }
+
+  // A ping that never started a turn must not silence the next real one.
+  for (const [id, deadline] of quiet) if (now > deadline) quiet.delete(id);
 
   for (const [id, p] of pending) {
     if (now - p.at < HOLD_MS) continue;
@@ -122,5 +163,6 @@ export function recentCompletions(): CompletionEvent[] {
 export function resetCompletions(): void {
   seen = new Map();
   pending = new Map();
+  quiet = new Map();
   ring = [];
 }

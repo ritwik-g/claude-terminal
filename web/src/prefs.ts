@@ -41,6 +41,21 @@ export interface Prefs {
    */
   compactAtKTokens: number;
   /**
+   * Warn before a running session's prompt cache expires. Separate from the
+   * usage alerts: those are about the account's windows, this is about one
+   * session's next turn costing a full rewrite of its context.
+   */
+  cacheAlertsEnabled: boolean;
+  /** Minutes of cache left at which the warning fires. */
+  cacheLeadMin: number;
+  /**
+   * Context size, in thousands of tokens, below which an expiring cache is not
+   * worth mentioning. Claude Code's own system prompt is cached separately and
+   * lasts longer, so a small session's rebuild costs next to nothing; this
+   * keeps the warning for the ones where it does.
+   */
+  cacheAlertAtKTokens: number;
+  /**
    * When a "tomorrow" or "next week" snooze wakes, as minutes past local
    * midnight. Weekends are skipped — see wakeAt() in util.ts.
    */
@@ -52,6 +67,9 @@ export const DEFAULT_PREFS: Prefs = {
   usageThresholdPct: 80,
   resetLeadMin: 30,
   compactAtKTokens: 250,
+  cacheAlertsEnabled: true,
+  cacheLeadMin: 20,
+  cacheAlertAtKTokens: 100,
   wakeMinutes: 9 * 60,
 };
 
@@ -74,6 +92,9 @@ function sanitize(raw: any): Prefs {
     usageThresholdPct: clamp(raw.usageThresholdPct, 10, 99, DEFAULT_PREFS.usageThresholdPct),
     resetLeadMin: clamp(raw.resetLeadMin, 1, 240, DEFAULT_PREFS.resetLeadMin),
     compactAtKTokens: clamp(raw.compactAtKTokens, 10, 900, DEFAULT_PREFS.compactAtKTokens),
+    cacheAlertsEnabled: raw.cacheAlertsEnabled !== false,
+    cacheLeadMin: clamp(raw.cacheLeadMin, 1, 55, DEFAULT_PREFS.cacheLeadMin),
+    cacheAlertAtKTokens: clamp(raw.cacheAlertAtKTokens, 0, 900, DEFAULT_PREFS.cacheAlertAtKTokens),
     wakeMinutes: clamp(raw.wakeMinutes, 0, 23 * 60 + 59, DEFAULT_PREFS.wakeMinutes),
   };
 }

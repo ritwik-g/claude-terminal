@@ -9,6 +9,10 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { initSessions, getSessions, fileForSession, titleForSession } from './sessions.js';
 import { tickCompletions, completionEvents } from './completions.js';
 import { readArtifacts } from './artifacts.js';
+import {
+  tickKeepWarm, noteInput, enableKeepWarm, disableKeepWarm, pingNow, keepWarmEvents,
+  KeepWarmError, MIN_MINUTES, MAX_MINUTES, type KeepWarmStoppedEvent,
+} from './keepwarm.js';
 import { saveCache, searchIds } from './scan.js';
 import { loadStore, setUserState, flushStore, isSafeKey, hasUserState, isReadOnly } from './store.js';
 import { readLiveSessions } from './live.js';
@@ -478,6 +482,64 @@ app.post('/api/terms/:id/command', (req, res) => {
   }
 });
 
+/**
+ * Keep-warm: ping a session before its prompt cache expires. The rules for
+ * when it is safe to type into a session live in keepwarm.ts; these routes
+ * only validate and hand over.
+ */
+function keepWarmTarget(id: string): string {
+  if (!isValidTermId(id) || !isSafeKey(id)) throw new BadRequest('invalid session id');
+  // Through the scan index, never built from the id: it arrives from the URL.
+  const file = fileForSession(id);
+  if (!file) throw new KeepWarmError(`no such session: ${id}`, 404);
+  return file;
+}
+
+function keepWarmFail(res: express.Response, err: unknown): void {
+  if (err instanceof BadRequest) res.status(400).json({ error: err.message });
+  else if (err instanceof KeepWarmError) res.status(err.status).json({ error: err.message });
+  else res.status(500).json({ error: String((err as any)?.message ?? err) });
+}
+
+app.post('/api/sessions/:id/keepwarm', (req, res) => {
+  try {
+    const file = keepWarmTarget(req.params.id);
+    const { minutes, untilSend, pausePct } = req.body ?? {};
+    if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes < MIN_MINUTES || minutes > MAX_MINUTES) {
+      throw new BadRequest(`minutes must be between ${MIN_MINUTES} and ${MAX_MINUTES}`);
+    }
+    if (pausePct !== null && (typeof pausePct !== 'number' || !Number.isFinite(pausePct) || pausePct < 1 || pausePct > 100)) {
+      throw new BadRequest('pausePct must be 1-100 or null');
+    }
+    const view = enableKeepWarm(req.params.id, file, {
+      minutes,
+      untilSend: parseBool(untilSend, 'untilSend'),
+      pausePct,
+    });
+    res.json({ keepWarm: view });
+  } catch (err) {
+    keepWarmFail(res, err);
+  }
+});
+
+app.post('/api/sessions/:id/keepwarm/ping', (req, res) => {
+  try {
+    keepWarmTarget(req.params.id);
+    res.json({ keepWarm: pingNow(req.params.id) });
+  } catch (err) {
+    keepWarmFail(res, err);
+  }
+});
+
+app.delete('/api/sessions/:id/keepwarm', (req, res) => {
+  try {
+    if (!isValidTermId(req.params.id)) throw new BadRequest('invalid session id');
+    res.json({ ok: disableKeepWarm(req.params.id) });
+  } catch (err) {
+    keepWarmFail(res, err);
+  }
+});
+
 app.delete('/api/terms/:id', (req, res) => {
   if (!isValidTermId(req.params.id)) return res.status(400).json({ error: 'invalid id' });
   const hard = req.query.hard === '1';
@@ -622,7 +684,11 @@ wss.on('connection', (ws: WebSocket, _req: http.IncomingMessage, url: URL) => {
   ws.on('message', (raw) => {
     let msg: any;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg?.type === 'input' && typeof msg.data === 'string') writeTerm(termId, msg.data);
+    if (msg?.type === 'input' && typeof msg.data === 'string') {
+      // Before the write, so a keystroke is on record by the time it lands.
+      noteInput(termId, msg.data);
+      writeTerm(termId, msg.data);
+    }
     else if (msg?.type === 'resize') resizeTerm(termId, Number(msg.cols), Number(msg.rows));
   });
 
@@ -682,6 +748,8 @@ export interface ServerHandle {
    * modules import each other.
    */
   onCompletion(fn: (e: CompletionNotice) => void): () => void;
+  /** Called when keep-warm turns itself off for a session. Returns an unsubscribe function. */
+  onKeepWarmStopped(fn: (e: KeepWarmStoppedEvent & { title: string }) => void): () => void;
   close(): Promise<void>;
 }
 
@@ -732,6 +800,9 @@ export async function startServer(opts: {
     // throttled to about once a minute, which is precisely when noticing that
     // a session finished is worth something. See completions.ts.
     tickCompletions();
+    // Same reason: a ping that waits for a visible window to ask is a ping
+    // that never goes while you are away, which is the only time it matters.
+    tickKeepWarm();
   }, 2000);
   houseKeeping.unref();
 
@@ -767,6 +838,13 @@ export async function startServer(opts: {
       completionEvents.on('completed', handler);
       return () => { completionEvents.off('completed', handler); };
     },
+    onKeepWarmStopped(fn) {
+      const handler = (e: KeepWarmStoppedEvent) => {
+        fn({ ...e, title: titleForSession(e.sessionId) ?? e.sessionId.slice(0, 8) });
+      };
+      keepWarmEvents.on('stopped', handler);
+      return () => { keepWarmEvents.off('stopped', handler); };
+    },
     close() {
       // Idempotent: quit can be triggered from the menu, the dock and a signal.
       if (closing) return closing;
@@ -775,6 +853,7 @@ export async function startServer(opts: {
         // A subscriber outliving the server would hold a closure over a dead
         // handle; nothing can emit after the tick stops anyway.
         completionEvents.removeAllListeners();
+        keepWarmEvents.removeAllListeners();
         // Persist before killing anything, so a quit never costs tag edits —
         // and record the working set before shutdownAll() empties it.
         captureAndFreeze();

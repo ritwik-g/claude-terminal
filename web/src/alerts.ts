@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
+import type { Session } from '../../server/types';
 import type { UsageSnapshot, UsageWindow } from '../../server/usage';
 import type { Prefs } from './prefs';
-import { clockTime, resetsIn, windowExpired } from './util';
+import { cacheExpiresAt, cacheExpiring, clockTime, formatLeft, resetsIn, windowExpired } from './util';
 
 export type AlertKind = 'threshold' | 'reset-soon';
 export type WindowKey = 'fiveHour' | 'weekly';
@@ -172,5 +173,64 @@ export function useUsageAlerts(
   return {
     active,
     dismiss: (key: string) => setDismissed((prev) => new Set(prev).add(key)),
+  };
+}
+
+/**
+ * Identity of one cache's warning. The last API call is in it, so a session
+ * that takes another turn has a new cache with a new key: dismissing the
+ * warning silences THIS expiry, not every one after it.
+ */
+export function cacheKey(s: Session): string {
+  return `${s.id}:${s.lastApiAt}`;
+}
+
+/**
+ * Running sessions whose prompt cache is about to expire, minus the ones you
+ * have dismissed, with a desktop notification raised once per cache when the
+ * window is not focused — the same popup rules as the usage alerts above.
+ */
+export function useCacheAlerts(
+  sessions: Session[],
+  prefs: Prefs,
+  now: number,
+): { active: Session[]; dismiss: (keys: string[]) => void } {
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const notified = useRef<Set<string>>(new Set());
+
+  const all = prefs.cacheAlertsEnabled
+    ? cacheExpiring(sessions, { leadMs: prefs.cacheLeadMin * 60_000, minTokens: prefs.cacheAlertAtKTokens * 1000 }, now)
+    : [];
+  const active = all.filter((s) => !dismissed.has(cacheKey(s)));
+  const signature = all.map(cacheKey).join('|');
+
+  useEffect(() => {
+    for (const s of all) {
+      const key = cacheKey(s);
+      if (notified.current.has(key)) continue;
+      notified.current.add(key);
+      if (document.hasFocus()) continue;
+      if (notifyPermission() !== 'granted') continue;
+      const at = cacheExpiresAt(s) ?? now;
+      try {
+        new Notification(s.title, {
+          body: `Prompt cache expires in ${formatLeft(at - now)} (${clockTime(at, now)}). Keep it warm or compact it before then.`,
+          tag: `ct-cache-${s.id}`,
+        });
+      } catch {
+        // The bar says the same thing.
+      }
+    }
+    // `all` is rebuilt every render; `signature` is what actually changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature]);
+
+  return {
+    active,
+    dismiss: (keys: string[]) => setDismissed((prev) => {
+      const next = new Set(prev);
+      for (const k of keys) next.add(k);
+      return next;
+    }),
   };
 }

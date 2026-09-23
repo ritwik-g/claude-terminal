@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { PROJECTS_DIR, INDEX_CACHE, APP_DIR, FILE_MODE, ensurePrivateDir, decodeProjectKey } from './paths.js';
-import type { PrLink, ReviewInfo, TailInfo } from './types.js';
+import { KEEPWARM_MARKER, type PrLink, type ReviewInfo, type TailInfo } from './types.js';
 
 const HEAD_BYTES = 256 * 1024;
 /**
@@ -24,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 10;
+const CACHE_VERSION = 12;
 
 export interface ScannedSession {
   id: string;
@@ -58,6 +58,19 @@ export interface ScannedSession {
    * new session, or a transcript from a version that did not record it.
    */
   contextTokens: number;
+  /**
+   * When the session last made an API call — its last main-thread assistant
+   * record, keep-warm pings included, since those read the cache too. The
+   * prompt cache lives for `cacheTtlMs` from here. 0 when none was found.
+   */
+  lastApiAt: number;
+  /**
+   * How long this session's prompt cache lives, read from the last cache write
+   * that said: 1 hour when it wrote to the 1h tier, 5 minutes when it wrote
+   * only to the 5m one. An hour when nothing has said otherwise, which is what
+   * Claude Code's main thread uses.
+   */
+  cacheTtlMs: number;
   /**
    * Lowercased message text, for searching what was actually said rather than
    * only the metadata around it. Held server-side and stripped before the
@@ -285,6 +298,18 @@ function contextTokensOf(usage: any): number | null {
   return total > 0 ? total : null;
 }
 
+const HOUR_MS = 3600_000;
+const FIVE_MIN_MS = 5 * 60_000;
+
+/** The cache tier a turn wrote to, or null when its usage does not say. */
+function cacheTtlOf(usage: any): number | null {
+  const c = usage?.cache_creation;
+  if (!c || typeof c !== 'object') return null;
+  if (c.ephemeral_1h_input_tokens > 0) return HOUR_MS;
+  if (c.ephemeral_5m_input_tokens > 0) return FIVE_MIN_MS;
+  return null;
+}
+
 function extract(
   headStr: string,
   tailStr: string,
@@ -311,6 +336,8 @@ function extract(
     sizeBytes: st.size,
     messages: 0,
     contextTokens: 0,
+    lastApiAt: 0,
+    cacheTtlMs: HOUR_MS,
     version: '',
     tail: {
       lastStopReason: null,
@@ -354,11 +381,45 @@ function extract(
     else { asstParts.push(slice); asstLen += slice.length; }
   };
 
+  /**
+   * Inside a keep-warm exchange: the ping and everything up to the next real
+   * message. That turn exists only to read the prompt cache, so it must not
+   * move the session's activity time (it would rank as touched every 45
+   * minutes), become its last prompt, or be searchable as something said.
+   */
+  let inPing = false;
+
+  const noteApiCall = (rec: any) => {
+    const at = rec.timestamp ? Date.parse(rec.timestamp) : NaN;
+    if (Number.isNaN(at) || at < s.lastApiAt) return;
+    s.lastApiAt = at;
+    const ttl = cacheTtlOf(rec.message?.usage);
+    if (ttl !== null) s.cacheTtlMs = ttl;
+  };
+
   const absorb = (rec: any) => {
     if (!rec) return;
     if (!s.cwd && rec.cwd) s.cwd = rec.cwd;
     if (rec.gitBranch) s.branch = rec.gitBranch;
     if (rec.version) s.version = rec.version;
+
+    if (rec.type === 'user' && !rec.isMeta && !hasToolResult(rec.message?.content)) {
+      inPing = rawTextOf(rec.message?.content).trimStart().startsWith(KEEPWARM_MARKER);
+    }
+    if (rec.type === 'last-prompt' && typeof rec.lastPrompt === 'string' &&
+        rec.lastPrompt.trimStart().startsWith(KEEPWARM_MARKER)) {
+      return;
+    }
+    if (inPing && (rec.type === 'user' || rec.type === 'assistant' || rec.type === 'system' || rec.type === 'attachment')) {
+      // Context size still counts: the reply's usage is a true reading of it.
+      if (rec.type === 'assistant' && rec.isSidechain !== true) {
+        const ctx = contextTokensOf(rec.message?.usage);
+        if (ctx !== null) s.contextTokens = ctx;
+        // A ping's reply is a real cache read — the whole point of it.
+        noteApiCall(rec);
+      }
+      return;
+    }
 
     const ts = rec.timestamp ? Date.parse(rec.timestamp) : NaN;
     if (!Number.isNaN(ts)) {
@@ -440,6 +501,7 @@ function extract(
         if (rec.isSidechain !== true) {
           const ctx = contextTokensOf(rec.message?.usage);
           if (ctx !== null) s.contextTokens = ctx;
+          noteApiCall(rec);
         }
         break;
       }

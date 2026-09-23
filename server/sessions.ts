@@ -6,6 +6,7 @@ import { score, bucketOf, classifyShape } from './rank.js';
 import { listTerms } from './pty.js';
 import { pendingRestore, dropPending, cwdUsable } from './restore.js';
 import { recentCompletions } from './completions.js';
+import { keepWarmView } from './keepwarm.js';
 import type { CompletionEvent, RestoreCandidate, Session } from './types.js';
 
 export interface SessionsPayload {
@@ -122,6 +123,7 @@ async function build(): Promise<SessionsPayload> {
       reasons,
       attached: termIdFor.has(s.id),
       termId: termIdFor.get(s.id) ?? null,
+      keepWarm: keepWarmView(s.id),
     };
   });
 

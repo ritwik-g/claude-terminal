@@ -36,6 +36,10 @@
      the blue of 'review' would put it back among them. */
   --cleanup:       #e57bc7;
 
+  /* Keep-warm. Orange for "warm", and not the amber of a heavy context or a
+     pin: those are things to act on, this is something running for you. */
+  --warm:          #ff9166;
+
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
 
@@ -1231,3 +1235,29 @@ kbd {
 }
 .detail-path .ctx { font-variant-numeric: tabular-nums; }
 .detail-path .ctx.heavy { color: var(--st-needs); }
+
+/* Keep-warm. Outlined while it runs, like the other standing states; filled
+   red when it has stopped on its own, because that is the cache you asked to
+   keep going cold, and it needs you to turn it back on. */
+.chip.kw { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 42%, transparent); }
+.chip.kw.held { color: var(--fg-dim); border-style: dashed; }
+.chip.kw.off {
+  color: var(--bg);
+  background: var(--st-crashed);
+  border-color: var(--st-crashed);
+  font-weight: 700;
+}
+.kw-state { color: var(--fg-muted); font-size: 11px; }
+.kw-state.held { color: var(--fg-dim); }
+.kw-state.warn { color: var(--st-crashed); }
+.kw-note { color: var(--fg-faint); font-size: 11px; line-height: 1.45; }
+.kw-note.warn { color: var(--st-needs); flex-basis: 100%; }
+
+/* Prompt cache time left. Quiet while there is plenty; the warm orange once it
+   is inside the warning lead, because that is when it wants a decision. */
+.chip.cache { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.chip.cache.soon { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 42%, transparent); }
+.cache-left { font-variant-numeric: tabular-nums; }
+.cache-left.soon { color: var(--warm); }
+.cache-left.gone { color: var(--fg-faint); }
+.alert-cand-left { color: var(--warm); font-variant-numeric: tabular-nums; margin-left: 6px; flex: none; }

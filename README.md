@@ -18,7 +18,9 @@ under `~/.claude/` (and never writes there), keeping its own state in
 `~/.claude-terminal/`. The one thing that reaches the network is the usage
 figure in the header, and only indirectly: it asks Claude Code for your usage,
 and Claude Code asks Anthropic — the same call `/usage` makes when you run it
-yourself. See [SECURITY.md](SECURITY.md) for the full trust model.
+yourself. The other is **Keep warm**, and only when you turn it on for a
+session: it types a one-line message into that session, which Claude Code sends
+like any other turn. See [SECURITY.md](SECURITY.md) for the full trust model.
 
 ---
 
@@ -37,7 +39,8 @@ yourself. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **Tells you when something finished** | A session that stops working raises a desktop notification and a dock badge, and puts a pulsing dot on the row until you open it. Debounced, so a gap between turns is not reported as a finish. |
 | **Usage at a glance** | How much of your 5-hour window is gone and the clock time it resets at, in the header. Hover or click for both windows in full, with their reset times, and a refresh button of its own. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
 | **And it warns you before it bites** | A bar across the top when a window passes 80%, or 30 minutes before one resets — with a desktop notification when the app is not focused. Both numbers are settings. |
-| **…with the fix attached** | The same bar lists the **running** sessions carrying the most context, biggest first, each with a **Compact** button that runs `/compact` in that session. A big session is re-sent in full on every turn it takes, so it is what the window is mostly spent on — and an idle one is not spending anything, so it is never flagged. |
+| **…and before a session's cache runs out** | Each running session shows how long its prompt cache has left (`⏱ 34m`). When a big one is 20 minutes from expiring and isn't being kept warm, a bar and a desktop notification offer **Keep warm** and **Compact**, while the cache still makes either one cheap. Once it has expired it isn't listed, because the next turn pays for the rewrite whatever you do. The lead time, the size floor and the switch are all settings. |
+| **Keep a session's cache warm while you step away** | Claude Code's prompt cache expires an hour after a session's last turn, and your next message then pays to write the whole conversation back into it. **Keep warm** (2h / 4h / 8h / until you reply) sends a one-line message about 45 minutes after the last turn, so the cache is read, at a tenth of the price, instead of rebuilt. It only types when the session is idle, isn't showing a dialog or question, and has nothing unsent in its input box. If you've typed without sending, it turns itself off and says so rather than type on top of your draft. |
 | **Snoozes wake when your day does** | *tomorrow* and *next week* mean 9am on the next working day, not "+24h" and "+7d" — a Friday evening snooze comes back on Monday morning. The hour is a setting, and **custom…** takes any duration or an exact moment. |
 | **A woken session says so** | A session whose snooze ran out rejoins the list in whatever position its score earns, which is silent. It now carries a *woke 41m* chip and a tinted edge until you open it. |
 | **Mark a session cleaned up** | `c` tints the row and chips it, so the session you tidied up is findable again among a dozen that look identical. A **Cleanup** filter in the sidebar collects them, to close and archive in one pass. |
@@ -276,7 +279,7 @@ The signals are derived, so the list stays useful with no upkeep:
 | Signal | Where it comes from |
 |---|---|
 | Stopped on a question | Claude Code's own `waiting` status (with the `waitingFor` label it reports), or an unanswered `AskUserQuestion` / `ExitPlanMode` left in the transcript |
-| Waiting on you | live process is `idle`, or the last assistant turn ended with `stop_reason: end_turn` |
+| Waiting on you | live process is `idle` — or `shell`, idle with a background shell still running — or the last assistant turn ended with `stop_reason: end_turn` |
 | Working now | Claude Code's own `busy` status |
 | Stopped mid tool-call | last transcript entry is an unresolved `tool_use` that asked you nothing |
 | Work left behind | uncommitted files / unpushed commits **attributable to this session** |
@@ -441,15 +444,19 @@ a fixed timestamp, so it stays correct however old the reading behind it is —
 where a *percentage* whose own window has already rolled over describes a window
 that no longer exists, and is suppressed rather than shown.
 
-Attached to the bar is the thing you would actually do: the sessions carrying
-the most context, biggest first, each with a **Compact** button that types
+The compact suggestions that used to ride on this bar now live on a separate
+**cache bar**. Whether compacting is cheap depends on the session's prompt
+cache, not on the account's window. While the cache is there, a compact reads
+the context at about a tenth of the input price. After it expires, compacting
+costs a full rewrite of its own. So the cache bar lists running sessions whose
+cache expires within 20 minutes (and that keep-warm isn't covering), soonest
+first, each with **Keep warm** and a **Compact** button that types
 `/compact` at that session's prompt. It is sent the way you would type it, into
 a terminal this app owns — a busy session simply queues it — and nothing waits
 for a result, because the evidence arrives on its own schedule as the session's
 context size dropping on a later scan.
 
-Only **running** sessions are offered, and only running sessions get the chip on
-their row. An 800k-token session that nothing is executing against is not
+Only **running** sessions get the context chip on their row. An 800k-token session that nothing is executing against is not
 spending anything — it is a fact about a conversation you might resume one day,
 not a cost you are paying now. On a real tree most big sessions are of that
 kind, and flagging them all buried the two or three actually burning the window
@@ -468,6 +475,56 @@ percentage of the model's limit, because the transcript does not record which
 limit applies — a 1M-context run and a 200k one both write `claude-opus-5` —
 and because what you are managing is cost, which tracks the size of the context
 you re-send every turn, not how close it is to overflowing.
+
+</details>
+
+<details>
+<summary><b>Keep warm, and when it will not type</b></summary>
+
+A session's prompt cache lives for an hour from its last API call. Reading it
+costs about a tenth of the normal input price and resets the hour; letting it
+lapse means your next turn writes the whole conversation back in, at about
+twice the price. Measured across 80 real sessions, a prompt sent within the hour
+hit the cache 93% of the time (564 of 605), and one sent after it missed 140
+times out of 145. That miss is what this avoids.
+
+Turn it on from the session's **Keep warm** row: 2h, 4h, 8h, or *until I reply*
+(until you next send a message, 12h at most). About 45 minutes after the last
+API call, the server types a one-line message at the session's prompt, telling
+Claude to reply only "ok". Roughly twenty of those cost what one cold rebuild
+does, so it is worth it for a lunch break and not overnight, which is why every
+option ends. It runs on the server's own clock, so a hidden or throttled
+window does not delay it.
+
+Because the ping is typed, it goes wherever the cursor is. So it is held, never
+forced, unless all of these are true:
+
+- **The prompt is free.** Claude Code's registry says `idle`, or `shell` (idle
+  with a background shell still running). `busy`, a dialog, or no status yet
+  holds the ping. A stuck `busy` therefore costs a missed ping, never a wrong
+  one, and **Ping anyway** is there for when you can see the session really is
+  idle.
+- **Nothing is being asked.** An unanswered question or plan in the transcript
+  holds it, whatever the registry says.
+- **You have nothing unsent.** Every key you type in an app terminal passes
+  through the server, so it knows when you last typed. If that is after the last
+  message you sent, the input box may hold a draft. Instead of pinging, keep-warm
+  turns itself **off** and tells you. Turning it back on is you saying the box
+  is empty. Keys pressed while a dialog is up go to the dialog, so they don't
+  count, and neither do the focus and mouse reports a terminal sends by itself.
+- **You have room.** With usage alerts on, pings pause while the 5-hour window
+  is past your alert threshold.
+
+It checks its own work. Each reply's `usage` block says whether the ping read
+the cache or rewrote it. Two misses in a row on pings that should have hit turn
+it off, since it is saving nothing. So does a ping that produced no turn at all,
+because its text may be sitting in the input box and a second ping would pile on
+top. The ping's own turn is kept out of everything else: it is not announced as
+a completion, doesn't move the session's activity time, doesn't become its last
+prompt, and isn't searchable.
+
+State is in memory: restarting the app turns keep-warm off, which is also what
+happens to the terminals it types into.
 
 </details>
 
@@ -650,7 +707,10 @@ System Settings > Privacy & Security.
 | `npm run test:title` | which name a row shows — that a session which cd's into a subdirectory or a worktree keeps its title instead of renaming itself to the folder it started in | nothing |
 | `npm run test:branch` | that a terminal follows its session across a `/branch`, and the slash-command route the Branch and Rename buttons drive | nothing |
 | `npm run test:usage` | the usage round trip — that a probe is skipped inside Claude Code's write throttle, and that a stale or another account's cache is never served as your current number | nothing |
-| `npm run test:alerts` | the usage alerts, the snooze wake times, and context sizing — that an alert fires once per window and again in the next one, that no wake time lands on a weekend or drifts across a DST boundary, and that context sizes read out of your real transcripts are still sane | nothing |
+| `npm run test:alerts` | the usage alerts, the cache-expiry warning, the snooze wake times, and context sizing — that an alert fires once per window and again in the next one, that only live, unwarmed sessions whose cache is still there are warned about, that no wake time lands on a weekend or drifts across a DST boundary, and that context sizes read out of your real transcripts are still sane | nothing |
+| `npm run test:completions` | the completion watcher — that a finish is announced once it has held, a gap between turns is not, and a keep-warm ping's own turn is not either | nothing |
+| `npm run test:keepwarm` | keep-warm's rules on a fake clock — that it types only into an idle (or `shell`) session with no dialog, question or unsent typing, turns itself off over a draft, and gives up on a cache that keeps missing | nothing |
+| `npm run test:keepwarm-routes` | the same through the real server, a real PTY and the terminal socket, against a stub `claude`: a draft stops it, and a cleared box gets the ping as one submitted line | nothing |
 | `npm run test:hook` | the cleanup hook — that it marks on the command and **not** on prose that merely says "clean up", and that it exits silently on every failure it can meet | nothing |
 | `npm run probe:usage` | the usage probe against your real Claude Code, printing what came back — for when the numbers stop moving and you need to see which half broke | Claude Code, logged in |
 

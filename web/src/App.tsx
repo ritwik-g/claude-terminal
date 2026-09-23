@@ -6,15 +6,18 @@ import {
   SHAPE_GLYPH, SHAPE_HINT, SHAPE_LABEL, SHAPE_ORDER,
   bucketOf, clockTime, formatTokens, isActive, matches, relTime, shortPath,
   wakeAt, wokeAgo, worthCompacting, type Bucket,
+  KEEPWARM_HOLD_TEXT, KEEPWARM_OPTIONS, KEEPWARM_OVERRIDABLE, KEEPWARM_RESULT_TEXT,
+  KEEPWARM_STOP_TEXT, KEEPWARM_WARN, cacheExpiresAt, cacheLeftMs, formatLeft,
 } from './util';
 import { SessionRow } from './components/SessionRow';
 import { UsagePill } from './components/UsagePill';
 import { SettingsPop } from './components/SettingsPop';
 import { UsageAlertBar } from './components/UsageAlertBar';
+import { CacheAlertBar } from './components/CacheAlertBar';
 import { FolderBrowser } from './components/FolderBrowser';
 import { TerminalPane } from './components/TerminalPane';
 import { useUsage } from './useUsage';
-import { useUsageAlerts } from './alerts';
+import { cacheKey, useCacheAlerts, useUsageAlerts } from './alerts';
 import { usePrefs } from './prefs';
 
 const POLL_MS = 2500;
@@ -345,6 +348,7 @@ export function App() {
   }, [selectedId]);
 
   const sessions = payload?.sessions ?? [];
+  const { active: cacheAlerts, dismiss: dismissCache } = useCacheAlerts(sessions, prefs, now);
 
   /**
    * Ids whose MESSAGE text matches the query. The payload deliberately does
@@ -689,6 +693,54 @@ export function App() {
       }
     },
     [],
+  );
+
+  /**
+   * Keep-warm: the server pings the session before its prompt cache expires,
+   * and decides when that is safe — see server/keepwarm.ts. These only ask.
+   *
+   * The pause threshold is the usage alert's own, so "stop spending, you are
+   * near the limit" means the same number everywhere; alerts off means no
+   * pause, because there is then no threshold you have chosen.
+   */
+  const keepWarm = useCallback(
+    async (s: Session, minutes: number, untilSend: boolean) => {
+      try {
+        await api.keepWarm(s.id, {
+          minutes,
+          untilSend,
+          pausePct: prefs.alertsEnabled ? prefs.usageThresholdPct : null,
+        });
+        await refresh(true);
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+      }
+    },
+    [prefs.alertsEnabled, prefs.usageThresholdPct, refresh],
+  );
+
+  const keepWarmPing = useCallback(
+    async (s: Session) => {
+      try {
+        await api.keepWarmPing(s.id);
+        await refresh(true);
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+      }
+    },
+    [refresh],
+  );
+
+  const keepWarmOff = useCallback(
+    async (s: Session) => {
+      try {
+        await api.keepWarmOff(s.id);
+        await refresh(true);
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+      }
+    },
+    [refresh],
   );
 
   /**
@@ -1151,12 +1203,22 @@ export function App() {
       {usageAlerts.length > 0 && (
         <UsageAlertBar
           alert={usageAlerts[0]}
-          sessions={sessions}
-          compactAbove={prefs.compactAtKTokens * 1000}
+          onDismiss={() => dismissAlert(usageAlerts[0].key)}
+        />
+      )}
+
+      {/* Sessions whose prompt cache is about to lapse. Its own bar, because
+          it is about a session rather than the account, and it comes and goes
+          on a clock of its own. */}
+      {cacheAlerts.length > 0 && (
+        <CacheAlertBar
+          sessions={cacheAlerts}
+          now={now}
           sent={compactSent}
           onCompact={(s) => void compact(s)}
+          onKeepWarm={(s) => void keepWarm(s, 120, false)}
           onSelect={(s) => select(s)}
-          onDismiss={() => dismissAlert(usageAlerts[0].key)}
+          onDismiss={() => dismissCache(cacheAlerts.map(cacheKey))}
         />
       )}
 
@@ -1416,6 +1478,7 @@ export function App() {
                       unseenDone={unseenDone.has(s.id)}
                       wokeMsAgo={wokeAgo(s, now)}
                       compactAbove={prefs.compactAtKTokens * 1000}
+                      cacheWarnMs={prefs.cacheLeadMin * 60_000}
                       onClick={() => select(s)}
                     />
                   ))}
@@ -1575,23 +1638,6 @@ export function App() {
                   {shortPath(selected.cwd)}
                   {selected.branch ? ` · ${selected.branch}` : ''}
                   {selected.git?.isWorktree ? ' · worktree' : ''}
-                  {` · ${relTime(selected.lastActivity, now)} ago`}
-                  {/* Context size, not file size: what the model is carrying
-                      and paying for on every turn. Shown here rather than on a
-                      row of its own because it belongs with the other facts
-                      about where this session has got to. */}
-                  {selected.contextTokens > 0 && (
-                    <span
-                      // The size is shown whatever the session is doing — you
-                      // asked about this one. The amber only comes on when it
-                      // is RUNNING and big, which is the same test the row
-                      // chip and the alert bar use.
-                      className={worthCompacting(selected, prefs.compactAtKTokens * 1000) ? 'ctx heavy' : 'ctx'}
-                      title={`${selected.contextTokens.toLocaleString()} tokens of context on the last turn — re-sent in full on every turn this session takes`}
-                    >
-                      {` · ${formatTokens(selected.contextTokens)} ctx`}
-                    </span>
-                  )}
                 </span>
                 <div className="detail-actions">
                   {selected.review && (
@@ -1620,14 +1666,6 @@ export function App() {
                       PR #{selected.pr.number}
                     </a>
                   )}
-                  <button
-                    className="btn"
-                    onClick={() => copy('resume', `cd ${selected.cwd} && claude --resume ${selected.id}`)}
-                    title="Copy the resume command for your own terminal"
-                  >
-                    Copy resume
-                    {copied === 'resume' && <span className="copied-flash">Copied</span>}
-                  </button>
                   {termOpen ? (
                     <>
                       <button
@@ -1842,6 +1880,90 @@ export function App() {
                 </button>
               </div>
 
+              {/* Only where a terminal of ours is running the session — the
+                  ping is typed into it — or where keep-warm has something to
+                  say, such as why it stopped. */}
+              {((selected.attached && selected.termId) || selected.keepWarm) && (() => {
+                const kw = selected.keepWarm;
+                const canRun = selected.attached && !!selected.termId;
+                const again = kw
+                  ? KEEPWARM_OPTIONS.find((o) => o.untilSend === kw.untilSend &&
+                      o.minutes === Math.round((kw.until - kw.enabledAt) / 60_000)) ?? null
+                  : null;
+                return (
+                  <div className="detail-row kw-row">
+                    <span
+                      className="detail-label"
+                      title={
+                        'Claude Code\'s prompt cache expires an hour after the last turn, and the next turn then ' +
+                        'pays to rebuild it. Keep-warm sends a one-line message about 45 minutes after the last ' +
+                        'turn so the cache is read, not rebuilt. It only ever types when the session is idle, ' +
+                        'not on a dialog or question, and you have not typed anything unsent.'
+                      }
+                    >
+                      Keep warm
+                    </span>
+                    {!kw && KEEPWARM_OPTIONS.map((o) => (
+                      <button key={o.label} className="btn sm" title={`${o.hint}. The input box must be empty.`}
+                              onClick={() => void keepWarm(selected, o.minutes, o.untilSend)}>
+                        {o.label}
+                      </button>
+                    ))}
+                    {!kw && (
+                      <span className="kw-note">pings ~45m after the last turn, only while idle</span>
+                    )}
+                    {kw?.active && (
+                      <>
+                        <span className={`kw-state${kw.held ? ' held' : ''}`}>
+                          {kw.held
+                            ? `paused since ${clockTime(kw.heldSince, now)}: ${KEEPWARM_HOLD_TEXT[kw.held]}`
+                            : `warm until ${clockTime(kw.until, now)}${kw.untilSend ? ' or your next message' : ''}` +
+                              (kw.awaitingReply && kw.lastPingAt
+                                ? ` · ping sent ${clockTime(kw.lastPingAt, now)}, waiting for the reply`
+                                : kw.nextPingAt ? ` · next ping ${clockTime(kw.nextPingAt, now)}` : '')}
+                          {` · ${kw.pings} ping${kw.pings === 1 ? '' : 's'}`}
+                          {kw.lastResult ? ` · ${KEEPWARM_RESULT_TEXT[kw.lastResult]}` : ''}
+                        </span>
+                        {kw.held && KEEPWARM_OVERRIDABLE.has(kw.held) && canRun && (
+                          <button
+                            className="btn sm"
+                            onClick={() => void keepWarmPing(selected)}
+                            title="Type the ping now anyway, for when you can see the session is really idle — a stuck status, say. If it is genuinely working, the ping is queued into that turn and Claude will read it mid-task, so use this only when nothing is running. It still refuses if there is a dialog, a question, or unsent typing."
+                          >
+                            Ping anyway
+                          </button>
+                        )}
+                        <button className="btn sm on" onClick={() => void keepWarmOff(selected)}>Stop</button>
+                        {kw.unsentSince !== null && (
+                          <span className="kw-note warn">
+                            You have typed here since your last message. If it is still unsent
+                            {kw.nextPingAt ? ` at ${clockTime(kw.nextPingAt, now)}` : ' when the next ping is due'},
+                            keep-warm turns off rather than type on top of it.
+                          </span>
+                        )}
+                      </>
+                    )}
+                    {kw?.stopped && (
+                      <>
+                        <span className={`kw-state${KEEPWARM_WARN.has(kw.stopped.reason) ? ' warn' : ''}`}>
+                          Stopped {relTime(kw.stopped.at, now)} ago: {KEEPWARM_STOP_TEXT[kw.stopped.reason]}.
+                        </span>
+                        {canRun && (
+                          <button
+                            className="btn sm primary"
+                            title="Turn keep-warm on again with the same settings. This also tells it the input box is empty now."
+                            onClick={() => void keepWarm(selected, again?.minutes ?? 240, again?.untilSend ?? false)}
+                          >
+                            Turn back on
+                          </button>
+                        )}
+                        <button className="btn sm" onClick={() => void keepWarmOff(selected)}>Dismiss</button>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="detail-row">
                 <span className="detail-label">Tags</span>
                 {selected.user.tags.map((t) => (
@@ -1875,6 +1997,37 @@ export function App() {
                 </datalist>
                 <span className="detail-path" style={{ marginLeft: 8 }}>
                   {selected.reasons.join(' · ')}
+                  {/* Context size, not file size: what the model is carrying
+                      and paying for on every turn. The amber only comes on
+                      when it is RUNNING and big, the same test the row chip
+                      uses. */}
+                  {selected.contextTokens > 0 && (
+                    <span
+                      className={worthCompacting(selected, prefs.compactAtKTokens * 1000) ? 'ctx heavy' : 'ctx'}
+                      title={`${selected.contextTokens.toLocaleString()} tokens of context on the last turn — re-sent in full on every turn this session takes`}
+                    >
+                      {` · ${formatTokens(selected.contextTokens)} ctx`}
+                    </span>
+                  )}
+                  {/* What that context costs on the next turn depends on this:
+                      read from cache while it lasts, rewritten after. */}
+                  {(() => {
+                    const left = cacheLeftMs(selected, now);
+                    if (left === null) return null;
+                    const at = cacheExpiresAt(selected)!;
+                    return left > 0 ? (
+                      <span
+                        className={`cache-left${left <= prefs.cacheLeadMin * 60_000 ? ' soon' : ''}`}
+                        title={`The prompt cache expires at ${clockTime(at, now)}. Until then the next turn reads this context at about a tenth of the price; after, it rewrites it.`}
+                      >
+                        {` · cache ${formatLeft(left)} left`}
+                      </span>
+                    ) : (
+                      <span className="cache-left gone" title={`The prompt cache expired at ${clockTime(at, now)}; the next turn rewrites the whole context.`}>
+                        {' · cache expired'}
+                      </span>
+                    );
+                  })()}
                 </span>
               </div>
             </div>

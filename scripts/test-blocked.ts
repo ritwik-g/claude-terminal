@@ -55,6 +55,7 @@ const S = {
   freshIdle: '66666666-6666-4666-8666-aaaaaaaaaaaa',
   noStatus: '77777777-7777-4777-8777-aaaaaaaaaaaa',
   articleless: '88888888-8888-4888-8888-aaaaaaaaaaaa',
+  bgShell: '99999999-9999-4999-8999-aaaaaaaaaaaa',
 };
 
 const PROJECTS = path.join(FAKE_HOME, '.claude', 'projects', '-ct-blocked-work');
@@ -140,6 +141,7 @@ function scaffold(): void {
     [S.freshIdle, 'finished its turn'],
     [S.noStatus, 'just launched'],
     [S.articleless, 'stopped on an article-less label'],
+    [S.bgShell, 'finished with a dev server still running'],
   ] as const) {
     write(id, [...head(title, 60_000), {
       type: 'assistant',
@@ -169,6 +171,10 @@ function scaffold(): void {
   // sentence around these labels produced "stopped on a input needed" on a
   // real session; this pins the verbatim form that cannot go wrong.
   reg(spawnHolder(), S.articleless, { status: 'waiting', waitingFor: 'input needed' });
+  // What Claude Code reports once a turn ends with a run_in_background shell
+  // still alive. Read as unknown, this sat in Working for as long as the shell
+  // ran — which for a dev server is all day.
+  reg(spawnHolder(), S.bgShell, { status: 'shell' });
 }
 
 /**
@@ -271,7 +277,7 @@ const main = async () => {
     const payload: any = await (await fetch(`${BASE}/api/sessions?force=1`)).json();
     const by = (id: string) => payload.sessions.find((s: any) => s.id === id);
     check('all synthetic sessions are scanned',
-      payload.sessions.length === 8, `got ${payload.sessions.length}`);
+      payload.sessions.length === 9, `got ${payload.sessions.length}`);
 
     // ---- the transcript signal ----
     check('a dead session holding an unanswered question is blocked, not crashed',
@@ -302,6 +308,13 @@ const main = async () => {
       JSON.stringify(by(S.articleless)?.reasons));
     check('status:idle still means needs_you',
       by(S.freshIdle)?.state === 'needs_you', String(by(S.freshIdle)?.state));
+    check('status:shell is carried through instead of collapsing to unknown',
+      by(S.bgShell)?.live?.status === 'shell', JSON.stringify(by(S.bgShell)?.live));
+    check('  and means needs_you, not working',
+      by(S.bgShell)?.state === 'needs_you', String(by(S.bgShell)?.state));
+    check('  with the background shell named in the reasons',
+      by(S.bgShell)?.reasons?.includes('background shell running'),
+      JSON.stringify(by(S.bgShell)?.reasons));
     check('a registry entry with no status is not read as idle',
       by(S.noStatus)?.live?.status === 'unknown', JSON.stringify(by(S.noStatus)?.live));
     check('  so a just-launched session does not claim to want you',

@@ -47,10 +47,15 @@ export function readLiveSessions(): Map<string, LiveInfo> {
 }
 
 /**
- * Claude Code reports three statuses, and collapsing the third into 'idle'
+ * Claude Code reports four statuses, and collapsing 'waiting' into 'idle'
  * loses the one that matters most: 'waiting' means it is stopped on a dialog
  * — a permission prompt, an AskUserQuestion, a plan to approve — and will not
  * move until you answer. 'idle' merely means the turn ended.
+ *
+ * 'shell' is the one that was missed for a long time: idle, with a background
+ * shell still running. Falling through to 'unknown' made every session that
+ * left a dev server running read as working forever, so it never reached
+ * Needs you and never announced that it had finished.
  *
  * An entry with no status at all is a session that has only just registered
  * (the sdk-cli entrypoint writes its file before its first status). Calling
@@ -59,8 +64,26 @@ export function readLiveSessions(): Map<string, LiveInfo> {
  * transcript instead of guessing.
  */
 function readStatus(raw: unknown): LiveInfo['status'] {
-  if (raw === 'busy' || raw === 'idle' || raw === 'waiting') return raw;
+  if (raw === 'busy' || raw === 'idle' || raw === 'shell' || raw === 'waiting') return raw;
   return 'unknown';
+}
+
+/**
+ * One process's status, straight from its own registry file — for callers that
+ * already know the pid and need the answer NOW rather than as of the last
+ * tick. Keep-warm reads it before typing into a session and on every keystroke
+ * it is watching, which is why this is one small file read and not a readdir.
+ *
+ * Null when there is no entry for the pid, or it cannot be read.
+ */
+export function readLiveStatusByPid(pid: number): LiveInfo['status'] | null {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(LIVE_DIR, `${pid}.json`), 'utf8'));
+    if (d?.pid !== pid) return null;
+    return readStatus(d.status);
+  } catch {
+    return null;
+  }
 }
 
 /** signal 0 tests for existence without touching the process. */

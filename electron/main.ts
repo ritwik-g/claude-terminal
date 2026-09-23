@@ -6,6 +6,8 @@ import {
 } from 'electron';
 
 import { startServer, type CompletionNotice, type ServerHandle } from '../server/index.js';
+import { WARN_STOPS, type KeepWarmStoppedEvent } from '../server/keepwarm.js';
+import type { KeepWarmStop } from '../server/types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -23,6 +25,7 @@ let handle: ServerHandle | null = null;
 let win: BrowserWindow | null = null;
 let quitting = false;
 let unsubscribeCompletions: (() => void) | null = null;
+let unsubscribeKeepWarm: (() => void) | null = null;
 /**
  * Completions you have not looked at yet, as a dock badge.
  *
@@ -71,6 +74,33 @@ function onCompletion(e: CompletionNotice): void {
   n.show();
 }
 
+const KEEPWARM_BODY: Partial<Record<KeepWarmStop, string>> = {
+  typed: 'Keep-warm is off: you typed without sending. Clear the input box, then turn it back on.',
+  'cache-miss': 'Keep-warm is off: pings kept missing the cache, so they were not saving anything.',
+  'terminal-closed': 'Keep-warm is off: no terminal of ours is running this session any more.',
+  'no-reply': 'Keep-warm is off: a ping did not start a turn. Check the input box for leftover text.',
+};
+
+/**
+ * Keep-warm turning itself off is the one thing about it worth a popup: it is
+ * the cache you asked to keep going cold again, and the reason is usually
+ * something you can fix in a click. Ending on schedule, or because you came
+ * back and sent a message, is keep-warm doing what you asked, so it stays quiet.
+ */
+function onKeepWarmStopped(e: KeepWarmStoppedEvent & { title: string }): void {
+  if (!WARN_STOPS.has(e.reason)) return;
+  if (win && !win.isDestroyed() && win.isFocused()) return;
+  if (!NOTIFY || !Notification.isSupported()) return;
+  const n = new Notification({ title: e.title, body: KEEPWARM_BODY[e.reason] ?? 'Keep-warm is off.' });
+  n.on('click', () => {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+  n.show();
+}
+
 /**
  * A second instance would fail on EADDRINUSE and, worse, could fight over the
  * state file. Hand focus to the running window instead.
@@ -104,6 +134,7 @@ async function createWindow(): Promise<void> {
 
   // Once per server, not per window: 'activate' can call this again.
   if (!unsubscribeCompletions) unsubscribeCompletions = handle.onCompletion(onCompletion);
+  if (!unsubscribeKeepWarm) unsubscribeKeepWarm = handle.onKeepWarmStopped(onKeepWarmStopped);
 
   win = new BrowserWindow({
     width: 1440,
@@ -263,6 +294,8 @@ async function shutdown(): Promise<void> {
   try {
     unsubscribeCompletions?.();
     unsubscribeCompletions = null;
+    unsubscribeKeepWarm?.();
+    unsubscribeKeepWarm = null;
     await handle?.close();
   } catch (err) {
     console.error('[claude-terminal] shutdown error:', err);

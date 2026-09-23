@@ -9,8 +9,9 @@
  *   - `alertsFor` has to fire once per condition per window and then go quiet
  *     until the window itself rolls over — the de-duplication lives in the key,
  *     so the key is what gets checked.
- *   - compaction candidates must be the sessions that are actually SPENDING the
- *     window — running now — and the one the app can reach must lead.
+ *   - a session is only flagged as worth compacting while it is actually
+ *     SPENDING — running now — and the cache warning lists a session only
+ *     while its cache is still there to save.
  *   - `contextTokens` is read out of real transcripts, and the only proof that
  *     the field it reads still exists is reading the ones on this machine.
  *
@@ -20,7 +21,7 @@
  */
 import { alertsFor } from '../web/src/alerts';
 import { DEFAULT_PREFS, type Prefs } from '../web/src/prefs';
-import { compactionCandidates, formatTokens, wakeAt, worthCompacting } from '../web/src/util';
+import { cacheExpiresAt, cacheExpiring, cacheLeftMs, formatTokens, wakeAt, worthCompacting } from '../web/src/util';
 import { scanAll } from '../server/scan';
 import { EMPTY_USER_STATE, type Session } from '../server/types';
 import type { UsageSnapshot } from '../server/usage';
@@ -160,11 +161,11 @@ function fakeSession(over: Partial<Session> & { id: string }): Session {
   return {
     file: '', projectKey: '', cwd: '', branch: '', title: over.id, titleSource: 'id',
     lastPrompt: '', recap: '', pr: null, review: null, startedAt: 0, lastActivity: 0,
-    sizeBytes: 0, messages: 0, contextTokens: 0, version: '',
+    sizeBytes: 0, messages: 0, contextTokens: 0, lastApiAt: 0, cacheTtlMs: 3600_000, version: '',
     tail: { lastStopReason: null, lastRole: null, lastUserWasToolResult: false,
             endedMidTool: false, pendingTools: [], pendingQuestion: null },
     live: null, git: null, user: { ...EMPTY_USER_STATE }, shape: 'task', state: 'quiet',
-    score: 0, reasons: [], attached: false, termId: null,
+    score: 0, reasons: [], attached: false, termId: null, keepWarm: null,
     ...over,
   };
 }
@@ -172,7 +173,7 @@ function fakeSession(over: Partial<Session> & { id: string }): Session {
 const LIVE = { pid: 1, status: 'idle' as const, name: '', statusUpdatedAt: 0, startedAt: 0 };
 
 function candidateChecks(): void {
-  console.log('\ncompactionCandidates — what is actually costing you\n');
+  console.log('\nworthCompacting — what is actually costing you\n');
 
   const ABOVE = 250_000;
   const idleBig = fakeSession({ id: 'idle-big', contextTokens: 800_000 });
@@ -184,30 +185,52 @@ function candidateChecks(): void {
     user: { ...EMPTY_USER_STATE, archived: true },
   });
 
-  check('an idle session is never offered, however big', !worthCompacting(idleBig, ABOVE));
-  check('a session attached here is offered', worthCompacting(attachedBig, ABOVE));
-  check('a session live in your own terminal is offered', worthCompacting(liveBig, ABOVE));
+  check('an idle session is never flagged, however big', !worthCompacting(idleBig, ABOVE));
+  check('a session attached here is flagged', worthCompacting(attachedBig, ABOVE));
+  check('a session live in your own terminal is flagged', worthCompacting(liveBig, ABOVE));
   check('a running session under the threshold is not', !worthCompacting(attachedSmall, ABOVE));
   check('an archived session is not, even running', !worthCompacting(archivedBig, ABOVE));
+}
 
-  const all = [idleBig, attachedSmall, liveBig, attachedBig, archivedBig];
-  const picked = compactionCandidates(all, ABOVE).map((s) => s.id);
-  check('only the running, heavy ones are listed', picked.length === 2, picked.join(', '));
-  // The one the bar can act on has to come first — a /compact can only be sent
-  // into a terminal this app owns, so a bigger session it cannot reach must
-  // not take the actionable one's place at the front.
-  check('the one with a terminal here leads, despite being smaller',
-    picked[0] === 'attached-big', picked.join(', '));
+function cacheChecks(): void {
+  console.log('\ncacheExpiring — whose cache is about to lapse\n');
 
-  // Four is the cap, and it must cut the SMALLEST, not whatever came last.
-  const many = Array.from({ length: 7 }, (_, i) =>
-    fakeSession({ id: `s${i}`, contextTokens: 300_000 + i * 1000, live: LIVE }));
-  const top = compactionCandidates(many, ABOVE).map((s) => s.id);
-  check('at most four are offered', top.length === 4, top.join(', '));
-  check('and they are the four heaviest', top.join(',') === 's6,s5,s4,s3', top.join(','));
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+  const opts = { leadMs: 20 * MIN, minTokens: 100_000 };
+  // Last API call `ago` minutes back, so the cache has 60 - ago left.
+  const at = (id: string, ago: number, over: Partial<Session> = {}) =>
+    fakeSession({ id, contextTokens: 300_000, live: LIVE, lastApiAt: now - ago * MIN, cacheTtlMs: HOUR, ...over });
 
-  check('nothing running means nothing to offer',
-    compactionCandidates([idleBig, archivedBig], ABOVE).length === 0);
+  const soon = at('soon', 50);
+  const sooner = at('sooner', 55);
+  const plenty = at('plenty', 20);
+  const expired = at('expired', 61);
+  const small = at('small', 50, { contextTokens: 40_000 });
+  const dead = at('dead', 50, { live: null });
+  const warm = at('warm', 50, {
+    keepWarm: {
+      active: true, enabledAt: 0, until: now + HOUR, untilSend: false, pausePct: null, pings: 0,
+      lastPingAt: null, awaitingReply: false, nextPingAt: null, lastResult: null, held: null,
+      heldSince: null, unsentSince: null, stopped: null,
+    },
+  });
+  const snoozed = at('snoozed', 50, { user: { ...EMPTY_USER_STATE, snoozedUntil: now + HOUR } });
+  const neverCalled = fakeSession({ id: 'never', contextTokens: 300_000, live: LIVE });
+  const fiveMin = at('five-min', 1, { cacheTtlMs: 5 * MIN });
+
+  const got = cacheExpiring(
+    [plenty, soon, expired, small, dead, warm, snoozed, neverCalled, sooner, fiveMin], opts, now,
+  ).map((s) => s.id);
+  check('only live, big, unwarmed caches inside the lead are listed', got.join(',') === 'five-min,sooner,soon', got.join(','));
+  check('an expired cache is not — compacting it now costs a full rewrite anyway', !got.includes('expired'));
+  check('one kept warm is not', !got.includes('warm'));
+  check('a 5-minute cache is timed on its own lifetime', got[0] === 'five-min', got.join(','));
+  check('the expiry is the last API call plus the lifetime', cacheExpiresAt(soon) === now - 50 * MIN + HOUR);
+  check('a session with no API call has no expiry', cacheLeftMs(neverCalled, now) === null);
+  check('at most four are listed',
+    cacheExpiring(Array.from({ length: 7 }, (_, i) => at(`m${i}`, 45 + i)), opts, now).length === 4);
 }
 
 async function contextChecks(): Promise<void> {
@@ -250,6 +273,7 @@ const main = async () => {
   wakeChecks();
   alertChecks();
   candidateChecks();
+  cacheChecks();
   await contextChecks();
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

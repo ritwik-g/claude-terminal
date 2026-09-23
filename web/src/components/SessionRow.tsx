@@ -2,7 +2,8 @@ import React from 'react';
 import type { Session } from '../../../server/types';
 import {
   STATE_COLOR, STATE_LABEL, SHAPE_GLYPH, SHAPE_HINT,
-  formatTokens, relTime, shortId, shortPath, worthCompacting,
+  cacheExpiresAt, cacheLeftMs, clockTime, formatLeft, formatTokens, keepWarmChip, relTime, shortId,
+  shortPath, worthCompacting,
 } from '../util';
 
 /** How many of a review's PRs get their own chip before the rest collapse. */
@@ -27,11 +28,13 @@ interface Props {
    * worthCompacting.
    */
   compactAbove: number;
+  /** Cache time left, in ms, below which its chip turns to a warning. */
+  cacheWarnMs: number;
   onClick: () => void;
 }
 
 export const SessionRow = React.memo(function SessionRow({
-  s, selected, atCursor, now, unseenDone, wokeMsAgo, compactAbove, onClick,
+  s, selected, atCursor, now, unseenDone, wokeMsAgo, compactAbove, cacheWarnMs, onClick,
 }: Props) {
   const dotColor = STATE_COLOR[s.state];
   // The primary line under the title is the single most useful fact we have:
@@ -51,7 +54,22 @@ export const SessionRow = React.memo(function SessionRow({
   // always off-screen. Spelling the whole set out in words gives the hover a
   // job beyond decoration — it is the only place the hidden chips are legible.
   const heavy = worthCompacting(s, compactAbove);
+  const warm = keepWarmChip(s.keepWarm, now);
+  // How long the prompt cache has left. Not shown once it has expired — the
+  // next turn rewrites it whatever you do — nor while keep-warm is on, whose
+  // own chip says when the next ping goes.
+  const left = cacheLeftMs(s, now);
+  const cache = left !== null && left > 0 && !s.keepWarm?.active
+    ? {
+        label: `⏱ ${formatLeft(left)}`,
+        soon: left <= cacheWarnMs,
+        title: `Prompt cache expires at ${clockTime(cacheExpiresAt(s), now)} (in ${formatLeft(left)}). ` +
+          'After that, the next turn rewrites the whole context.',
+      }
+    : null;
   const chipWords = [
+    warm ? warm.title : null,
+    cache ? cache.title : null,
     wokeMsAgo !== null ? `woke ${relTime(now - wokeMsAgo, now)} ago` : null,
     s.user.cleanup ? 'cleaned up — ready to close and archive' : null,
     s.user.pinned ? 'pinned' : null,
@@ -134,6 +152,11 @@ export const SessionRow = React.memo(function SessionRow({
               woke {relTime(now - wokeMsAgo, now)}
             </span>
           )}
+          {/* Keep-warm stopping on its own is the other thing on this strip
+              that changed without you — the cache you asked to keep is going
+              cold — so it sits up front with the wake marker. */}
+          {warm && <span className={warm.cls} title={warm.title}>{warm.label}</span>}
+          {cache && <span className={`chip cache${cache.soon ? ' soon' : ''}`} title={cache.title}>{cache.label}</span>}
           {s.user.cleanup && (
             <span className="chip cleanup" title="Cleaned up — ready to close and archive">
               cleanup

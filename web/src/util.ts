@@ -1,4 +1,4 @@
-import type { Session, SessionShape, SessionState } from '../../server/types';
+import type { KeepWarmHold, KeepWarmStop, KeepWarmView, Session, SessionShape, SessionState } from '../../server/types';
 
 export const STATE_COLOR: Record<SessionState, string> = {
   blocked: 'var(--st-blocked)',
@@ -282,30 +282,63 @@ export function worthCompacting(s: Session, above: number): boolean {
   return above > 0 && s.contextTokens >= above && !s.user.archived && isActive(s);
 }
 
-/** How many compaction candidates the alert bar offers. */
-const MAX_CANDIDATES = 4;
+/* -------------------------------------------------------------- prompt cache */
 
 /**
- * Sessions worth compacting, heaviest first, with the ones you can act on
- * immediately at the front.
- *
- * Attached sessions sort first because they are the only ones the app can do
- * anything about — a /compact goes to a terminal this app owns. A session
- * running in a terminal of your own is still listed, because it is still
- * spending the window; it just has to be compacted where it is running.
- *
- * Four, because the bar is a strip across the top of the window rather than a
- * list view, and the fifth-heaviest session is never the one that decides
- * whether you make it to the reset.
+ * When this session's prompt cache expires, epoch ms, or null when it has made
+ * no API call we know of. The cache lives for `cacheTtlMs` from the last call
+ * that read or wrote it; the next turn after that rewrites the whole context
+ * into the cache, at about twice the input price.
  */
-export function compactionCandidates(sessions: Session[], above: number): Session[] {
+export function cacheExpiresAt(s: Session): number | null {
+  return s.lastApiAt > 0 ? s.lastApiAt + s.cacheTtlMs : null;
+}
+
+/** Milliseconds of cache left; zero or less once it has expired. Null when unknown. */
+export function cacheLeftMs(s: Session, now: number): number | null {
+  const at = cacheExpiresAt(s);
+  return at === null ? null : at - now;
+}
+
+/** How many sessions the cache bar lists at once. */
+const MAX_EXPIRING = 4;
+
+/**
+ * Running sessions whose cache is about to expire and that nothing is keeping
+ * warm, soonest first.
+ *
+ * Only while the cache is still there. Once it has gone, the next turn pays
+ * the rewrite whatever you do — compacting then costs a full rewrite of its
+ * own — so an expired session is not a warning, it is history.
+ *
+ * Only live sessions, because a closed one is not going to take a turn soon,
+ * and only big ones: Claude Code's own system prompt is cached separately, so
+ * a small conversation's rebuild costs next to nothing.
+ */
+export function cacheExpiring(
+  sessions: Session[],
+  opts: { leadMs: number; minTokens: number },
+  now: number,
+): Session[] {
   return sessions
-    .filter((s) => worthCompacting(s, above))
+    .filter((s) => {
+      if (!s.live || s.user.archived) return false;
+      if (s.user.snoozedUntil && s.user.snoozedUntil > now) return false;
+      if (s.keepWarm?.active) return false;
+      if (s.contextTokens < opts.minTokens) return false;
+      const left = cacheLeftMs(s, now);
+      return left !== null && left > 0 && left <= opts.leadMs;
+    })
     .sort((a, b) =>
-      Number(b.attached) - Number(a.attached) ||
-      b.contextTokens - a.contextTokens ||
-      (a.id < b.id ? -1 : 1))
-    .slice(0, MAX_CANDIDATES);
+      (cacheExpiresAt(a) ?? 0) - (cacheExpiresAt(b) ?? 0) || (a.id < b.id ? -1 : 1))
+    .slice(0, MAX_EXPIRING);
+}
+
+/** "34m", "1h 5m" — how long a cache has left, for a chip. */
+export function formatLeft(ms: number): string {
+  const mins = Math.max(1, Math.ceil(ms / 60_000));
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
 }
 
 /* ------------------------------------------------------------------- snooze */
@@ -375,4 +408,88 @@ export function wokeAgo(s: Session, now: number): number | null {
   if (until === null || until > now) return null;
   const since = now - until;
   return since <= WOKE_WINDOW_MS ? since : null;
+}
+
+/**
+ * Keep-warm durations offered in the detail pane. Every one ends: about twenty
+ * pings cost what one cold resume does, so "keep it warm forever" is the one
+ * option that is never the cheap one. "Until I reply" still has a ceiling, the
+ * server's own 12 hours.
+ */
+export const KEEPWARM_OPTIONS: { label: string; minutes: number; untilSend: boolean; hint: string }[] = [
+  { label: '2h', minutes: 120, untilSend: false, hint: 'Keep the cache warm for the next 2 hours' },
+  { label: '4h', minutes: 240, untilSend: false, hint: 'Keep the cache warm for the next 4 hours' },
+  { label: '8h', minutes: 480, untilSend: false, hint: 'Keep the cache warm for the next 8 hours' },
+  {
+    label: 'until I reply', minutes: 720, untilSend: true,
+    hint: 'Keep the cache warm until you next send a message here, for at most 12 hours',
+  },
+];
+
+/** Why a due ping is waiting, in words. */
+export const KEEPWARM_HOLD_TEXT: Record<KeepWarmHold, string> = {
+  busy: 'the session reports it is busy',
+  unknown: 'the session has not reported a status yet',
+  'no-status': 'the session is not reporting a status',
+  waiting: 'the session is stopped on a dialog',
+  question: 'the session is waiting for an answer',
+  usage: 'the 5-hour window is past your alert threshold',
+  'no-turn': 'there is no turn to time the next ping from',
+};
+
+/** Holds where only you can judge whether typing is safe, so Ping anyway is offered. */
+export const KEEPWARM_OVERRIDABLE: ReadonlySet<KeepWarmHold> = new Set(['busy', 'unknown', 'no-status', 'usage']);
+
+/** Why keep-warm stopped, in words. */
+export const KEEPWARM_STOP_TEXT: Record<KeepWarmStop, string> = {
+  typed: 'you typed in this terminal without sending it. Clear the input box, then turn it back on',
+  'cache-miss': 'pings sent inside the hour kept missing the cache, so they were not saving anything',
+  'terminal-closed': 'no terminal of ours is running this session any more — it closed, or /branch moved it to a new session',
+  'no-reply': 'a ping did not start a turn. Check the input box for leftover text before turning it back on',
+  expired: 'its time ran out',
+  sent: 'you sent a message',
+};
+
+/** Stops that are a problem, not keep-warm finishing what you asked. Mirrors the server's WARN_STOPS. */
+export const KEEPWARM_WARN: ReadonlySet<KeepWarmStop> = new Set(['typed', 'cache-miss', 'terminal-closed', 'no-reply']);
+
+export const KEEPWARM_RESULT_TEXT: Record<NonNullable<KeepWarmView['lastResult']>, string> = {
+  hit: 'last ping hit the cache',
+  miss: 'last ping missed the cache',
+  cold: 'last ping rebuilt an expired cache',
+};
+
+/**
+ * The row's keep-warm chip, or null for none. A stop that is just keep-warm
+ * finishing is not worth a chip; one that needs you is.
+ */
+export function keepWarmChip(
+  kw: KeepWarmView | null,
+  now: number,
+): { label: string; cls: string; title: string } | null {
+  if (!kw) return null;
+  if (kw.stopped) {
+    if (!KEEPWARM_WARN.has(kw.stopped.reason)) return null;
+    return {
+      label: 'warm off',
+      cls: 'chip kw off',
+      title: `Keep-warm stopped ${relTime(kw.stopped.at, now)} ago: ${KEEPWARM_STOP_TEXT[kw.stopped.reason]}`,
+    };
+  }
+  if (kw.held) {
+    return {
+      label: 'warm ‖',
+      cls: 'chip kw held',
+      title: `Keep-warm is holding its ping: ${KEEPWARM_HOLD_TEXT[kw.held]}`,
+    };
+  }
+  const next = kw.awaitingReply
+    ? ' · ping sent, waiting for the reply'
+    : kw.nextPingAt ? ` · next ping ${clockTime(kw.nextPingAt, now)}` : '';
+  return {
+    label: 'warm',
+    cls: 'chip kw',
+    title: `Keeping the prompt cache warm until ${clockTime(kw.until, now)}${next}` +
+      (kw.lastResult ? ` · ${KEEPWARM_RESULT_TEXT[kw.lastResult]}` : ''),
+  };
 }

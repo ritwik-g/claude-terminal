@@ -32,6 +32,8 @@
     "test:usage": "tsx scripts/test-usage.ts",
     "test:alerts": "tsx scripts/test-alerts.ts",
     "test:hook": "tsx scripts/test-hook.ts",
+    "test:keepwarm": "tsx scripts/test-keepwarm.ts",
+    "test:keepwarm-routes": "tsx scripts/test-keepwarm-routes.ts",
     "app:cli": "bash bin/claude-terminal"
   },
   "dependencies": {

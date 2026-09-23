@@ -58,7 +58,10 @@ jobs:
       # Seven of these build a throwaway HOME with synthetic transcripts and a
       # stub `claude`; test:alerts is pure arithmetic over fixed clocks, plus a
       # read of ~/.claude/projects that skips itself when there is nothing
-      # there — which on a runner there never is. All hermetic either way.
+      # there — which on a runner there never is. test:completions and
+      # test:keepwarm drive their state machines with a fake clock and fake
+      # processes; keepwarm-routes is the same throwaway-HOME-and-stub shape as
+      # the first seven. All hermetic either way.
       #
       # test:search and smoke are deliberately excluded: both assert against the
       # developer's real ~/.claude corpus and a server already running, neither
@@ -74,3 +77,6 @@ jobs:
           npm run test:usage
           npm run test:hook
           npm run test:alerts
+          npm run test:completions
+          npm run test:keepwarm
+          npm run test:keepwarm-routes

@@ -1,4 +1,4 @@
-import type { Artifact, CompletionEvent, RestoreCandidate, Session, UserState } from '../../server/types';
+import type { Artifact, CompletionEvent, KeepWarmView, RestoreCandidate, Session, UserState } from '../../server/types';
 import type { UsageSnapshot } from '../../server/usage';
 import { authHeaders } from './token';
 
@@ -64,6 +64,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(arg === undefined ? { command } : { command, arg }),
     }),
+
+  /** Turn keep-warm on for a session running in one of our terminals — see keepwarm.ts. */
+  keepWarm: (id: string, body: { minutes: number; untilSend: boolean; pausePct: number | null }) =>
+    json<{ keepWarm: KeepWarmView }>(`/api/sessions/${encodeURIComponent(id)}/keepwarm`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** Send the keep-warm ping now, past a hold only you can judge. */
+  keepWarmPing: (id: string) =>
+    json<{ keepWarm: KeepWarmView }>(`/api/sessions/${encodeURIComponent(id)}/keepwarm/ping`, { method: 'POST' }),
+
+  /** Turn keep-warm off, or dismiss the note saying it stopped. */
+  keepWarmOff: (id: string) =>
+    json<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/keepwarm`, { method: 'DELETE' }),
 
   /** Sessions whose MESSAGE TEXT matches — the part the payload does not carry. */
   search: (q: string) =>

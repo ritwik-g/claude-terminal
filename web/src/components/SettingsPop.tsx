@@ -148,6 +148,39 @@ export function SettingsPop({ prefs, patch }: Props): JSX.Element {
               )}
             </div>
 
+            <div className="set-head">Prompt cache</div>
+            <label className="set-row set-check" title="Off means no banner and no desktop notification">
+              <input
+                type="checkbox"
+                checked={prefs.cacheAlertsEnabled}
+                onChange={(e) => patch({ cacheAlertsEnabled: e.target.checked })}
+              />
+              <span className="set-label">Warn before a running session's cache expires</span>
+            </label>
+            <NumField
+              label="Warn"
+              value={prefs.cacheLeadMin}
+              min={1}
+              max={55}
+              suffix="min before it expires"
+              title="A session's prompt cache lasts an hour from its last API call"
+              onCommit={(n) => patch({ cacheLeadMin: n })}
+            />
+            <NumField
+              label="Only above"
+              value={prefs.cacheAlertAtKTokens}
+              min={0}
+              max={900}
+              suffix="k tokens of context"
+              title="A small session's rebuild costs next to nothing, so it is not worth a warning"
+              onCommit={(n) => patch({ cacheAlertAtKTokens: n })}
+            />
+            <div className="set-note">
+              Once a cache expires, the next turn rewrites the whole context at about
+              twice the input price. Before then, keeping it warm or compacting it is cheap.
+              Sessions with keep-warm on are never warned about.
+            </div>
+
             <div className="set-head">Compaction</div>
             <NumField
               label="Suggest compacting above"
@@ -160,8 +193,8 @@ export function SettingsPop({ prefs, patch }: Props): JSX.Element {
             />
             <div className="set-note">
               Big sessions are re-sent in full every turn, so they are what a usage
-              window is mostly spent on. Compacting one is the cheapest thing you
-              can do about it.
+              window is mostly spent on. A running session above this size gets a
+              context chip on its row.
             </div>
 
             <div className="set-head">Snooze</div>

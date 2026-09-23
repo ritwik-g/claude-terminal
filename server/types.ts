@@ -27,8 +27,14 @@ export interface LiveInfo {
    * yours, waiting means Claude is stopped on a dialog and cannot continue at
    * all. 'unknown' is a registry entry with no status yet — a session that has
    * only just launched — which must not be read as either.
+   *
+   * 'shell' is idle with a background shell still running: the turn has ended
+   * and the prompt is yours, but a `run_in_background` command (a dev server, a
+   * watcher) is alive. Observed on 2.1.280 by sampling a session's own registry
+   * file every 3s — `busy` while the turn ran, `shell` from the moment it
+   * ended until the shell exited. It is a flavour of idle, NOT of busy.
    */
-  status: 'busy' | 'idle' | 'waiting' | 'unknown';
+  status: 'busy' | 'idle' | 'shell' | 'waiting' | 'unknown';
   /**
    * Why it is waiting, verbatim from the registry: 'permission prompt' (the
    * default for any dialog kind Claude Code does not label), 'dialog open',
@@ -163,6 +169,10 @@ export interface Session {
    * See ScannedSession.contextTokens for why this and not `sizeBytes`.
    */
   contextTokens: number;
+  /** Last main-thread API call, epoch ms; 0 when none. See ScannedSession.lastApiAt. */
+  lastApiAt: number;
+  /** How long the prompt cache lives from `lastApiAt`. See ScannedSession.cacheTtlMs. */
+  cacheTtlMs: number;
   version: string;
   tail: TailInfo;
   live: LiveInfo | null;
@@ -180,6 +190,79 @@ export interface Session {
    * later — so the client must not assume the two are the same.
    */
   termId: string | null;
+  /** Keep-warm for this session, when it is on or has just stopped. See keepwarm.ts. */
+  keepWarm: KeepWarmView | null;
+}
+
+/**
+ * Why a keep-warm ping that is due has not been sent. Each is a reason NOT to
+ * type into the session, and none of them turns keep-warm off: the ping goes
+ * as soon as the reason clears.
+ *   'busy'      Claude Code reports a turn in progress — maybe a long tool
+ *               call, maybe a stuck status. The app cannot tell which, so
+ *               only you can override it, with Ping anyway.
+ *   'unknown'   the session has not reported a status yet
+ *   'no-status' no registry entry for the process at all
+ *   'waiting'   stopped on a dialog; typing would answer it
+ *   'question'  the transcript ends on an unanswered question or plan
+ *   'usage'     the 5-hour window is past the pause threshold
+ *   'no-turn'   no assistant turn found to time the ping from
+ */
+export type KeepWarmHold =
+  | 'busy' | 'unknown' | 'no-status' | 'waiting' | 'question' | 'usage' | 'no-turn';
+
+/**
+ * Why keep-warm turned itself off.
+ *   'typed'           you typed in the terminal and did not send it, so the
+ *                     input box may hold a draft the ping would be appended to
+ *   'cache-miss'      pings sent inside the cache lifetime missed anyway, so
+ *                     the cache is not behaving the way this relies on
+ *   'terminal-closed' no running terminal of ours serves the session any more —
+ *                     closed, or moved on to a new session id by /branch
+ *   'no-reply'        a ping produced no turn, so its text may be sitting in
+ *                     the input box; another would pile on top of it
+ *   'expired'         the duration you picked ran out
+ *   'sent'            you sent a message, and it was set to stop when you did
+ */
+/**
+ * Starts every keep-warm ping. Here rather than in keepwarm.ts so the scanner
+ * can recognise a ping without importing the engine, and the PTY layer with it.
+ */
+export const KEEPWARM_MARKER = '[keep-warm]';
+
+export type KeepWarmStop = 'typed' | 'cache-miss' | 'terminal-closed' | 'no-reply' | 'expired' | 'sent';
+
+export interface KeepWarmView {
+  /** False once it has stopped; `stopped` then says why. */
+  active: boolean;
+  enabledAt: number;
+  /** Hard end, epoch ms. Always set — keep-warm never runs open-ended. */
+  until: number;
+  /** Also stop the moment you send a message of your own. */
+  untilSend: boolean;
+  /** Pause pings while the 5-hour window is at or above this percent. */
+  pausePct: number | null;
+  pings: number;
+  lastPingAt: number | null;
+  /** A ping is out and its reply has not landed yet. */
+  awaitingReply: boolean;
+  /** When the next ping is due, from the last API call. Null when unknown. */
+  nextPingAt: number | null;
+  /**
+   * How the last ping's reply read the cache. 'cold' is a miss that was
+   * expected — the cache had already expired before the ping went — so it
+   * rebuilt the cache rather than finding it, and does not count against it.
+   */
+  lastResult: 'hit' | 'miss' | 'cold' | null;
+  held: KeepWarmHold | null;
+  heldSince: number | null;
+  /**
+   * You have typed since your last message, as of this moment. Not yet a
+   * problem — send it and it is gone — but if it is still true when the next
+   * ping is due, keep-warm turns off instead of pinging.
+   */
+  unsentSince: number | null;
+  stopped: { reason: KeepWarmStop; at: number } | null;
 }
 
 /**

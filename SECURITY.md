@@ -29,6 +29,13 @@ bug or the intended design:
   nothing anywhere. It runs at most every 10 minutes and only while the window
   is on screen. It submits no prompt, so it costs no tokens, runs no tool, and
   leaves no transcript.
+- When you turn on **Keep warm** for a session, it **types a fixed one-line
+  message** at that session's prompt about every 45 minutes, for as long as you
+  chose. Claude Code sends it to Anthropic like any other turn, so it costs
+  tokens (a cache read of the session's context). The text is a constant in
+  `server/keepwarm.ts`, not anything from a transcript or the network, and it is
+  only typed into a terminal this app started. It is never on by default, and
+  never survives a restart.
 - It **binds a local HTTP server** on `127.0.0.1` and **spawns PTYs** running
   `claude`. The Electron window is a client of that server.
 

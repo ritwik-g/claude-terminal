@@ -62,8 +62,9 @@ export function deriveState(
   // it is the most forgettable thing this tool exists to remember.
   if (blockedOnQuestion(tail)) return 'blocked';
 
-  // Running but not processing means the prompt is sitting there waiting.
-  if (live?.status === 'idle') return 'needs_you';
+  // Running but not processing means the prompt is sitting there waiting. A
+  // background shell does not change that: the turn is over either way.
+  if (live?.status === 'idle' || live?.status === 'shell') return 'needs_you';
 
   // 'unknown' is a live process that has not reported a status yet — the
   // sdk-cli entrypoint writes its registry file before its first report. It is
@@ -122,6 +123,7 @@ export function score(args: {
       break;
     case 'needs_you':
       reasons.push('waiting on you');
+      if (args.live?.status === 'shell') reasons.push('background shell running');
       break;
     case 'working':
       reasons.push('running now');

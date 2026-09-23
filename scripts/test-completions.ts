@@ -203,5 +203,30 @@ console.log('completion watcher\n');
     JSON.stringify(got));
 }
 
+// Idle with a background shell still running. The turn is over, so it is a
+// finish like any other — reading it as unknown swallowed every completion of
+// a session that had left a dev server running.
+{
+  const got = run((tick) => {
+    tick(0, live(['a', 'busy']));
+    tick(1000, live(['a', 'shell']));
+    tick(1000 + HOLD_MS, live(['a', 'shell']));
+  });
+  check('busy -> shell fires as an idle completion',
+    got.length === 1 && got[0].kind === 'idle', JSON.stringify(got));
+}
+
+// ...and a background shell exiting afterwards is not a second finish.
+{
+  const got = run((tick) => {
+    tick(0, live(['a', 'busy']));
+    tick(1000, live(['a', 'shell']));
+    tick(1000 + HOLD_MS, live(['a', 'shell']));
+    tick(2000 + HOLD_MS, live(['a', 'idle']));
+    tick(2000 + 2 * HOLD_MS, live(['a', 'idle']));
+  });
+  check('shell -> idle adds nothing', got.length === 1, JSON.stringify(got));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
