@@ -219,10 +219,15 @@ const main = async () => {
     const ping = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm/ping`, { method: 'POST' });
     check('Ping anyway sends another', ping.ok && (await until(() => inputs(IDLE).length === 2)),
       `${ping.status} ${JSON.stringify(inputs(IDLE))}`);
+    const clear = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm/clear`, { method: 'POST' });
+    check('Dismiss on the typing warning keeps it running',
+      clear.ok && (await clear.json()).keepWarm?.active === true, String(clear.status));
     const off = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm`, { method: 'DELETE' });
     check('turning it off forgets it', off.ok && (await session(IDLE)).keepWarm === null);
     const late = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm/ping`, { method: 'POST' });
     check('  and Ping anyway is refused once it is off', late.status === 409, String(late.status));
+    const lateClear = await fetch(`${BASE}/api/sessions/${IDLE}/keepwarm/clear`, { method: 'POST' });
+    check('  and so is Dismiss', lateClear.status === 409, String(lateClear.status));
 
     // ---- snoozing ----
     const snooze = (id: string, until: number) =>

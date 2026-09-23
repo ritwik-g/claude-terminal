@@ -43,7 +43,7 @@ like any other turn. See [SECURITY.md](SECURITY.md) for the full trust model.
 | **Usage at a glance** | How much of your 5-hour window is gone and the clock time it resets at, in the header. Hover or click for both windows in full, with their reset times, and a refresh button of its own. It is the account-wide window every session shares, so it is the number that decides whether now is the time to start something big. |
 | **And it warns you before it bites** | A bar across the top when a window passes 80%, or 30 minutes before one resets — with a desktop notification when the app is not focused. Both numbers are settings. |
 | **…and before a session's cache runs out** | Each running session shows how long its prompt cache has left (`⏱ 34m`). When a big one is 20 minutes from expiring and isn't being kept warm, a bar and a desktop notification offer **Keep warm** and **Compact**, while the cache still makes either one cheap. Once it has expired it isn't listed, because the next turn pays for the rewrite whatever you do. The lead time, the size floor and the switch are all settings. A reminder at 12:00 and 16:00 lists every big session with a warm cache, so you can compact before lunch or the end of the day. |
-| **Keep a session's cache warm while you step away** | Claude Code's prompt cache expires an hour after a session's last turn, and your next message then pays to write the whole conversation back into it. **Keep warm** (2h / 4h / 8h / until you reply) sends a one-line message about 45 minutes after the last turn, so the cache is read, at a tenth of the price, instead of rebuilt. It only types when the session is idle, isn't showing a dialog or question, and has nothing unsent in its input box. If you've typed without sending, it turns itself off and says so rather than type on top of your draft. |
+| **Keep a session's cache warm while you step away** | Claude Code's prompt cache expires an hour after a session's last turn, and your next message then pays to write the whole conversation back into it. **Keep warm** (2h / 4h / 8h / until you reply) sends a one-line message about 45 minutes after the last turn, so the cache is read, at a tenth of the price, instead of rebuilt. It only types when the session is idle, isn't showing a dialog or question, and has nothing unsent in its input box. If you've typed without sending, it warns you, and unless you dismiss the warning it turns itself off rather than type on top of your draft. |
 | **Context size, where it costs** | A running session with a large context shows its size on the row (`412k`), read from the last turn's own token usage rather than the transcript's size on disk. Idle sessions don't show it, because they aren't costing anything. |
 | **Triage by hand when you want to** | Priority, pin, tags and snooze are one key each. They adjust the derived ranking but never replace it, so the list still works if you never set any of them. |
 | **Snoozes wake when your day does** | *tomorrow* and *next week* mean 9am on the next working day, not "+24h" and "+7d" — a Friday evening snooze comes back on Monday morning. The hour is a setting, and **custom…** takes any duration or an exact moment. Snoozing a big session whose cache would expire before it wakes asks whether to compact it first. |
@@ -535,9 +535,10 @@ forced, unless all of these are true:
   holds it, whatever the registry says.
 - **You have nothing unsent.** Every key you type in an app terminal passes
   through the server, so it knows when you last typed. If that is after the last
-  message you sent, the input box may hold a draft. Instead of pinging, keep-warm
-  turns itself **off** and tells you. Turning it back on is you saying the box
-  is empty. Keys pressed while a dialog is up go to the dialog, so they don't
+  message you sent, the input box may hold a draft, and the session shows a
+  warning. **Dismiss** it if the box is empty (a stray key, a deleted draft) and
+  pings carry on. Left alone, keep-warm turns itself **off** when the next ping
+  is due and tells you. Turning it back on is you saying the box is empty. Keys pressed while a dialog is up go to the dialog, so they don't
   count, and neither do the focus and mouse reports a terminal sends by itself.
 - **You have room.** With usage alerts on, pings pause while the 5-hour window
   is past your alert threshold.

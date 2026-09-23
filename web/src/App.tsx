@@ -769,6 +769,18 @@ export function App() {
     [refresh],
   );
 
+  const keepWarmClear = useCallback(
+    async (s: Session) => {
+      try {
+        await api.keepWarmClear(s.id);
+        await refresh(true);
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+      }
+    },
+    [refresh],
+  );
+
   const keepWarmOff = useCallback(
     async (s: Session) => {
       try {
@@ -2036,6 +2048,15 @@ export function App() {
                             {kw.nextPingAt ? ` at ${clockTime(kw.nextPingAt, now)}` : ' when the next ping is due'},
                             keep-warm turns off rather than type on top of it.
                           </span>
+                        )}
+                        {kw.unsentSince !== null && (
+                          <button
+                            className="btn sm"
+                            onClick={() => void keepWarmClear(selected)}
+                            title="The input box is empty — a stray key, or a draft you have since deleted. Forget the typing and keep pinging."
+                          >
+                            Dismiss
+                          </button>
                         )}
                       </>
                     )}

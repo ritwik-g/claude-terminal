@@ -304,6 +304,26 @@ console.log('keep-warm\n');
   kw.tickKeepWarm(T0 + 52 * MIN);
   check('  and turning it back on is you saying the box is empty', pinged() && view().active);
 
+  world();
+  writeLog([sent(T0), reply(T0 + MIN)]);
+  kw.enableKeepWarm(SID, FILE, OPTS, T0 + 2 * MIN);
+  kw.noteInput('term-1', 'x', T0 + 10 * MIN);
+  kw.clearTypingKeepWarm(SID, T0 + 11 * MIN);
+  check('dismissing the typing warning forgets it', view().active && view().unsentSince === null);
+  kw.tickKeepWarm(T0 + 50 * MIN);
+  check('  and the ping goes when due', pinged() && view().active, JSON.stringify(view().stopped));
+
+  world();
+  writeLog([sent(T0), reply(T0 + MIN)]);
+  kw.enableKeepWarm(SID, FILE, OPTS, T0 + 2 * MIN);
+  kw.clearTypingKeepWarm(SID, T0 + 5 * MIN);
+  kw.noteInput('term-1', 'x', T0 + 10 * MIN);
+  kw.tickKeepWarm(T0 + 50 * MIN);
+  check('typing after a dismiss still counts', view().stopped?.reason === 'typed');
+  let refused = false;
+  try { kw.clearTypingKeepWarm(SID, T0 + 51 * MIN); } catch { refused = true; }
+  check('  and a dismiss once stopped is refused — Turn back on is the way', refused);
+
   kw.keepWarmEvents.off('stopped', onStop);
 }
 

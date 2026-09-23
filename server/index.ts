@@ -10,7 +10,7 @@ import { initSessions, getSessions, fileForSession, titleForSession } from './se
 import { tickCompletions, completionEvents } from './completions.js';
 import { readArtifacts } from './artifacts.js';
 import {
-  tickKeepWarm, noteInput, enableKeepWarm, disableKeepWarm, pingNow, snoozeKeepWarm, keepWarmEvents,
+  tickKeepWarm, noteInput, enableKeepWarm, disableKeepWarm, pingNow, clearTypingKeepWarm, snoozeKeepWarm, keepWarmEvents,
   KeepWarmError, MIN_MINUTES, MAX_MINUTES, type KeepWarmStoppedEvent,
 } from './keepwarm.js';
 import { saveCache, searchIds } from './scan.js';
@@ -529,6 +529,15 @@ app.post('/api/sessions/:id/keepwarm/ping', (req, res) => {
   try {
     keepWarmTarget(req.params.id);
     res.json({ keepWarm: pingNow(req.params.id) });
+  } catch (err) {
+    keepWarmFail(res, err);
+  }
+});
+
+app.post('/api/sessions/:id/keepwarm/clear', (req, res) => {
+  try {
+    keepWarmTarget(req.params.id);
+    res.json({ keepWarm: clearTypingKeepWarm(req.params.id) });
   } catch (err) {
     keepWarmFail(res, err);
   }

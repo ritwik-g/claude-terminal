@@ -76,6 +76,10 @@ export const api = {
   keepWarmPing: (id: string) =>
     json<{ keepWarm: KeepWarmView }>(`/api/sessions/${encodeURIComponent(id)}/keepwarm/ping`, { method: 'POST' }),
 
+  /** Tell keep-warm the input box is empty, so typing since your last message is forgotten. */
+  keepWarmClear: (id: string) =>
+    json<{ keepWarm: KeepWarmView }>(`/api/sessions/${encodeURIComponent(id)}/keepwarm/clear`, { method: 'POST' }),
+
   /** Turn keep-warm off, or dismiss the note saying it stopped. */
   keepWarmOff: (id: string) =>
     json<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/keepwarm`, { method: 'DELETE' }),

@@ -550,6 +550,21 @@ export function snoozeKeepWarm(sessionId: string, until: number, now = Date.now(
   return true;
 }
 
+/**
+ * You saying the input box is empty, while keep-warm runs: typing so far is
+ * forgotten and the next ping goes as planned. For the warning that you have
+ * typed since your last message, when what you typed was nothing — a stray
+ * key while clicking into the pane, a draft you have since deleted.
+ */
+export function clearTypingKeepWarm(sessionId: string, now = Date.now()): KeepWarmView {
+  const e = entries.get(sessionId);
+  if (!e || e.stopped) throw new KeepWarmError('keep-warm is not on for this session', 409);
+  e.clearSince = now;
+  const term = termFor(sessionId);
+  if (term) typedAt.delete(term.id);
+  return viewOf(e);
+}
+
 /** Off, and forgotten — also how a stopped entry's warning is dismissed. */
 export function disableKeepWarm(sessionId: string): boolean {
   const term = termFor(sessionId);
