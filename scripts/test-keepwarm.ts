@@ -78,7 +78,7 @@ let writes: string[] = [];
 
 const TERM: TermInfo = {
   id: 'term-1', sessionId: SID, cwd: ROOT, pid: 4242, cols: 80, rows: 24,
-  startedAt: T0, exited: false, exitCode: null, exitedAt: null,
+  startedAt: T0, exited: false, exitCode: null, exitedAt: null, closedByUser: false,
 };
 
 function world(): void {

@@ -127,10 +127,10 @@ async function waitForDown(ms = 15_000): Promise<void> {
 /** The server of the current lifetime, so a failed run does not leave it up. */
 let running: ChildProcess | null = null;
 
-function startServer(): ChildProcess {
+function startServer(extraEnv: Record<string, string> = {}): ChildProcess {
   running = spawn('npx', ['tsx', 'server/cli.ts'], {
     cwd: REPO,
-    env: { ...process.env, HOME: FAKE_HOME, PORT: String(PORT) },
+    env: { ...process.env, HOME: FAKE_HOME, PORT: String(PORT), ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
     // Its own process group, so one signal reaches every layer — see
     // signalServer().
@@ -301,6 +301,53 @@ const main = async () => {
   await waitForUp(proc);
   payload = await api.sessions(true);
   check('a dismissed offer does not come back', payload.restore.length === 0, JSON.stringify(payload.restore));
+  await stopServer(proc);
+
+  // ---- lifetime 5: a mass kill takes the sessions down first, then the app ----
+  // The 2026-09-28 regression: every `claude` was killed a moment before the
+  // app, a housekeeping tick in between recorded them as gone, and the app then
+  // died without its quit path. Only 3 of 14 terminals were offered back.
+  const GRACE_MS = 3_000;
+  proc = startServer({ CT_EXIT_GRACE_MS: String(GRACE_MS) });
+  await waitForUp(proc);
+  await api.startTerm(SESSIONS[0].id);
+  await api.startTerm(SESSIONS[1].id);
+  await new Promise((r) => setTimeout(r, 900));
+  const terms: { id: string; pid: number }[] = (await (await fetch(`${BASE}/api/terms`)).json()).terms;
+  // SIGKILL, because the stub traps TERM into a clean exit and an untrappable
+  // death is the harder case.
+  for (const t of terms) { try { process.kill(t.pid, 'SIGKILL'); } catch { /* gone */ } }
+  // Several housekeeping ticks (2 s each) with the sessions dead, all inside
+  // the grace window — the gap the old code wrote the shrunken set in.
+  await new Promise((r) => setTimeout(r, 2_300));
+  const dead: { exited: boolean }[] = (await (await fetch(`${BASE}/api/terms`)).json()).terms;
+  check('the killed sessions are seen as exited', dead.length === 2 && dead.every((t) => t.exited), JSON.stringify(dead));
+  check('sessions killed from outside stay in the working set', workingSetOnDisk().length === 2, JSON.stringify(workingSetOnDisk()));
+  // Now the app dies too, with no quit path at all.
+  signalServer(proc, 'SIGKILL');
+  running = null;
+  await waitForDown();
+  proc = startServer({ CT_EXIT_GRACE_MS: String(GRACE_MS) });
+  await waitForUp(proc);
+  payload = await api.sessions(true);
+  check('after the crash both are offered back', payload.restore.length === 2, JSON.stringify(payload.restore));
+  await api.clearRestore();
+
+  // ---- lifetime 6: an ordinary exit still drops out once the grace passes ----
+  await api.startTerm(SESSIONS[2].id);
+  await new Promise((r) => setTimeout(r, 900));
+  const [gamma]: { pid: number }[] = (await (await fetch(`${BASE}/api/terms`)).json()).terms;
+  // TERM makes the stub exit 0 by itself: the shape of typing `/exit`.
+  process.kill(gamma.pid, 'SIGTERM');
+  await new Promise((r) => setTimeout(r, 900));
+  check('an exit is kept during the grace window', workingSetOnDisk().some((e) => e.sessionId === SESSIONS[2].id), JSON.stringify(workingSetOnDisk()));
+  await new Promise((r) => setTimeout(r, GRACE_MS + 2_500));
+  check('an exit you made yourself drops out after the grace window', workingSetOnDisk().length === 0, JSON.stringify(workingSetOnDisk()));
+  await stopServer(proc);
+  proc = startServer({ CT_EXIT_GRACE_MS: String(GRACE_MS) });
+  await waitForUp(proc);
+  payload = await api.sessions(true);
+  check('it is not offered back after a later quit', payload.restore.length === 0, JSON.stringify(payload.restore));
   await stopServer(proc);
 
   console.log(`\n${pass} passed, ${fail} failed`);

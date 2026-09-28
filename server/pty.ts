@@ -22,6 +22,13 @@ export interface TermInfo {
   exitCode: number | null;
   /** When the process exited, for reaping. null while it is running. */
   exitedAt: number | null;
+  /**
+   * True when the exit was asked for through this app (closing the terminal).
+   * An exit nobody here asked for may be the start of everything on the
+   * machine being killed, and the working set treats the two differently; see
+   * captureWorkingSet().
+   */
+  closedByUser: boolean;
 }
 
 interface Term {
@@ -240,6 +247,7 @@ export function startTerm(opts: {
       exited: false,
       exitCode: null,
       exitedAt: null,
+      closedByUser: false,
     },
     proc,
     logPath,
@@ -354,6 +362,7 @@ export function resizeTerm(id: string, cols: number, rows: number): void {
 export function killTerm(id: string, signal = 'SIGHUP'): void {
   const term = terms.get(id);
   if (!term || term.info.exited) return;
+  term.info.closedByUser = true;
   try { term.proc.kill(signal); } catch { /* already dead */ }
 }
 

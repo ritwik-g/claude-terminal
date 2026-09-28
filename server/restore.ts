@@ -21,6 +21,16 @@ let pending: WorkingSetEntry[] = [];
  */
 let frozen = false;
 
+/**
+ * How long a terminal that exited on its own stays in the working set. Long
+ * enough to outlive a kill that takes the app down a few seconds after its
+ * sessions, short enough that a session you `/exit` is not offered back after
+ * an ordinary quit a minute later. Overridable for the restore test.
+ */
+const EXIT_GRACE_MS = Number(process.env.CT_EXIT_GRACE_MS) > 0
+  ? Number(process.env.CT_EXIT_GRACE_MS)
+  : 60_000;
+
 export function initRestore(): void {
   pending = getWorkingSet();
   frozen = false;
@@ -45,11 +55,23 @@ export function captureWorkingSet(): void {
     entries.push(e);
   };
 
+  const now = Date.now();
   for (const t of listTerms()) {
     // A session started fresh has no transcript until Claude Code writes one,
     // and `claude --resume` needs an id. Nothing to reopen, so nothing to
     // promise: it is left out rather than offered and then failing.
-    if (t.exited || !t.sessionId) continue;
+    if (!t.sessionId) continue;
+    if (t.exited) {
+      // Closed here on purpose: gone from the set straight away.
+      if (t.closedByUser) continue;
+      // Exited without being asked to. That is usually `/exit`, but it is also
+      // what the first second of a mass kill looks like: every `claude` dies
+      // moments before this process does, and dropping them on the tick in
+      // between saved a working set of the three stragglers out of fourteen
+      // (2026-09-28). Keep it for a grace window. If we survive the window it
+      // was an ordinary exit and it drops out; if we don't, it is offered back.
+      if (now - (t.exitedAt ?? now) >= EXIT_GRACE_MS) continue;
+    }
     add({ sessionId: t.sessionId, cwd: t.cwd });
   }
 

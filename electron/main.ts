@@ -290,6 +290,18 @@ app.on('before-quit', (e) => {
   void shutdown();
 });
 
+// Being signalled is a quit too, not a crash. Without these, SIGTERM (a
+// pkill, a logout, a system shutdown) killed the process without ever reaching
+// shutdown(), so the final working-set snapshot never ran. No dialog: a signal
+// has no one to ask.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+  process.on(sig, () => {
+    if (quitting) return;
+    quitting = true;
+    void shutdown();
+  });
+}
+
 async function shutdown(): Promise<void> {
   try {
     unsubscribeCompletions?.();
