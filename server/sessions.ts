@@ -1,5 +1,5 @@
 import { scanAll, loadCache, saveCache } from './scan.js';
-import { readLiveSessions } from './live.js';
+import { readLiveSessions, isAcpEntrypoint } from './live.js';
 import { gitInfoForAll } from './git.js';
 import { getUserState, allTags, isReadOnly } from './store.js';
 import { score, bucketOf, classifyShape } from './rank.js';
@@ -59,7 +59,7 @@ export async function getSessions(force = false): Promise<SessionsPayload> {
 
 async function build(): Promise<SessionsPayload> {
   const t0 = Date.now();
-  const scanned = await scanAll();
+  const scanned = (await scanAll()).filter((s) => !isAcpEntrypoint(s.entrypoint));
   saveCache();
 
   const live = readLiveSessions();

@@ -24,7 +24,7 @@ const TAIL_BYTES = 1024 * 1024;
  * otherwise a stale cache silently serves results from the old parser and the
  * fix you just made appears not to work.
  */
-const CACHE_VERSION = 13;
+const CACHE_VERSION = 14;
 
 export interface ScannedSession {
   id: string;
@@ -43,6 +43,12 @@ export interface ScannedSession {
   sizeBytes: number;
   messages: number;
   version: string;
+  /**
+   * What started the session, from the transcript's first record that says:
+   * 'cli' for an interactive claude, 'sdk-ts' for the Agent SDK (which is how
+   * ACP clients such as claude-agent-acp drive it), '' when none said.
+   */
+  entrypoint: string;
   tail: TailInfo;
   /**
    * How big the conversation was on the last assistant turn, in tokens.
@@ -354,6 +360,7 @@ function extract(
     lastApiAt: 0,
     cacheTtlMs: HOUR_MS,
     version: '',
+    entrypoint: '',
     tail: {
       lastStopReason: null,
       lastRole: null,
@@ -417,6 +424,7 @@ function extract(
     if (!s.cwd && rec.cwd) s.cwd = rec.cwd;
     if (rec.gitBranch) s.branch = rec.gitBranch;
     if (rec.version) s.version = rec.version;
+    if (!s.entrypoint && typeof rec.entrypoint === 'string') s.entrypoint = rec.entrypoint;
 
     if (rec.type === 'user' && !rec.isMeta && !hasToolResult(rec.message?.content)) {
       inPing = rawTextOf(rec.message?.content).trimStart().startsWith(KEEPWARM_MARKER);

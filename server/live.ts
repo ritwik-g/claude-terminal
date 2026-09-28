@@ -5,6 +5,17 @@ import { LIVE_DIR } from './paths.js';
 import type { LiveInfo } from './types.js';
 
 /**
+ * Sessions an ACP client started. claude-agent-acp runs Claude Code through
+ * the TypeScript Agent SDK, which stamps every transcript record and registry
+ * entry with this entrypoint. Those sessions belong to the ACP client — it
+ * shows them, answers them and resumes them — so listing them here as well
+ * only offers a second, conflicting way to drive the same transcript.
+ */
+export function isAcpEntrypoint(entrypoint: unknown): boolean {
+  return entrypoint === 'sdk-ts';
+}
+
+/**
  * Claude Code writes ~/.claude/sessions/<pid>.json for every running session,
  * carrying a first-party `status` of 'busy' | 'idle'. That is a far better
  * signal than inferring activity from file mtimes, so we prefer it wherever
@@ -27,6 +38,7 @@ export function readLiveSessions(): Map<string, LiveInfo> {
       const raw = fs.readFileSync(path.join(LIVE_DIR, name), 'utf8');
       const d = JSON.parse(raw);
       if (!d?.sessionId || !d?.pid) continue;
+      if (isAcpEntrypoint(d.entrypoint)) continue;
       if (!isAlive(d.pid)) continue;
       if (!startMatches(d.pid, d.procStart, starts)) continue;
 
