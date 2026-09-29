@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { AcpSession } from '../types';
 import { api } from '../api';
+import { Modal } from './Modal';
 
 interface SearchModalProps {
   onClose: () => void;
@@ -72,77 +73,74 @@ export const SearchModal: React.FC<SearchModalProps> = ({ onClose, onSelectSessi
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        className="modal-card"
-        style={{ width: '600px', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div style={{ padding: '14px', borderBottom: '1px solid var(--border-subtle)' }}>
-          <input
-            ref={inputRef}
-            type="text"
-            className="search-input"
-            style={{ fontSize: '15px', padding: '10px 14px' }}
-            placeholder="Search across all conversations, prompts, and directories..."
-            value={query}
-            onChange={(e) => handleQueryChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-        </div>
-
-        <div style={{ flex: 1, overflowY: 'auto', padding: '10px' }}>
-          {results.map((session, index) => (
-            <div
-              key={session.id}
-              style={{
-                padding: '10px 12px',
-                borderRadius: '6px',
-                marginBottom: '4px',
-                background: index === selectedIndex ? 'var(--bg-card-active)' : 'transparent',
-                cursor: 'pointer',
-                borderLeft: index === selectedIndex ? '3px solid #3b82f6' : '3px solid transparent',
-              }}
-              onClick={() => {
-                onSelectSession(session.id);
-                onClose();
-              }}
-              onMouseEnter={() => setSelectedIndex(index)}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
-                <span style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-main)' }}>
-                  {session.title}
-                </span>
-                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                  {session.agentName}
-                </span>
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {session.cwd} • {session.lastPrompt || session.recap}
-              </div>
-            </div>
-          ))}
-
-          {results.length === 0 && (
-            <div style={{ padding: '30px', textAlign: 'center', color: error ? '#f87171' : 'var(--text-dim)', fontSize: '13px' }}>
-              {error
-                ? `Search failed: ${error}`
-                : loading
-                ? 'Searching…'
-                : query
-                ? `No sessions match "${query}"`
-                : 'No sessions yet'}
-            </div>
-          )}
-        </div>
-
-        <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border-subtle)', fontSize: '11px', color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between' }}>
-          <span>↑↓ to navigate • Enter to select</span>
-          <span>Esc to dismiss</span>
-        </div>
+    <Modal
+      onClose={onClose}
+      title="Search sessions"
+      initialFocusRef={inputRef}
+      style={{ width: '600px', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
+    >
+      <div style={{ padding: '14px', borderBottom: '1px solid var(--border-subtle)' }}>
+        <input
+          ref={inputRef}
+          type="text"
+          className="search-input"
+          style={{ fontSize: '15px', padding: '10px 14px' }}
+          placeholder="Search across all conversations, prompts, and directories..."
+          value={query}
+          onChange={(e) => handleQueryChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
       </div>
-    </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '10px' }}>
+        {results.map((session, index) => (
+          <div
+            key={session.id}
+            style={{
+              padding: '10px 12px',
+              borderRadius: '6px',
+              marginBottom: '4px',
+              background: index === selectedIndex ? 'var(--bg-card-active)' : 'transparent',
+              cursor: 'pointer',
+              borderLeft: index === selectedIndex ? '3px solid #3b82f6' : '3px solid transparent',
+            }}
+            onClick={() => {
+              onSelectSession(session.id);
+              onClose();
+            }}
+            onMouseEnter={() => setSelectedIndex(index)}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
+              <span style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-main)' }}>
+                {session.title}
+              </span>
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                {session.agentName}
+              </span>
+            </div>
+            <div style={{ fontSize: '12px', color: 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {session.cwd} • {session.lastPrompt || session.recap}
+            </div>
+          </div>
+        ))}
+
+        {results.length === 0 && (
+          <div style={{ padding: '30px', textAlign: 'center', color: error ? '#f87171' : 'var(--text-dim)', fontSize: '13px' }}>
+            {error
+              ? `Search failed: ${error}`
+              : loading
+              ? 'Searching…'
+              : query
+              ? `No sessions match "${query}"`
+              : 'No sessions yet'}
+          </div>
+        )}
+      </div>
+
+      <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border-subtle)', fontSize: '11px', color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between' }}>
+        <span>↑↓ to navigate • Enter to select</span>
+        <span>Esc to dismiss</span>
+      </div>
+    </Modal>
   );
 };

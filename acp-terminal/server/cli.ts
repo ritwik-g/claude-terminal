@@ -9,7 +9,7 @@ import { sessionManager } from './acp/session-mgr.js';
 import { getOrCreateToken, initStorage } from './paths.js';
 import { loadStoredCredentials } from './subscriptions.js';
 import { checkAccess, isLoopbackBind } from './security.js';
-import { getLocalNetworkIps } from './network.js';
+import { getLocalNetworkIps, resolveBindHost } from './network.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,7 +59,7 @@ loadStoredCredentials();
 sessionManager.init();
 
 const PORT = Number(process.env.PORT || 7890);
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = resolveBindHost();
 
 server.listen(PORT, HOST, () => {
   // Network URLs are only reachable (and only worth printing with the token) when bound beyond loopback
@@ -71,7 +71,7 @@ server.listen(PORT, HOST, () => {
     console.log(`  👉 Network: http://${ip}:${PORT}?token=${token}`);
   }
   if (isLoopbackBind(HOST)) {
-    console.log(`  🔒 LAN access disabled (HOST=${HOST})`);
+    console.log(`  🔒 LAN access disabled (HOST=${HOST}). Enable with: ACP_LAN=1 npm start`);
   }
   console.log(`  🔑 Token:   ${token}`);
   console.log(`======================================================\n`);

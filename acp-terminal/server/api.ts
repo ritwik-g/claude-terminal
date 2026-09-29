@@ -19,7 +19,7 @@ import {
   calculateSessionCost,
   refreshClaudeRateLimitsAsync,
 } from './subscriptions.js';
-import { getLocalNetworkIps } from './network.js';
+import { getLocalNetworkIps, resolveBindHost } from './network.js';
 import { getOrCreateToken, getUploadsDir } from './paths.js';
 import { isLoopbackBind } from './security.js';
 
@@ -450,7 +450,7 @@ apiRouter.get('/sessions/:id/usage', (req: Request, res: Response) => {
 apiRouter.get('/network', (_req: Request, res: Response) => {
   const token = getOrCreateToken();
   const port = Number(process.env.PORT || 7890);
-  const host = process.env.HOST || '0.0.0.0';
+  const host = resolveBindHost();
   // A loopback-bound server is unreachable from the LAN, so advertise no network URLs
   const lanEnabled = !isLoopbackBind(host);
   const ips = lanEnabled ? getLocalNetworkIps() : [];

@@ -3,6 +3,7 @@ import type { AgentDescriptor } from '../types';
 import { api, isHostMachine } from '../api';
 import { AgentModelPicker } from './AgentModelPicker';
 import { FolderBrowserModal } from './FolderBrowserModal';
+import { Modal } from './Modal';
 
 interface NewSessionModalProps {
   agents: AgentDescriptor[];
@@ -95,10 +96,9 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 
   return (
     <>
-      <div className="modal-overlay" onClick={onClose}>
-        <div role="dialog" aria-modal="true" className="modal-card" onClick={(e) => e.stopPropagation()}>
+      <Modal onClose={onClose} labelledBy="new-session-title">
           <div className="modal-header">
-            <span>Start New ACP Agent Session</span>
+            <span id="new-session-title">Start New ACP Agent Session</span>
           </div>
 
           <form onSubmit={handleSubmit}>
@@ -270,8 +270,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
             </button>
           </div>
         </form>
-      </div>
-    </div>
+      </Modal>
     {showFolderBrowser && (
       <FolderBrowserModal
         initialPath={cwd}

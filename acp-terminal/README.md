@@ -124,7 +124,7 @@ npm run typecheck
 npm run build
 npm start
 ```
-Open **http://127.0.0.1:7890** in your browser.
+Open **http://127.0.0.1:7890** in your browser. Only this machine can connect; see [LAN access](#5-access-from-other-devices-lan) to allow other devices.
 
 ### 4. Development Mode (Hot Reloading)
 ```bash
@@ -135,6 +135,22 @@ npm run dev
 npm run dev:web
 ```
 Open **http://127.0.0.1:5280**.
+
+### 5. Access from Other Devices (LAN)
+The server listens on `127.0.0.1` only, so nothing else on your network can reach it. To use it from a phone, tablet, or another laptop, opt in:
+```bash
+ACP_LAN=1 npm start
+```
+This binds `0.0.0.0` and prints a pre-authenticated `Network:` URL for each interface; the **📡 LAN Access** button in the sidebar shows the same URLs and the access token. Requests from other machines must carry the token (`?token=` in the URL or the `x-acp-token` header), and cross-origin requests are rejected. Enable it only on networks you trust.
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `PORT` | `7890` | HTTP and WebSocket port |
+| `ACP_LAN` | unset | `1` binds `0.0.0.0` so devices on your local network can connect |
+| `HOST` | `127.0.0.1` | Explicit bind address; overrides `ACP_LAN` |
+| `ACP_APP_DIR` | `~/.acp-terminal` | Where sessions, credentials and the access token are stored |
 
 ---
 

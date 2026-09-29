@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { AcpSession, AgentDescriptor } from '../types';
 import { api } from '../api';
+import { Modal } from './Modal';
 import { AgentModelPicker } from './AgentModelPicker';
 
 interface SwitchAgentModalProps {
@@ -72,188 +73,186 @@ export const SwitchAgentModal: React.FC<SwitchAgentModalProps> = ({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div role="dialog" aria-modal="true" className="modal-card" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span>🔄 Failover / Switch Coding Agent</span>
-        </div>
+    <Modal onClose={onClose} labelledBy="switch-agent-title">
+      <div className="modal-header">
+        <span id="switch-agent-title">🔄 Failover / Switch Coding Agent</span>
+      </div>
 
-        <div className="modal-body">
-          <p style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.4' }}>
-            Seamlessly switch from <strong>{currentSession.agentName}</strong> to another ACP-compatible agent.
-            Your working repository, uncommitted git changes, and recent goal context will be automatically transferred!
-          </p>
+      <div className="modal-body">
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.4' }}>
+          Seamlessly switch from <strong>{currentSession.agentName}</strong> to another ACP-compatible agent.
+          Your working repository, uncommitted git changes, and recent goal context will be automatically transferred!
+        </p>
 
-          {error && (
-            <div style={{ color: '#ef4444', fontSize: '13px', padding: '6px 10px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '6px' }}>
-              {error}
+        {error && (
+          <div style={{ color: '#ef4444', fontSize: '13px', padding: '6px 10px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '6px' }}>
+            {error}
+          </div>
+        )}
+
+        <AgentModelPicker
+          agents={availableTargets}
+          selectedAgentId={targetAgentId}
+          selectedModel={targetModel}
+          onAgentChange={(id) => setTargetAgentId(id)}
+          onModelChange={(model) => setTargetModel(model)}
+          disabled={loading}
+        />
+
+        <div style={{ margin: '8px 0', padding: '10px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
+            Switch Mode
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)' }}>
+              <input
+                type="radio"
+                name="switchMode"
+                checked={inPlace}
+                onChange={() => setInPlace(true)}
+                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+              />
+              <span>
+                <strong>Switch in-place (Same session)</strong> — Recommended, continues current thread seamlessly
+              </span>
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
+              <input
+                type="radio"
+                name="switchMode"
+                checked={!inPlace}
+                onChange={() => setInPlace(false)}
+                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+              />
+              <span>
+                Fork to a new separate session
+              </span>
+            </label>
+          </div>
+
+          {!inPlace && (
+            <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border-subtle)' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px', color: 'var(--text-dim)' }}>
+                <input
+                  type="checkbox"
+                  checked={archivePrevious}
+                  onChange={(e) => setArchivePrevious(e.target.checked)}
+                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+                />
+                <span>Archive previous session from active queue</span>
+              </label>
             </div>
           )}
 
-          <AgentModelPicker
-            agents={availableTargets}
-            selectedAgentId={targetAgentId}
-            selectedModel={targetModel}
-            onAgentChange={(id) => setTargetAgentId(id)}
-            onModelChange={(model) => setTargetModel(model)}
-            disabled={loading}
-          />
-
-          <div style={{ margin: '8px 0', padding: '10px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
-            <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
-              Switch Mode
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)' }}>
-                <input
-                  type="radio"
-                  name="switchMode"
-                  checked={inPlace}
-                  onChange={() => setInPlace(true)}
-                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+          <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)', fontWeight: 600 }}>
+              <input
+                type="checkbox"
+                checked={sendInitialPrompt}
+                onChange={(e) => setSendInitialPrompt(e.target.checked)}
+                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+              />
+              <span>⚡ Immediately send continuation prompt to new agent</span>
+            </label>
+            {sendInitialPrompt && (
+              <div style={{ marginTop: '6px' }}>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Prompt sent immediately to new agent to continue where previous agent left off:
+                </div>
+                <textarea
+                  value={customPrompt}
+                  onChange={(e) => setCustomPrompt(e.target.value)}
+                  rows={3}
+                  style={{
+                    width: '100%',
+                    background: '#0e1015',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px',
+                    color: 'var(--text-main)',
+                    fontSize: '12px',
+                    padding: '8px',
+                    resize: 'vertical',
+                    fontFamily: 'inherit',
+                    boxSizing: 'border-box',
+                  }}
                 />
-                <span>
-                  <strong>Switch in-place (Same session)</strong> — Recommended, continues current thread seamlessly
-                </span>
-              </label>
-
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
-                <input
-                  type="radio"
-                  name="switchMode"
-                  checked={!inPlace}
-                  onChange={() => setInPlace(false)}
-                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-                />
-                <span>
-                  Fork to a new separate session
-                </span>
-              </label>
-            </div>
-
-            {!inPlace && (
-              <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border-subtle)' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px', color: 'var(--text-dim)' }}>
-                  <input
-                    type="checkbox"
-                    checked={archivePrevious}
-                    onChange={(e) => setArchivePrevious(e.target.checked)}
-                    style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-                  />
-                  <span>Archive previous session from active queue</span>
-                </label>
               </div>
             )}
-
-            <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)', fontWeight: 600 }}>
-                <input
-                  type="checkbox"
-                  checked={sendInitialPrompt}
-                  onChange={(e) => setSendInitialPrompt(e.target.checked)}
-                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-                />
-                <span>⚡ Immediately send continuation prompt to new agent</span>
-              </label>
-              {sendInitialPrompt && (
-                <div style={{ marginTop: '6px' }}>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                    Prompt sent immediately to new agent to continue where previous agent left off:
-                  </div>
-                  <textarea
-                    value={customPrompt}
-                    onChange={(e) => setCustomPrompt(e.target.value)}
-                    rows={3}
-                    style={{
-                      width: '100%',
-                      background: '#0e1015',
-                      border: '1px solid var(--border-subtle)',
-                      borderRadius: '6px',
-                      color: 'var(--text-main)',
-                      fontSize: '12px',
-                      padding: '8px',
-                      resize: 'vertical',
-                      fontFamily: 'inherit',
-                      boxSizing: 'border-box',
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div style={{ margin: '8px 0', padding: '10px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
-            <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
-              Conversation Context Handover
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)' }}>
-                <input
-                  type="radio"
-                  name="modalContextMode"
-                  checked={contextMode === 'compact'}
-                  onChange={() => setContextMode('compact')}
-                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-                />
-                <span>
-                  <strong>📦 Compact History (Recommended)</strong> — Summarizes prior turns, decisions, & file edits to optimize token context
-                </span>
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
-                <input
-                  type="radio"
-                  name="modalContextMode"
-                  checked={contextMode === 'full'}
-                  onChange={() => setContextMode('full')}
-                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-                />
-                <span>
-                  <strong>📜 Full Recent Turns</strong> — Transfers verbatim recent user and agent messages
-                </span>
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
-                <input
-                  type="radio"
-                  name="modalContextMode"
-                  checked={contextMode === 'none'}
-                  onChange={() => setContextMode('none')}
-                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-                />
-                <span>
-                  <strong>🚫 Clean Slate</strong> — No prior conversation transferred; agent only inspects repo files & git state
-                </span>
-              </label>
-            </div>
-          </div>
-
-          <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '12px', border: '1px solid var(--border-subtle)' }}>
-            <div style={{ fontWeight: 600, marginBottom: '6px', color: 'var(--text-main)' }}>Context Transferred:</div>
-            <div style={{ color: 'var(--text-muted)' }}>• Repository: <code>{currentSession.cwd}</code></div>
-            {currentSession.git?.branch ? (
-              <div style={{ color: 'var(--text-muted)' }}>• Git branch: <code>{currentSession.git.branch}</code> ({currentSession.git.uncommittedFiles || 0} uncommitted files)</div>
-            ) : (
-              <div style={{ color: 'var(--text-muted)' }}>• Git: not a git repository</div>
-            )}
-            <div style={{ color: 'var(--text-muted)' }}>• Active goal: "{currentSession.lastPrompt || currentSession.recap}"</div>
-            <div style={{ color: 'var(--text-muted)' }}>• History mode: <strong>{contextMode === 'compact' ? 'Compact summary of prior turns' : contextMode === 'full' ? 'Full recent turns' : 'Clean slate (None)'}</strong></div>
           </div>
         </div>
 
-        <div className="modal-footer">
-          <button type="button" className="btn-action" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn-new btn-failover"
-            disabled={loading}
-            onClick={handleSwitch}
-            style={{ padding: '8px 18px' }}
-          >
-            {loading ? 'Switching Agent...' : inPlace ? 'Switch Engine (In-Place)' : 'Fork & Launch Session'}
-          </button>
+        <div style={{ margin: '8px 0', padding: '10px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
+            Conversation Context Handover
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)' }}>
+              <input
+                type="radio"
+                name="modalContextMode"
+                checked={contextMode === 'compact'}
+                onChange={() => setContextMode('compact')}
+                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+              />
+              <span>
+                <strong>📦 Compact History (Recommended)</strong> — Summarizes prior turns, decisions, & file edits to optimize token context
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
+              <input
+                type="radio"
+                name="modalContextMode"
+                checked={contextMode === 'full'}
+                onChange={() => setContextMode('full')}
+                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+              />
+              <span>
+                <strong>📜 Full Recent Turns</strong> — Transfers verbatim recent user and agent messages
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
+              <input
+                type="radio"
+                name="modalContextMode"
+                checked={contextMode === 'none'}
+                onChange={() => setContextMode('none')}
+                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
+              />
+              <span>
+                <strong>🚫 Clean Slate</strong> — No prior conversation transferred; agent only inspects repo files & git state
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '12px', border: '1px solid var(--border-subtle)' }}>
+          <div style={{ fontWeight: 600, marginBottom: '6px', color: 'var(--text-main)' }}>Context Transferred:</div>
+          <div style={{ color: 'var(--text-muted)' }}>• Repository: <code>{currentSession.cwd}</code></div>
+          {currentSession.git?.branch ? (
+            <div style={{ color: 'var(--text-muted)' }}>• Git branch: <code>{currentSession.git.branch}</code> ({currentSession.git.uncommittedFiles || 0} uncommitted files)</div>
+          ) : (
+            <div style={{ color: 'var(--text-muted)' }}>• Git: not a git repository</div>
+          )}
+          <div style={{ color: 'var(--text-muted)' }}>• Active goal: "{currentSession.lastPrompt || currentSession.recap}"</div>
+          <div style={{ color: 'var(--text-muted)' }}>• History mode: <strong>{contextMode === 'compact' ? 'Compact summary of prior turns' : contextMode === 'full' ? 'Full recent turns' : 'Clean slate (None)'}</strong></div>
         </div>
       </div>
-    </div>
+
+      <div className="modal-footer">
+        <button type="button" className="btn-action" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn-new btn-failover"
+          disabled={loading}
+          onClick={handleSwitch}
+          style={{ padding: '8px 18px' }}
+        >
+          {loading ? 'Switching Agent...' : inPlace ? 'Switch Engine (In-Place)' : 'Fork & Launch Session'}
+        </button>
+      </div>
+    </Modal>
   );
 };

@@ -23,3 +23,12 @@ export function getLocalNetworkIps(): string[] {
 
   return [...new Set(addresses)];
 }
+
+/**
+ * Interface the server listens on. Loopback by default so nothing on the LAN can reach it;
+ * `ACP_LAN=1` opts in to every interface, and an explicit HOST always wins.
+ */
+export function resolveBindHost(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.HOST) return env.HOST;
+  return env.ACP_LAN === '1' || env.ACP_LAN === 'true' ? '0.0.0.0' : '127.0.0.1';
+}
