@@ -371,6 +371,11 @@ export class SessionManager extends EventEmitter {
       }
       if (host.isShutdown) throw new Error('Agent was stopped while starting');
       this.activeHosts.set(session.id, host);
+      const current = store.get(session.id);
+      if (current && host.mcpInfo) {
+        current.mcp = host.mcpInfo;
+        store.save(current, { touch: false });
+      }
       return host;
     })();
     this.startingHosts.set(session.id, { host, promise });

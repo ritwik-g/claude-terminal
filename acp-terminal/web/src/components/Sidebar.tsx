@@ -121,6 +121,9 @@ interface SidebarProps {
   onOpenPalette: () => void;
   onOpenSubscriptionsModal: () => void;
   onOpenNetworkModal: () => void;
+  onOpenMcpModal: () => void;
+  /** MCP servers switched on, shown next to the MCP entry. */
+  mcpActiveCount: number;
   hasActiveSession?: boolean;
   activeSessionTitle?: string;
   onReturnToActiveSession?: () => void;
@@ -143,6 +146,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenPalette,
   onOpenSubscriptionsModal,
   onOpenNetworkModal,
+  onOpenMcpModal,
+  mcpActiveCount,
   hasActiveSession,
   activeSessionTitle,
   onReturnToActiveSession,
@@ -233,6 +238,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
         >
           <Icon name="home" size={15} className="sb-action-icon" />
           <span className="sb-action-label">Home</span>
+        </button>
+        <button
+          type="button"
+          className="sb-action"
+          onClick={onOpenMcpModal}
+          title="MCP servers your agents can use, and each agent's plugins and skills"
+        >
+          <Icon name="plug" size={15} className="sb-action-icon" />
+          <span className="sb-action-label">MCP and plugins</span>
+          {mcpActiveCount > 0 && (
+            <span className="sb-action-count" aria-label={`${mcpActiveCount} MCP server${mcpActiveCount === 1 ? '' : 's'} on`}>
+              {mcpActiveCount}
+            </span>
+          )}
         </button>
       </nav>
 
@@ -329,6 +348,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </button>
         <div className="sb-foot-right">
           <ThemeMenu />
+          <span className="sb-foot-mcp">
+            <IconButton icon="plug" label="MCP and plugins" size="sm" onClick={onOpenMcpModal} />
+            {mcpActiveCount > 0 && (
+              <span className="sb-foot-mcp-count" aria-hidden>
+                {mcpActiveCount}
+              </span>
+            )}
+          </span>
           <IconButton
             icon="card"
             label="Subscriptions and usage"

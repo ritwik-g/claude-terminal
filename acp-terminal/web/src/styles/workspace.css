@@ -209,6 +209,27 @@
   flex-shrink: 0;
 }
 
+/* The MCP count opens the MCP dialog */
+.ws-meta-btn {
+  flex-shrink: 0;
+  color: inherit;
+  font-size: inherit;
+  border-radius: var(--radius-xs);
+}
+
+.ws-meta-btn:hover {
+  color: var(--text);
+}
+
+.ws-meta-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ws-meta-warn {
+  color: var(--warn);
+}
 
 .ws-meta .mono {
   font-size: 11.5px;

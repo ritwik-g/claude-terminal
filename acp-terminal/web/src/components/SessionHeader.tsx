@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { AcpSession } from '../types';
+import type { AcpSession, SessionMcpInfo } from '../types';
 import { useEscapeLayer } from '../hooks';
 import { Button, IconButton, Icon, Progress, StatusDot, Switch, Tabs, type Tone } from '../ui';
 import { Menu, type MenuItem } from './Menu';
@@ -101,6 +101,37 @@ const StateButton: React.FC<{ session: AcpSession }> = ({ session }) => {
   );
 };
 
+/** How many app-level MCP servers the agent got at start, with the skipped ones in the tooltip. */
+const McpChip: React.FC<{ mcp?: SessionMcpInfo; onOpen?: () => void }> = ({ mcp, onOpen }) => {
+  if (!mcp || (mcp.attached.length === 0 && mcp.skipped.length === 0)) return null;
+  const n = mcp.attached.length;
+  const title = [
+    n ? `MCP servers in this session: ${mcp.attached.join(', ')}` : 'No MCP servers in this session',
+    ...mcp.skipped.map((s) => `Not given ${s.name}: ${s.reason}`),
+  ].join('\n');
+  const body = (
+    <>
+      <Icon name="plug" size={12} />
+      <span>
+        {n} MCP
+        {mcp.skipped.length > 0 && <span className="ws-meta-warn">, {mcp.skipped.length} skipped</span>}
+      </span>
+    </>
+  );
+  // title is for pointer users; the sr-only copy gives keyboard and screen-reader users the same detail
+  return onOpen ? (
+    <button type="button" className="ws-meta ws-meta-btn" title={title} onClick={onOpen}>
+      <span className="ws-meta-body" aria-hidden>{body}</span>
+      <span className="sr-only">{title}. Open MCP settings.</span>
+    </button>
+  ) : (
+    <span className="ws-meta" title={title}>
+      <span className="ws-meta-body" aria-hidden>{body}</span>
+      <span className="sr-only">{title}</span>
+    </span>
+  );
+};
+
 export const SessionHeader: React.FC<{
   session: AcpSession;
   onRename: (title: string) => Promise<boolean>;
@@ -114,6 +145,7 @@ export const SessionHeader: React.FC<{
   onBackToList?: () => void;
   totalSessionsCount?: number;
   onOpenMobileActions: () => void;
+  onOpenMcp?: () => void;
 }> = ({
   session,
   onRename,
@@ -127,6 +159,7 @@ export const SessionHeader: React.FC<{
   onBackToList,
   totalSessionsCount,
   onOpenMobileActions,
+  onOpenMcp,
 }) => {
   const folder = session.cwd.split('/').filter(Boolean).pop() || session.cwd;
   const dirty = session.git?.uncommittedFiles || 0;
@@ -165,6 +198,7 @@ export const SessionHeader: React.FC<{
               {dirty} changed
             </span>
           )}
+          <McpChip mcp={session.mcp} onOpen={onOpenMcp} />
           <StateButton session={session} />
         </div>
       </div>

@@ -26,6 +26,7 @@ interface SessionDetailProps {
   onRefresh: () => void;
   onOpenSwitchModal: () => void;
   onOpenSubscriptionsModal?: () => void;
+  onOpenMcp?: () => void;
   onBackToList?: () => void;
   onDeleted?: (id: string) => void;
   totalSessionsCount?: number;
@@ -38,6 +39,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   onRefresh,
   onOpenSwitchModal,
   onOpenSubscriptionsModal,
+  onOpenMcp,
   onBackToList,
   onDeleted,
   totalSessionsCount,
@@ -217,6 +219,11 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         setPromptText('');
         setShowModelPicker(true);
         return true;
+      case '/mcp':
+        if (!onOpenMcp) return false;
+        setPromptText('');
+        onOpenMcp();
+        return true;
       case '/stats':
         if (!onOpenSubscriptionsModal) return false;
         setPromptText('');
@@ -271,6 +278,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         onBackToList={onBackToList}
         totalSessionsCount={totalSessionsCount}
         onOpenMobileActions={() => setShowMobileActions(true)}
+        onOpenMcp={onOpenMcp}
       />
 
       <SessionTabsBar
@@ -350,6 +358,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
           onToggleCleanup={handleToggleCleanup}
           onToggleSnooze={handleToggleSnooze}
           onOpenSubscriptionsModal={onOpenSubscriptionsModal}
+          onOpenMcp={onOpenMcp}
           onStopAgent={handleStopAgent}
           onStartAgent={handleStartAgent}
           onDelete={handleDelete}

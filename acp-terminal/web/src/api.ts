@@ -1,6 +1,11 @@
 import type {
   AcpSession,
   AgentDescriptor,
+  EcosystemReport,
+  McpPreset,
+  McpProbeResult,
+  McpServer,
+  McpServerInput,
   FileAttachment,
   SessionCostDetail,
   SessionSummary,
@@ -42,6 +47,27 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  getMcpServers: () => request<{ servers: McpServer[] }>('/api/mcp/servers'),
+  createMcpServer: (data: McpServerInput) =>
+    request<{ server: McpServer }>('/api/mcp/servers', { method: 'POST', body: JSON.stringify(data) }),
+  addMcpPreset: (presetId: string, inputs: Record<string, string>, scope: string) =>
+    request<{ server: McpServer }>('/api/mcp/servers/from-preset', {
+      method: 'POST',
+      body: JSON.stringify({ presetId, inputs, scope }),
+    }),
+  updateMcpServer: (id: string, data: McpServerInput) =>
+    request<{ server: McpServer }>(`/api/mcp/servers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  setMcpServerEnabled: (id: string, enabled: boolean) =>
+    request<{ server: McpServer }>(`/api/mcp/servers/${id}/enabled`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  deleteMcpServer: (id: string) => request<{ ok: boolean }>(`/api/mcp/servers/${id}`, { method: 'DELETE' }),
+  testMcpServer: (id: string, cwd?: string) =>
+    request<{ result: McpProbeResult; cwd: string }>(`/api/mcp/servers/${id}/test`, {
+      method: 'POST',
+      body: JSON.stringify({ cwd }),
+    }),
+  getMcpPresets: () => request<{ presets: McpPreset[] }>('/api/mcp/presets'),
+  getEcosystems: (refresh = false) =>
+    request<{ ecosystems: EcosystemReport[] }>(`/api/mcp/ecosystems${refresh ? '?refresh=1' : ''}`),
   getAgents: () => request<{ agents: AgentDescriptor[] }>('/api/agents'),
   getSessions: () => request<{ sessions: SessionSummary[] }>('/api/sessions'),
   getSession: (id: string) => request<{ session: AcpSession }>(`/api/sessions/${id}`),

@@ -22,6 +22,7 @@ import {
 import { getLocalNetworkIps, resolveBindHost } from './network.js';
 import { getOrCreateToken, getUploadsDir } from './paths.js';
 import { isLoopbackBind } from './security.js';
+import { mcpRouter } from './mcp/routes.js';
 
 export const apiRouter = Router();
 
@@ -30,6 +31,9 @@ const sid = (req: Request): string => String(req.params.id);
 
 // Static directory for uploaded files and pictures (under the app dir, so ACP_APP_DIR isolates it)
 apiRouter.use('/attachments', express.static(getUploadsDir()));
+
+// App-level MCP servers, presets and the agents' own plugins and skills
+apiRouter.use('/mcp', mcpRouter);
 
 // 1. List registered agents
 apiRouter.get('/agents', (req: Request, res: Response) => {

@@ -58,6 +58,7 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
       ? []
       : ['-y', '@agentclientprotocol/claude-agent-acp'],
     icon: 'claude',
+    mcpSupport: { transports: ['stdio', 'http', 'sse'] },
     defaultModel: 'sonnet',
     availableModels: parseEnvModels(process.env.CLAUDE_MODELS, defaultClaudeModels),
     slashCommands: [
@@ -85,6 +86,7 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
       ? []
       : ['-y', '@agentclientprotocol/codex-acp'],
     icon: 'codex',
+    mcpSupport: { transports: ['stdio', 'http'] },
     defaultModel: '6-luna',
     availableModels: parseEnvModels(process.env.CODEX_MODELS, defaultCodexModels),
     slashCommands: [
@@ -105,6 +107,10 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
     command: fs.existsSync(TSX_BIN) ? TSX_BIN : 'tsx',
     args: [path.join(__dirname, 'antigravity-agent.ts')],
     icon: 'gemini',
+    mcpSupport: {
+      transports: [],
+      note: 'Antigravity runs through its desktop app, which reads MCP servers from its own settings. Add them there with `agy mcp add`.',
+    },
     defaultModel: 'gemini-3.8-flash',
     availableModels: parseEnvModels(process.env.GEMINI_MODELS, defaultGeminiModels),
     slashCommands: [
@@ -127,6 +133,7 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
     command: fs.existsSync(TSX_BIN) ? TSX_BIN : 'tsx',
     args: [MOCK_AGENT_PATH],
     icon: 'mock',
+    mcpSupport: { transports: ['stdio', 'http', 'sse'] },
     defaultModel: 'mock-model-v1',
     availableModels: ['mock-model-v1'],
     slashCommands: [

@@ -129,6 +129,44 @@
   white-space: nowrap;
 }
 
+/* Count beside the MCP entry: servers switched on */
+.sb-action-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Footer MCP button: only on small screens, where the nav above is hidden */
+.sb-foot-mcp {
+  position: relative;
+  display: none;
+}
+
+.sb-foot-mcp-count {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent-solid);
+  color: var(--text-on-accent);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
 .sb-action-keys {
   display: inline-flex;
   gap: 2px;
@@ -1481,6 +1519,10 @@
 
   .sb-actions {
     display: none;
+  }
+
+  .sb-foot-mcp {
+    display: inline-flex;
   }
 
   .sb-filters {

@@ -57,6 +57,7 @@ export const MobileActionSheet: React.FC<{
   onToggleCleanup: () => void;
   onToggleSnooze: () => void;
   onOpenSubscriptionsModal?: () => void;
+  onOpenMcp?: () => void;
   onStopAgent: () => void;
   onStartAgent: () => void;
   onDelete: () => void;
@@ -142,6 +143,14 @@ export const MobileActionSheet: React.FC<{
             />
             {p.onOpenSubscriptionsModal && (
               <ActionRow icon="card" label="Subscriptions and usage" description="Vendor limits, keys and token usage" onClick={then(p.onOpenSubscriptionsModal)} />
+            )}
+            {p.onOpenMcp && (
+              <ActionRow
+                icon="plug"
+                label="MCP and plugins"
+                description={session.mcp?.attached.length ? `${session.mcp.attached.length} MCP server${session.mcp.attached.length === 1 ? '' : 's'} in this session` : 'Tools your agents can use'}
+                onClick={then(p.onOpenMcp)}
+              />
             )}
           </div>
 

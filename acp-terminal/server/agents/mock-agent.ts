@@ -7,6 +7,7 @@ interface SessionData {
   id: string;
   cwd: string;
   pendingPrompt: AbortController | null;
+  mcpServers: Array<{ name: string; type?: string; command?: string; url?: string }>;
 }
 
 class MockAcpAgent {
@@ -17,16 +18,18 @@ class MockAcpAgent {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: false,
+        mcpCapabilities: { http: true, sse: true },
       },
     };
   }
 
-  async newSession(params: { cwd?: string }) {
+  async newSession(params: { cwd?: string; mcpServers?: SessionData['mcpServers'] }) {
     const sessionId = crypto.randomUUID();
     this.sessions.set(sessionId, {
       id: sessionId,
       cwd: params?.cwd || process.cwd(),
       pendingPrompt: null,
+      mcpServers: Array.isArray(params?.mcpServers) ? params.mcpServers : [],
     });
     return { sessionId };
   }
@@ -53,6 +56,20 @@ class MockAcpAgent {
     }
 
     const lower = promptText.toLowerCase();
+
+    // "mcp" lists the MCP servers this session was given, so the app's injection can be checked
+    if (/\bmcp\b/.test(lower)) {
+      const list = session.mcpServers.length
+        ? session.mcpServers
+            .map((s) => `- \`${s.name}\` (${s.type ?? 'stdio'}): ${s.url ?? [s.command, ...((s as any).args ?? [])].join(' ')}`)
+            .join('\n')
+        : 'none';
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `MCP servers in this session:\n${list}` } },
+      });
+      return { stopReason: 'end_turn' as const };
+    }
 
     try {
       // 1. Send thoughts

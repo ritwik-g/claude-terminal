@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { AcpSession, AgentDescriptor, SessionSummary } from './types';
+import type { AcpSession, AgentDescriptor, McpServer, SessionSummary } from './types';
 import { api, connectWebSocket } from './api';
 import { Sidebar } from './components/Sidebar';
 import { SessionDetail, nextPriority } from './components/SessionDetail';
@@ -9,6 +9,7 @@ import { CommandPalette, type PaletteAction } from './components/CommandPalette'
 import { HomeDashboard } from './components/HomeDashboard';
 import { SubscriptionsUsageModal } from './components/SubscriptionsUsageModal';
 import { NetworkModal } from './components/NetworkModal';
+import { McpModal } from './components/mcp/McpModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { MOD_KEY, needsAttention } from './components/Sidebar';
 import { useTheme } from './design/theme';
@@ -33,6 +34,9 @@ export const App: React.FC = () => {
   const [newSessionAgentId, setNewSessionAgentId] = useState<string | null>(null);
   const [showSubscriptionsModal, setShowSubscriptionsModal] = useState(false);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
+  const [showMcpModal, setShowMcpModal] = useState(false);
+  // Saved MCP servers, for the sidebar's count of the ones switched on
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [authError, setAuthError] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
   // Start on the list: with nothing selected yet, the session pane on mobile is a dead end.
@@ -98,6 +102,8 @@ export const App: React.FC = () => {
         if (err.message?.includes('401') || err.message?.includes('Unauthorized')) setAuthError(true);
       }),
       fetchSessions(),
+      // The count is a nicety; never hold up the first paint or fail the load over it
+      api.getMcpServers().then((res) => setMcpServers(res.servers)).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, [fetchSessions]);
 
@@ -198,7 +204,7 @@ export const App: React.FC = () => {
   }, [selectedId, fetchSessionDetail, fetchSessions]);
 
   const anyModalOpen =
-    showNewModal || showSwitchModal || showPalette || showSubscriptionsModal || showNetworkModal;
+    showNewModal || showSwitchModal || showPalette || showSubscriptionsModal || showNetworkModal || showMcpModal;
 
   const openNewSession = useCallback((agentId?: string) => {
     setNewSessionAgentId(agentId ?? null);
@@ -259,6 +265,7 @@ export const App: React.FC = () => {
         setShowPalette(false);
         setShowSubscriptionsModal(false);
         setShowNetworkModal(false);
+        setShowMcpModal(false);
         return;
       }
 
@@ -400,6 +407,14 @@ export const App: React.FC = () => {
         run: () => setShowNetworkModal(true),
       },
       {
+        id: 'mcp',
+        label: 'Open MCP servers and plugins',
+        icon: 'plug',
+        group: 'Actions',
+        keywords: 'mcp tools servers plugins skills github filesystem memory search database',
+        run: () => setShowMcpModal(true),
+      },
+      {
         id: 'subscriptions',
         label: 'Open subscriptions and usage',
         icon: 'card',
@@ -483,6 +498,8 @@ export const App: React.FC = () => {
         onOpenPalette={() => setShowPalette(true)}
         onOpenSubscriptionsModal={() => setShowSubscriptionsModal(true)}
         onOpenNetworkModal={() => setShowNetworkModal(true)}
+        onOpenMcpModal={() => setShowMcpModal(true)}
+        mcpActiveCount={mcpServers.filter((s) => s.enabled).length}
         hasActiveSession={Boolean(activeSession)}
         activeSessionTitle={activeSession?.title}
         onReturnToActiveSession={() => setMobileView('session')}
@@ -499,6 +516,7 @@ export const App: React.FC = () => {
             }}
             onOpenSwitchModal={() => setShowSwitchModal(true)}
             onOpenSubscriptionsModal={() => setShowSubscriptionsModal(true)}
+            onOpenMcp={() => setShowMcpModal(true)}
             onBackToList={() => setMobileView('list')}
             onDeleted={handleDeleted}
             totalSessionsCount={sessions.length}
@@ -584,6 +602,15 @@ export const App: React.FC = () => {
       )}
 
       {showNetworkModal && <NetworkModal onClose={() => setShowNetworkModal(false)} />}
+
+      {showMcpModal && (
+        <McpModal
+          agents={agents}
+          workspace={activeSession?.cwd}
+          onClose={() => setShowMcpModal(false)}
+          onServersChange={setMcpServers}
+        />
+      )}
     </div>
   );
 };

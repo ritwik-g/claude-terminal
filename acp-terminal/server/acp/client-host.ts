@@ -6,7 +6,8 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import * as acp from '@agentclientprotocol/sdk';
 import { ptyManager } from '../pty-manager.js';
-import type { AgentDescriptor, FileAttachment, PendingPermission, PlanEntry, ToolCallRecord, TokenUsage } from '../types.js';
+import type { AgentDescriptor, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
+import { appliesTo, listMcpServers, resolveSessionMcpServers } from '../mcp/config.js';
 
 export function normalizeClaudeModel(model?: string): string {
   if (!model) return 'sonnet';
@@ -75,6 +76,8 @@ export class AcpClientHost extends EventEmitter {
   private rejectClosed!: (err: HostClosedError) => void;
   private readonly closeSignal: Promise<never>;
   public sessionId: string | null = null;
+  /** Which app-level MCP servers this session got, set once session/new succeeds. */
+  public mcpInfo: SessionMcpInfo | null = null;
   public isTurnInFlight = false;
   public lastActivityAt = Date.now();
 
@@ -416,12 +419,14 @@ export class AcpClientHost extends EventEmitter {
       }
     }
 
-    // Create session in agent
+    // Create session in agent, with the app-level MCP servers in scope for it
+    const mcp = this.resolveMcpServers(initRes.agentCapabilities?.mcpCapabilities ?? undefined);
     const sessionRes = await this.untilClosed(connection.agent.request(acp.methods.agent.session.new, {
       cwd: this.cwd,
-      mcpServers: [],
+      mcpServers: mcp.servers,
     }));
     this.sessionId = sessionRes.sessionId;
+    this.mcpInfo = mcp.info;
 
     // Apply model if specified
     if (this.model) {
@@ -451,6 +456,24 @@ export class AcpClientHost extends EventEmitter {
         // Fallback gracefully if agent doesn't support effort config
       }
     }
+  }
+
+  private resolveMcpServers(caps: { http?: boolean; sse?: boolean } | undefined): { servers: acp.McpServer[]; info: SessionMcpInfo } {
+    let configured: ReturnType<typeof listMcpServers>;
+    try {
+      configured = listMcpServers();
+    } catch (err: any) {
+      // Start without them rather than fail the session, and say why in the session header
+      console.error(`[client-host] MCP servers not loaded: ${err.message}`);
+      return { servers: [], info: { attached: [], skipped: [{ name: 'mcp.json', reason: err.message }] } };
+    }
+    if (this.agent.mcpSupport && this.agent.mcpSupport.transports.length === 0) {
+      // The agent would accept the list and ignore it; say so instead of implying the tools are there
+      const reason = this.agent.mcpSupport.note || `${this.agent.name} cannot take MCP servers from this app`;
+      const skipped = configured.filter((s) => s.enabled && appliesTo(s, this.agent.id)).map((s) => ({ name: s.name, reason }));
+      return { servers: [], info: { attached: [], skipped } };
+    }
+    return resolveSessionMcpServers(this.agent.id, this.cwd, caps, configured);
   }
 
   async sendPrompt(text: string, attachments?: FileAttachment[]): Promise<{ stopReason: string }> {

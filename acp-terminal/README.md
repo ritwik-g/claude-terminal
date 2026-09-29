@@ -99,6 +99,24 @@ Any agent exposing an ACP JSON-RPC interface via `stdio` can be registered in `s
 
 ---
 
+## MCP Servers and Plugins
+
+Open **MCP and plugins** in the sidebar (or type `/mcp` in the composer) to give your agents extra tools.
+
+- **Configure once, use everywhere.** Servers are stored in `<ACP_APP_DIR>/mcp.json` (owner-only permissions) and passed to the agent in ACP `session/new` every time an agent starts. Changes apply the next time an agent starts; stop and start a running agent to pick them up.
+- **Transports.** `stdio` (a local command), streamable `http`, and legacy `sse`. Each agent only gets the transports it advertises in `mcpCapabilities`: Claude Code takes all three, Codex takes stdio and HTTP. The session header shows how many servers an agent got, and why any were skipped.
+- **Scope.** A server goes to all agents or to one agent. Turn it off with the switch to keep its settings without using it.
+- **Secrets.** Environment variables with secret-looking names and all HTTP header values are masked in the API and the UI after saving. Leave a masked value alone when editing to keep it.
+- **`${workspace}`** in a command argument, environment value or URL becomes the session's folder when the agent starts.
+- **Test connection** runs the MCP handshake (`initialize`, then `tools/list`) and lists the server's tools, so a wrong command, URL or token shows up before a session needs it.
+- **Catalog.** One-click presets for Filesystem (scoped to the session folder), GitHub (GitHub's hosted MCP server, needs a personal access token), Memory (a knowledge graph kept in the app dir), Brave Search, SQLite and PostgreSQL (read-only mode, needs `uvx`).
+- **Antigravity** runs through its desktop app, which reads MCP servers from its own settings rather than from the session. Each server row offers the matching `agy mcp add` command to copy.
+- **Agent plugins and skills** is a read-only view of what each agent loads by itself: Claude Code plugins, skills and user-scope MCP servers (`~/.claude`, `~/.claude.json`), Codex plugins, skills and MCP servers (`~/.codex`), and Antigravity skills, plugins and MCP servers (`~/.gemini`, `agy plugin list`, `agy mcp list`). Only names, versions and descriptions are shown, never tokens.
+
+The Built-in Demo Agent answers a prompt containing "mcp" with the servers it received, which is handy for checking scope and transport filtering.
+
+---
+
 ## Quick Start
 
 ### 1. Install Dependencies

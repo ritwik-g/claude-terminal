@@ -29,6 +29,8 @@ export interface AgentDescriptor {
   defaultModel?: string;
   availableModels?: string[];
   slashCommands?: SlashCommandItem[];
+  /** MCP transports the agent takes in `session/new`; empty when it can't take any. */
+  mcpSupport?: { transports: McpTransport[]; note?: string };
 }
 
 export interface PermissionOption {
@@ -163,6 +165,8 @@ export interface AcpSession {
   agentStopped?: boolean;
   /** The agent's latest todo list. */
   plan?: PlanEntry[];
+  /** App-level MCP servers handed to the agent when it last started. */
+  mcp?: SessionMcpInfo;
 }
 
 export interface SessionSummary {
@@ -275,3 +279,73 @@ export interface SessionCostDetail {
   };
 }
 
+
+// ------------------------------------------------------------------ MCP
+
+export type McpTransport = 'stdio' | 'http' | 'sse';
+
+/** A configured MCP server as the API returns it: secret values arrive as MCP_MASK. */
+export interface McpServer {
+  id: string;
+  name: string;
+  transport: McpTransport;
+  enabled: boolean;
+  /** 'all', or the one agent id the server is limited to. */
+  scope: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  presetId?: string;
+  description?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type McpServerInput = Omit<McpServer, 'id' | 'createdAt' | 'updatedAt'>;
+
+/** Placeholder the API sends instead of a secret; sending it back keeps the saved value. */
+export const MCP_MASK = '••••••••';
+export const WORKSPACE_VAR = '${workspace}';
+
+export interface McpPreset {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  category: string;
+  transport: McpTransport;
+  command?: string;
+  args?: string[];
+  url?: string;
+  inputs?: Array<{ key: string; label: string; placeholder?: string; hint?: string; secret?: boolean; defaultValue?: string }>;
+  requires?: string;
+  available: boolean;
+  docsUrl: string;
+}
+
+export interface McpProbeResult {
+  ok: boolean;
+  server?: { name?: string; version?: string };
+  tools?: Array<{ name: string; description?: string }>;
+  error?: string;
+  durationMs: number;
+}
+
+export interface SessionMcpInfo {
+  attached: string[];
+  skipped: Array<{ name: string; reason: string }>;
+}
+
+export interface EcosystemReport {
+  agentId: 'claude' | 'codex' | 'antigravity';
+  name: string;
+  detected: boolean;
+  configPath: string;
+  plugins: Array<{ name: string; source?: string; version?: string; enabled: boolean | null; description?: string }>;
+  skills: Array<{ name: string; description?: string; origin: 'user' | 'plugin' | 'built-in'; plugin?: string }>;
+  mcpServers: Array<{ name: string; transport?: string; enabled?: boolean }>;
+  manageHint: string;
+  warnings: string[];
+}

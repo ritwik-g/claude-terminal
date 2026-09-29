@@ -292,6 +292,14 @@ export const TERMINAL_UNIVERSAL_COMMANDS: SlashCommandItem[] = [
     actionType: 'immediate',
   },
   {
+    command: '/mcp',
+    label: 'MCP servers and plugins',
+    description: 'Add, test and turn MCP servers on or off, and see each agent\'s plugins and skills',
+    category: 'terminal',
+    icon: 'plug',
+    actionType: 'immediate',
+  },
+  {
     command: '/stats',
     label: 'Vendor limits and usage',
     description: 'View 5-hour & weekly token utilization, rate limit resets, and subscription status',

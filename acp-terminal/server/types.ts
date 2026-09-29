@@ -30,6 +30,8 @@ export interface AgentDescriptor {
   defaultModel?: string;
   availableModels?: string[];
   slashCommands?: SlashCommandItem[];
+  /** MCP transports the agent takes in `session/new`; empty when it can't take any. */
+  mcpSupport?: { transports: McpTransport[]; note?: string };
 }
 
 export interface PermissionOption {
@@ -186,6 +188,8 @@ export interface AcpSession {
   agentStopped?: boolean; // Set by an explicit Stop; ranks the session 'parked' until restarted
   /** The agent's latest todo list (ACP `plan` update). */
   plan?: PlanEntry[];
+  /** App-level MCP servers handed to the agent when it last started. */
+  mcp?: SessionMcpInfo;
 }
 
 export interface SessionSummary {
@@ -210,4 +214,36 @@ export interface SessionSummary {
   tokenCount: number;
   turnCount: number;
   isAgentRunning?: boolean;
+}
+
+// ------------------------------------------------------------------ MCP
+
+export type McpTransport = 'stdio' | 'http' | 'sse';
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  transport: McpTransport;
+  enabled: boolean;
+  /** 'all', or the one agent id the server is limited to. */
+  scope: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  presetId?: string;
+  description?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** McpServerConfig as sent to the browser, with secret values masked. */
+export type McpServerView = McpServerConfig;
+
+export type McpServerInput = Partial<Omit<McpServerConfig, 'id' | 'createdAt' | 'updatedAt'>>;
+
+export interface SessionMcpInfo {
+  attached: string[];
+  skipped: Array<{ name: string; reason: string }>;
 }
