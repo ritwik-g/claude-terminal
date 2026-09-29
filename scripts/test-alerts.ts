@@ -22,7 +22,7 @@
 import { alertsFor } from '../web/src/alerts';
 import { DEFAULT_PREFS, type Prefs } from '../web/src/prefs';
 import {
-  BREAK_WINDOW_MS, breakCandidates, breakDue, cacheExpiresAt, compactBeforeSnooze, cacheExpiring, cacheLeftMs, formatTokens, wakeAt,
+  BREAK_WINDOW_MS, breakCandidates, breakDue, cacheExpiresAt, compactBeforeSnooze, compactStillPending, COMPACT_SENT_MAX_MS, cacheExpiring, cacheLeftMs, formatTokens, wakeAt,
   worthCompacting,
 } from '../web/src/util';
 import { scanAll } from '../server/scan';
@@ -310,6 +310,28 @@ function snoozeChecks(): void {
     compactBeforeSnooze(s({ keepWarm: kw(now + 2 * HOUR) }), now + 4 * HOUR, MINTOK, now));
 }
 
+function compactSentChecks(): void {
+  console.log('\ncompactStillPending — a Sent tick lasts only until there is an answer\n');
+
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const MIN = 60_000;
+  const send = { sessionId: 'big', at: now - 2 * MIN, contextTokens: 400_000 };
+  const s = (over: Partial<Session> = {}) => fakeSession({
+    id: 'big', contextTokens: 400_000, attached: true, termId: 't1', live: LIVE, ...over,
+  });
+
+  check('says Sent right after sending', compactStillPending(send, s(), now));
+  check('still Sent while a busy turn grows the context first', compactStillPending(send, s({ contextTokens: 420_000 }), now));
+  check('not once the context has shrunk — the compaction landed',
+    !compactStillPending(send, s({ contextTokens: 30_000 }), now));
+  check('not after the window with no sign of it',
+    !compactStillPending({ ...send, at: now - COMPACT_SENT_MAX_MS }, s(), now));
+  check('not when the terminal has gone', !compactStillPending(send, undefined, now));
+  check('not when the session is no longer attached', !compactStillPending(send, s({ attached: false }), now));
+  check('not when the terminal id now serves another session',
+    !compactStillPending(send, s({ id: 'other' }), now));
+}
+
 async function contextChecks(): Promise<void> {
   console.log('\ncontextTokens — read from your real transcripts\n');
 
@@ -353,6 +375,7 @@ const main = async () => {
   cacheChecks();
   breakChecks();
   snoozeChecks();
+  compactSentChecks();
   await contextChecks();
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

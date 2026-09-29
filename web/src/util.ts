@@ -356,6 +356,43 @@ export function compactBeforeSnooze(s: Session, until: number, minTokens: number
   return true;
 }
 
+/* ------------------------------------------------------------ compact sends */
+
+/** A /compact typed into a terminal from one of the Compact buttons. */
+export interface CompactSend {
+  /** The session it was typed for. A reused terminal id serves a new one. */
+  sessionId: string;
+  /** When it was sent, epoch ms. */
+  at: number;
+  /** The session's context size when it was sent. */
+  contextTokens: number;
+}
+
+/**
+ * How long a Compact button keeps saying Sent with no sign of the compaction.
+ * Long enough for a busy session to finish its turn and run the queued
+ * command; short enough that a send that never landed does not hide the
+ * button for the rest of the day.
+ */
+export const COMPACT_SENT_MAX_MS = 15 * 60_000;
+
+/**
+ * Whether a Compact button should still say Sent. `s` is the session its
+ * terminal serves now, if any.
+ *
+ * It stops the moment there is an answer: the context shrank, so the
+ * compaction landed and a later reminder is about new context; the terminal
+ * went away or now serves another session; or long enough has passed that
+ * the send evidently did not take. Without this the tick outlived the
+ * compaction it announced, and the end-of-day reminder showed Sent for a
+ * session that had grown back since.
+ */
+export function compactStillPending(send: CompactSend, s: Session | undefined, now: number): boolean {
+  if (!s || !s.attached || s.id !== send.sessionId) return false;
+  if (s.contextTokens < send.contextTokens) return false;
+  return now - send.at < COMPACT_SENT_MAX_MS;
+}
+
 /* ----------------------------------------------------------- break reminders */
 
 export type BreakKind = 'lunch' | 'day-end';

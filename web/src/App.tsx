@@ -8,6 +8,7 @@ import {
   wakeAt, wokeAgo, worthCompacting, type Bucket,
   KEEPWARM_HOLD_TEXT, KEEPWARM_OPTIONS, KEEPWARM_OVERRIDABLE, KEEPWARM_RESULT_TEXT,
   KEEPWARM_STOP_TEXT, KEEPWARM_WARN, cacheExpiresAt, cacheLeftMs, compactBeforeSnooze, formatLeft,
+  compactStillPending, type CompactSend,
 } from './util';
 import { SessionRow } from './components/SessionRow';
 import { UsagePill } from './components/UsagePill';
@@ -195,15 +196,16 @@ export function App() {
   const [snoozeUnit, setSnoozeUnit] = useState(CUSTOM_UNITS[0][1]);
   const [snoozeUntil, setSnoozeUntil] = useState('');
   /**
-   * Terminal ids we have typed /compact into, so the button that sent it can
-   * say so.
+   * The /compact commands we have typed, by terminal id, so every Compact
+   * button for that session can say Sent until there is an answer.
    *
    * Local and unpersisted on purpose: this is "I just pressed that", not a
-   * fact about the session. Whether the compaction actually happened shows up
-   * where it should — in the session's context size, which drops on the next
-   * scan and takes it off the candidate list by itself.
+   * fact about the session. Each entry lasts only until the compaction shows
+   * up in the session's context size, the terminal goes, or the send has
+   * evidently not taken — see compactStillPending. Kept for good, it hid the
+   * button on sessions that had long since grown back.
    */
-  const [compactSent, setCompactSent] = useState<Set<string>>(() => new Set());
+  const [compactSends, setCompactSends] = useState<Map<string, CompactSend>>(() => new Map());
 
   const [prefs, patchPrefs] = usePrefs();
   /**
@@ -348,6 +350,22 @@ export function App() {
   }, [selectedId]);
 
   const sessions = payload?.sessions ?? [];
+
+  /** Terminal ids whose /compact is still awaiting its answer. */
+  const compactSent = useMemo(() => {
+    const byTerm = new Map(sessions.filter((s) => s.termId).map((s) => [s.termId as string, s]));
+    const out = new Set<string>();
+    for (const [termId, send] of compactSends) {
+      if (compactStillPending(send, byTerm.get(termId), now)) out.add(termId);
+    }
+    return out;
+  }, [compactSends, sessions, now]);
+  // Forget answered sends outright, so a session that compacts and then grows
+  // past its old size does not bring its old tick back.
+  useEffect(() => {
+    if ([...compactSends.keys()].every((t) => compactSent.has(t))) return;
+    setCompactSends((prev) => new Map([...prev].filter(([t]) => compactSent.has(t))));
+  }, [compactSends, compactSent]);
   const { active: expiring, dismiss: dismissCache } = useCacheAlerts(sessions, prefs, now);
   const { reminder: breakReminder, dismiss: dismissBreak } = useBreakReminder(sessions, prefs, now);
   // A session the break reminder already lists is not repeated in the expiry
@@ -688,14 +706,15 @@ export function App() {
     async (s: Session) => {
       if (!s.termId) return;
       const termId = s.termId;
-      setCompactSent((prev) => new Set(prev).add(termId));
+      const send: CompactSend = { sessionId: s.id, at: Date.now(), contextTokens: s.contextTokens };
+      setCompactSends((prev) => new Map(prev).set(termId, send));
       try {
         await api.termCommand(termId, 'compact');
       } catch (e: any) {
         // Put the button back rather than leaving a tick over a command that
         // never landed.
-        setCompactSent((prev) => {
-          const next = new Set(prev);
+        setCompactSends((prev) => {
+          const next = new Map(prev);
           next.delete(termId);
           return next;
         });
