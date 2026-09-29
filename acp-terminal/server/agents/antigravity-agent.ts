@@ -62,7 +62,8 @@ class AntigravityAcpAgent {
     if (session && params.configId === 'model') {
       session.model = String(params.value);
     }
-    return {};
+    // ACP requires the full option set in the response; this agent exposes no selectable options
+    return { configOptions: [] };
   }
 
   async prompt(params: { sessionId: string; prompt: any }, cx: any) {
@@ -95,7 +96,7 @@ class AntigravityAcpAgent {
           content: { type: 'text', text: errMsg },
         },
       });
-      return { stopReason: 'end_turn' };
+      return { stopReason: 'end_turn' as const };
     }
 
     try {
@@ -162,7 +163,7 @@ class AntigravityAcpAgent {
 
       while (!complete && Date.now() - startTime < timeoutMs) {
         if (abortSignal.aborted) {
-          return { stopReason: 'cancelled' };
+          return { stopReason: 'cancelled' as const };
         }
 
         if (fs.existsSync(transcriptPath)) {
@@ -267,9 +268,9 @@ class AntigravityAcpAgent {
         },
       });
 
-      return { stopReason: 'end_turn' };
+      return { stopReason: 'end_turn' as const };
     } catch (err: any) {
-      if (abortSignal.aborted) return { stopReason: 'cancelled' };
+      if (abortSignal.aborted) return { stopReason: 'cancelled' as const };
       const errText = `⚠️ Antigravity execution error: ${err.message || String(err)}`;
       await cx.notify(acp.methods.client.session.update, {
         sessionId: params.sessionId,
@@ -278,7 +279,7 @@ class AntigravityAcpAgent {
           content: { type: 'text', text: errText },
         },
       });
-      return { stopReason: 'end_turn' };
+      return { stopReason: 'end_turn' as const };
     } finally {
       session.pendingPrompt = null;
     }
@@ -303,13 +304,13 @@ class AntigravityAcpAgent {
 
 async function main() {
   const input = Writable.toWeb(process.stdout);
-  const output = Readable.toWeb(process.stdin);
+  const output = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
   const stream = acp.ndJsonStream(input, output);
 
   const agent = new AntigravityAcpAgent();
 
   acp
-    .agent({ name: 'antigravity-acp', version: '1.0.0' })
+    .agent({ name: 'antigravity-acp' })
     .onRequest('initialize', (ctx: any) => agent.initialize(ctx.params))
     .onRequest('session/new', (ctx: any) => agent.newSession(ctx.params))
     .onRequest('session/set_config_option', (ctx: any) => agent.setConfigOption(ctx.params))

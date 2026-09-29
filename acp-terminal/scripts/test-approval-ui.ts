@@ -1,7 +1,8 @@
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
+import { screenshotDir, tempWorkspace } from './lib/test-paths.js';
 
-const ARTIFACTS_DIR = '/Users/ritwikg/.gemini/antigravity/brain/d8dbf9a3-2cc2-4640-80bf-e5859d219b95';
+const ARTIFACTS_DIR = screenshotDir();
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 async function testApprovalUI() {
@@ -11,7 +12,7 @@ async function testApprovalUI() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       agentId: 'mock',
-      cwd: '/Users/ritwikg/personal/claude-terminal/acp-terminal',
+      cwd: tempWorkspace(),
       title: 'Permission Approval Verification',
     }),
   });

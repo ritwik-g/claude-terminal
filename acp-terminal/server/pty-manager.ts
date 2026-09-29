@@ -12,8 +12,46 @@ export interface TerminalInstance {
   outputBuffer: string;
   exited: boolean;
   exitCode: number | null;
+  signal: string | null;
+  // Set once output has been dropped from the front of the buffer
+  truncated: boolean;
+  outputByteLimit?: number;
   startedAt: number;
   exitedAt: number | null;
+}
+
+const MAX_BUFFER_CHARS = 2 * 1024 * 1024;
+
+/** Normalise ACP's `[{ name, value }]` env list (or a plain record) into a record. */
+function envToRecord(env?: Array<{ name: string; value: string }> | Record<string, string>): Record<string, string> {
+  if (!env) return {};
+  if (Array.isArray(env)) {
+    const out: Record<string, string> = {};
+    for (const entry of env) {
+      if (entry && typeof entry.name === 'string') out[entry.name] = String(entry.value ?? '');
+    }
+    return out;
+  }
+  return env;
+}
+
+/** Append output, keeping the buffer within the terminal's byte limit (or the global cap). */
+function appendOutput(instance: TerminalInstance, data: string): void {
+  instance.outputBuffer += data;
+  if (instance.outputByteLimit !== undefined) {
+    const buf = Buffer.from(instance.outputBuffer, 'utf8');
+    if (buf.length > instance.outputByteLimit) {
+      // Drop whole characters from the front: skip UTF-8 continuation bytes at the cut point
+      let start = buf.length - instance.outputByteLimit;
+      while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+      instance.outputBuffer = buf.subarray(start).toString('utf8');
+      instance.truncated = true;
+    }
+  } else if (instance.outputBuffer.length > MAX_BUFFER_CHARS) {
+    // Cap buffer at 2MB to prevent memory bloat
+    instance.outputBuffer = instance.outputBuffer.slice(-1024 * 1024);
+    instance.truncated = true;
+  }
 }
 
 export class PtyManager extends EventEmitter {
@@ -25,7 +63,8 @@ export class PtyManager extends EventEmitter {
     command: string;
     args?: string[];
     cwd: string;
-    env?: Record<string, string>;
+    env?: Array<{ name: string; value: string }> | Record<string, string>;
+    outputByteLimit?: number;
     cols?: number;
     rows?: number;
   }): TerminalInstance {
@@ -41,7 +80,7 @@ export class PtyManager extends EventEmitter {
 
     const mergedEnv = {
       ...process.env,
-      ...opts.env,
+      ...envToRecord(opts.env),
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       ACP_TERMINAL: '1',
@@ -64,22 +103,22 @@ export class PtyManager extends EventEmitter {
       outputBuffer: '',
       exited: false,
       exitCode: null,
+      signal: null,
+      truncated: false,
+      outputByteLimit: typeof opts.outputByteLimit === 'number' && opts.outputByteLimit >= 0 ? opts.outputByteLimit : undefined,
       startedAt: Date.now(),
       exitedAt: null,
     };
 
     proc.onData((data: string) => {
-      instance.outputBuffer += data;
-      // Cap buffer at 2MB to prevent memory bloat
-      if (instance.outputBuffer.length > 2 * 1024 * 1024) {
-        instance.outputBuffer = instance.outputBuffer.slice(-1024 * 1024);
-      }
+      appendOutput(instance, data);
       this.emit('data', { id, sessionId: opts.sessionId, data });
     });
 
-    proc.onExit(({ exitCode }) => {
+    proc.onExit(({ exitCode, signal }) => {
       instance.exited = true;
       instance.exitCode = exitCode;
+      instance.signal = signal ? signalName(signal) : null;
       instance.exitedAt = Date.now();
       this.emit('exit', { id, sessionId: opts.sessionId, exitCode });
     });
@@ -121,15 +160,14 @@ export class PtyManager extends EventEmitter {
       outputBuffer: '',
       exited: false,
       exitCode: null,
+      signal: null,
+      truncated: false,
       startedAt: Date.now(),
       exitedAt: null,
     };
 
     proc.onData((data: string) => {
-      instance.outputBuffer += data;
-      if (instance.outputBuffer.length > 2 * 1024 * 1024) {
-        instance.outputBuffer = instance.outputBuffer.slice(-1024 * 1024);
-      }
+      appendOutput(instance, data);
       this.emit('data', { id: key, sessionId, data });
     });
 
@@ -156,41 +194,33 @@ export class PtyManager extends EventEmitter {
     return this.terminals.get(id) ?? null;
   }
 
-  getOutput(id: string): { output: string; exitCode: number | null; exited: boolean } | null {
+  getOutput(id: string): { output: string; truncated: boolean; exitCode: number | null; signal: string | null; exited: boolean } | null {
     const term = this.terminals.get(id);
     if (!term) return null;
     return {
       output: term.outputBuffer,
+      truncated: term.truncated,
       exitCode: term.exitCode,
+      signal: term.signal,
       exited: term.exited,
     };
   }
 
-  async waitForExit(id: string, timeoutMs = 60_000): Promise<{ exitCode: number | null; output: string }> {
+  /** Resolves when the command exits; no timeout, since the agent can end a long run with terminal/kill. */
+  async waitForExit(id: string): Promise<{ exitCode: number | null; signal: string | null; output: string }> {
     const term = this.terminals.get(id);
     if (!term) throw new Error(`Terminal ${id} not found`);
     if (term.exited) {
-      return { exitCode: term.exitCode, output: term.outputBuffer };
+      return { exitCode: term.exitCode, signal: term.signal, output: term.outputBuffer };
     }
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        cleanup();
-        resolve({ exitCode: term.exitCode, output: term.outputBuffer });
-      }, timeoutMs);
-
+    return new Promise((resolve) => {
       const onExit = (evt: { id: string; exitCode: number | null }) => {
         if (evt.id === id) {
-          cleanup();
-          resolve({ exitCode: evt.exitCode, output: term.outputBuffer });
+          this.off('exit', onExit);
+          resolve({ exitCode: evt.exitCode, signal: term.signal, output: term.outputBuffer });
         }
       };
-
-      const cleanup = () => {
-        clearTimeout(timer);
-        this.off('exit', onExit);
-      };
-
       this.on('exit', onExit);
     });
   }
@@ -227,15 +257,28 @@ export class PtyManager extends EventEmitter {
   release(id: string): void {
     const term = this.terminals.get(id);
     if (!term) return;
+    this.terminals.delete(id);
     if (!term.exited) {
       try {
         term.proc.kill();
       } catch {
         // ignore
       }
+      // Wake any waitForExit() on a terminal released before its command finished
+      this.emit('exit', { id, sessionId: term.sessionId, exitCode: null });
     }
-    this.terminals.delete(id);
   }
+
+  releaseAll(): void {
+    for (const id of [...this.terminals.keys()]) {
+      this.release(id);
+    }
+  }
+}
+
+function signalName(signal: number): string {
+  const entry = Object.entries(os.constants.signals).find(([, num]) => num === signal);
+  return entry ? entry[0] : String(signal);
 }
 
 export const ptyManager = new PtyManager();

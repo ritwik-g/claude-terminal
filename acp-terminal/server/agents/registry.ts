@@ -137,12 +137,18 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
   },
 };
 
+// Falls back to Claude so legacy stored sessions with a retired agentId still load;
+// validate new ids with hasAgent() before creating or switching.
 export function getAgent(id: string): AgentDescriptor {
   return AGENT_REGISTRY[id] || AGENT_REGISTRY.claude || AGENT_REGISTRY.antigravity || AGENT_REGISTRY.mock;
 }
 
+export function hasAgent(id: unknown): id is string {
+  return typeof id === 'string' && Object.prototype.hasOwnProperty.call(AGENT_REGISTRY, id);
+}
+
 export function listAgents(includeMock?: boolean): AgentDescriptor[] {
-  const shouldInclude = includeMock ?? (process.env.NODE_ENV === 'test');
+  const shouldInclude = includeMock ?? (process.env.NODE_ENV === 'test' || process.env.ACP_ENABLE_MOCK === '1');
   const all = Object.values(AGENT_REGISTRY);
   if (shouldInclude) {
     return all;

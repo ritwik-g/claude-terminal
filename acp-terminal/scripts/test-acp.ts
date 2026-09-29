@@ -2,6 +2,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
+import type { IncomingMessage } from 'node:http';
 
 // Isolate test storage from the user's real ~/.acp-terminal directory BEFORE any imports
 const testAppDir = path.join(os.tmpdir(), `acp-terminal-test-app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
@@ -14,6 +17,25 @@ const { listAgents } = await import('../server/agents/registry.js');
 const { searchSessions } = await import('../server/search.js');
 const { store } = await import('../server/store.js');
 const { getAppDir, getSessionsDir } = await import('../server/paths.js');
+const { TurnInFlightError } = await import('../server/acp/client-host.js');
+const { checkAccess, getRemoteAddress } = await import('../server/security.js');
+const { apiRouter } = await import('../server/api.js');
+const { default: express } = await import('express');
+const { AGENT_REGISTRY } = await import('../server/agents/registry.js');
+
+// A session accepts one turn at a time; wait until the previous one (e.g. a fire-and-forget
+// initial prompt) has finished before sending the next.
+async function waitForIdle(id: string, timeoutMs = 20_000): Promise<void> {
+  const start = Date.now();
+  while (sessionManager.isTurnInFlight(id)) {
+    if (Date.now() - start > timeoutMs) throw new Error(`Timed out waiting for session ${id} to go idle`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+function fakeRequest(opts: { remote: string; headers?: Record<string, string> }): IncomingMessage {
+  return { headers: opts.headers || {}, socket: { remoteAddress: opts.remote } } as unknown as IncomingMessage;
+}
 
 async function runTests() {
   console.log('🧪 [Test Suite] Starting ACP Terminal Test Suite...\n');
@@ -195,7 +217,8 @@ async function runTests() {
 
     // 8c. Test Undo / Rollback Messages to a Point
     console.log('8️⃣c Testing Conversation Undo / Rollback...');
-    // Add two test turns to codexSession to test rollback
+    // Add two test turns to codexSession to test rollback (after the failover handoff turn finishes)
+    await waitForIdle(codexSession.id);
     await sessionManager.sendPrompt(codexSession.id, 'Alpha greeting message');
     await new Promise((r) => setTimeout(r, 600));
     await sessionManager.sendPrompt(codexSession.id, 'Beta exploration message');
@@ -263,6 +286,135 @@ async function runTests() {
       throw new Error('Search failed to find sessions by message content');
     }
     console.log('   ✅ Full-text search over message content verified\n');
+
+    // 10. Regression checks
+    console.log('🔟 Regression checks...');
+
+    // 10a. One turn at a time; cancel-then-send (the web "Send & Interrupt" flow) still works
+    await waitForIdle(codexSession.id);
+    const firstTurn = sessionManager.sendPrompt(codexSession.id, 'Hello again, long turn please');
+    let refused = false;
+    try {
+      await sessionManager.sendPrompt(codexSession.id, 'Overlapping prompt');
+    } catch (err) {
+      refused = err instanceof TurnInFlightError;
+    }
+    if (!refused) throw new Error('A second prompt during an in-flight turn must be refused with TurnInFlightError');
+    await sessionManager.cancelPrompt(codexSession.id);
+    await firstTurn;
+    if (sessionManager.isTurnInFlight(codexSession.id)) throw new Error('Turn still in flight after cancel');
+    await sessionManager.sendPrompt(codexSession.id, 'Hello after cancel');
+    console.log('   ✅ Overlapping prompt refused; cancel then send succeeds');
+
+    // 10b. Cancelling while an approval is pending clears it (no dead approval card / stuck 'blocked')
+    sessionManager.updateAnnotations(session.id, { autoApprove: false });
+    await waitForIdle(session.id);
+    const permAgain = new Promise<void>((resolve) => {
+      const handler = (evt: { sessionId: string }) => {
+        if (evt.sessionId === session.id) {
+          sessionManager.off('permissionRequested', handler);
+          resolve();
+        }
+      };
+      sessionManager.on('permissionRequested', handler);
+    });
+    const blockedTurn = sessionManager.sendPrompt(session.id, 'Please run a command needing permission');
+    await permAgain;
+    await sessionManager.cancelPrompt(session.id);
+    await blockedTurn;
+    const afterCancel = sessionManager.getSession(session.id)!;
+    if (afterCancel.pendingPermission || afterCancel.state === 'blocked') {
+      throw new Error(`Pending permission survived cancel (state ${afterCancel.state})`);
+    }
+    console.log('   ✅ Cancel clears the pending permission');
+
+    // 10c. Stop parks the session and keeps it parked
+    await sessionManager.stopSessionAgent(session.id);
+    if (sessionManager.getSession(session.id)!.state !== 'parked') {
+      throw new Error(`Stopped session should be parked, got ${sessionManager.getSession(session.id)!.state}`);
+    }
+    console.log('   ✅ Stopped session stays parked');
+
+    // 10d. HTTP: bad cwd / unknown agent rejected with 400 and nothing persisted
+    const app = express();
+    app.use(express.json());
+    app.use('/api', apiRouter);
+    const httpServer = app.listen(0, '127.0.0.1');
+    await once(httpServer, 'listening');
+    const base = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+    try {
+      const before = store.getAll().length;
+      const missingDir = path.join(os.tmpdir(), `acp-missing-${Date.now()}`);
+      const badCwd = await fetch(`${base}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: 'mock', cwd: missingDir }),
+      });
+      const badCwdBody = (await badCwd.json()) as { error?: string };
+      if (badCwd.status !== 400 || !badCwdBody.error?.includes('Working directory does not exist')) {
+        throw new Error(`Bad cwd should be 400, got ${badCwd.status} ${JSON.stringify(badCwdBody)}`);
+      }
+      const badAgent = await fetch(`${base}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: 'no-such-agent', cwd: testDir }),
+      });
+      if (badAgent.status !== 400) throw new Error(`Unknown agent should be 400, got ${badAgent.status}`);
+      if (store.getAll().length !== before) throw new Error('Rejected create must not persist a session');
+      console.log('   ✅ Bad cwd and unknown agent rejected with 400, no session persisted');
+
+      const detail = await fetch(`${base}/api/sessions/${codexSession.id}`);
+      if (detail.status !== 200) throw new Error(`GET /api/sessions/:id should be 200, got ${detail.status}`);
+      await waitForIdle(codexSession.id);
+      const running = sessionManager.sendPrompt(codexSession.id, 'Hello, a turn to overlap with');
+      const overlap = await fetch(`${base}/api/sessions/${codexSession.id}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: 'Overlapping over HTTP' }),
+      });
+      if (overlap.status !== 409) throw new Error(`Prompt during an in-flight turn should be 409, got ${overlap.status}`);
+      await running;
+      console.log('   ✅ Prompt during an in-flight turn rejected with 409');
+    } finally {
+      httpServer.close();
+    }
+
+    // 10e. An agent that fails to start leaves no zombie session behind (and does not hang)
+    const realCommand = AGENT_REGISTRY.mock.command;
+    AGENT_REGISTRY.mock.command = path.join(testDir, 'no-such-agent-binary');
+    const countBeforeFail = store.getAll().length;
+    let startFailed = false;
+    try {
+      await sessionManager.createSession({ agentId: 'mock', cwd: testDir });
+    } catch {
+      startFailed = true;
+    } finally {
+      AGENT_REGISTRY.mock.command = realCommand;
+    }
+    if (!startFailed) throw new Error('createSession should fail when the agent cannot be spawned');
+    if (store.getAll().length !== countBeforeFail) throw new Error('Failed createSession left a zombie session');
+    console.log('   ✅ Failed agent start removes the session');
+
+    // 10f. Auth: x-test-remote-ip only honoured in test mode; foreign Origin and rebinding Host rejected
+    const token = 'test-token';
+    const spoofed = fakeRequest({ remote: '192.168.1.50', headers: { host: '127.0.0.1:7890', 'x-test-remote-ip': '127.0.0.1' } });
+    process.env.NODE_ENV = 'production';
+    try {
+      if (getRemoteAddress(spoofed) !== '192.168.1.50') throw new Error('x-test-remote-ip honoured outside test mode');
+      if (checkAccess(spoofed, undefined, token).ok) throw new Error('Spoofed loopback header bypassed token auth');
+    } finally {
+      process.env.NODE_ENV = 'test';
+    }
+    const local = { remote: '127.0.0.1' };
+    const crossOrigin = checkAccess(fakeRequest({ ...local, headers: { host: '127.0.0.1:7890', origin: 'http://evil.example' } }), token, token);
+    if (crossOrigin.ok || crossOrigin.status !== 403) throw new Error('Cross-origin request must be 403 even with a token');
+    const rebinding = checkAccess(fakeRequest({ ...local, headers: { host: 'evil.example:7890', origin: 'http://evil.example:7890' } }), undefined, token);
+    if (rebinding.ok) throw new Error('DNS-rebinding Host must not get loopback trust');
+    const viteDev = checkAccess(fakeRequest({ ...local, headers: { host: '127.0.0.1:7890', origin: 'http://localhost:5280' } }), undefined, token);
+    if (!viteDev.ok) throw new Error('Loopback origin (Vite dev server) must be allowed');
+    const lanWithToken = checkAccess(fakeRequest({ remote: '192.168.1.50', headers: { host: '192.168.1.5:7890', origin: 'http://192.168.1.5:7890' } }), token, token);
+    if (!lanWithToken.ok) throw new Error('Same-origin LAN request with token must be allowed');
+    console.log('   ✅ Spoofed loopback header, cross-origin and rebinding requests rejected\n');
 
     console.log('🎉 ALL TESTS PASSED SUCCESSFULLY! 🚀');
   } finally {

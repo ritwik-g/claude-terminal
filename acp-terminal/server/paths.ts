@@ -28,6 +28,10 @@ export function getTokenFile(): string {
   return path.join(getAppDir(), 'token');
 }
 
+export function getUploadsDir(): string {
+  return path.join(getAppDir(), 'uploads');
+}
+
 export function getCredentialsFile(): string {
   return path.join(getAppDir(), 'credentials.json');
 }
@@ -40,6 +44,7 @@ export const paths = {
   get STATE_FILE(): string { return getStateFile(); },
   get TOKEN_FILE(): string { return getTokenFile(); },
   get CREDENTIALS_FILE(): string { return getCredentialsFile(); },
+  get UPLOADS_DIR(): string { return getUploadsDir(); },
 };
 
 export const DIR_MODE = 0o700;

@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
-import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { store } from '../store.js';
 import { getGitInfo } from '../git.js';
 import { rankSession, sortSessions } from '../rank.js';
-import { getAgent } from '../agents/registry.js';
-import { AcpClientHost, normalizeClaudeModel } from './client-host.js';
+import { getAgent, hasAgent } from '../agents/registry.js';
+import { AcpClientHost, HostClosedError, TurnInFlightError, normalizeClaudeModel } from './client-host.js';
 import { ptyManager } from '../pty-manager.js';
+import { getUploadsDir } from '../paths.js';
 import { getClaudeRateLimits, updateClaudeRateLimitsFromSdk } from '../subscriptions.js';
 import type { AcpSession, ContextTransferMode, FileAttachment, PendingPermission, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
 
@@ -65,9 +65,46 @@ export function formatSessionHistory(
   return lines.join('\n');
 }
 
+// A 'working' turn with no agent, permission or terminal activity for this long is treated as hung
+const STALE_TURN_MS = 10 * 60_000;
+
 export class SessionManager extends EventEmitter {
   private activeHosts = new Map<string, AcpClientHost>();
+  // Hosts still in start(): concurrent ensureHost() calls share one spawn
+  private startingHosts = new Map<string, { host: AcpClientHost; promise: Promise<AcpClientHost> }>();
+  // sendPrompt ownership per session; a newer prompt, cancel or host teardown takes it away
+  private activePrompts = new Map<string, number>();
+  private promptSeq = 0;
   private pollTimer: NodeJS.Timeout | null = null;
+
+  constructor() {
+    super();
+    // Terminal output counts as turn activity, so a long-running command is not taken for a hung turn
+    ptyManager.on('data', (evt: { sessionId: string }) => {
+      const host = this.activeHosts.get(evt.sessionId);
+      if (host) host.lastActivityAt = Date.now();
+    });
+  }
+
+  /** True while a prompt is being delivered or the agent is still working on it. */
+  isTurnInFlight(sessionId: string): boolean {
+    return this.activePrompts.has(sessionId) || Boolean(this.activeHosts.get(sessionId)?.isTurnInFlight);
+  }
+
+  /** Shut down the session's agent (running or still starting) and drop turn ownership. */
+  private dropHost(sessionId: string): void {
+    const host = this.activeHosts.get(sessionId);
+    if (host) {
+      host.shutdown();
+      this.activeHosts.delete(sessionId);
+    }
+    const starting = this.startingHosts.get(sessionId);
+    if (starting) {
+      starting.host.shutdown();
+      this.startingHosts.delete(sessionId);
+    }
+    this.activePrompts.delete(sessionId);
+  }
 
   init(): void {
     store.init();
@@ -78,7 +115,7 @@ export class SessionManager extends EventEmitter {
         const normalized = normalizeClaudeModel(session.model);
         if (session.model !== normalized) {
           session.model = normalized;
-          store.save(session);
+          store.save(session, { touch: false });
         }
       }
       // Backfill historical agentId and model on turns so model switching never erases history
@@ -121,8 +158,17 @@ export class SessionManager extends EventEmitter {
         session.state = 'needs_you';
         sessionChanged = true;
       }
+      // No agent survives a server restart, so a stored approval request can never be answered
+      if (session.pendingPermission && !host) {
+        session.pendingPermission = null;
+        sessionChanged = true;
+      }
+      if (session.activeTerminalId && !ptyManager.getTerminal(session.activeTerminalId)) {
+        session.activeTerminalId = undefined;
+        sessionChanged = true;
+      }
       if (sessionChanged) {
-        store.save(session);
+        store.save(session, { touch: false });
       }
     }
     this.startBackgroundPoller();
@@ -131,15 +177,22 @@ export class SessionManager extends EventEmitter {
   private startBackgroundPoller(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = setInterval(async () => {
-      let changed = false;
+      let anyChanged = false;
       const sessions = store.getAll();
       for (const session of sessions) {
-        // Recover orphaned or idle working state if no turn is actively executing
+        let changed = false;
+        // Recover orphaned 'working' state when no turn is executing, and cancel a turn gone silent
         const host = this.activeHosts.get(session.id);
-        if (session.state === 'working' && (!host || !host.isTurnInFlight || Date.now() - host.lastActivityAt > 60_000)) {
-          session.state = 'needs_you';
-          changed = true;
-          this.emit('sessionStream', { sessionId: session.id, type: 'turnCompleted' });
+        if (session.state === 'working') {
+          if (!this.isTurnInFlight(session.id)) {
+            session.state = 'needs_you';
+            changed = true;
+            this.emit('sessionStream', { sessionId: session.id, type: 'turnCompleted' });
+          } else if (host?.isTurnInFlight && Date.now() - host.lastActivityAt > STALE_TURN_MS) {
+            console.warn(`[session-mgr] Turn on ${session.id} silent for ${STALE_TURN_MS / 60_000}m; cancelling`);
+            this.cancelPrompt(session.id).catch(() => {});
+            continue;
+          }
         }
 
         // Auto-recover crashed state so user is never permanently stuck
@@ -155,15 +208,17 @@ export class SessionManager extends EventEmitter {
           changed = true;
         }
 
-        // Refresh git info
+        // Refresh git info (getGitInfo returns a stable null for non-git directories)
         if (session.cwd) {
           const oldGit = session.git;
           const newGit = await getGitInfo(session.cwd);
           if (
-            !oldGit ||
-            oldGit.uncommittedFiles !== newGit?.uncommittedFiles ||
-            oldGit.unpushedCommits !== newGit?.unpushedCommits ||
-            oldGit.branch !== newGit?.branch
+            (oldGit === null) !== (newGit === null) ||
+            (oldGit && newGit && (
+              oldGit.uncommittedFiles !== newGit.uncommittedFiles ||
+              oldGit.unpushedCommits !== newGit.unpushedCommits ||
+              oldGit.branch !== newGit.branch
+            ))
           ) {
             session.git = newGit;
             changed = true;
@@ -171,15 +226,13 @@ export class SessionManager extends EventEmitter {
         }
 
         if (changed) {
-          const { score, reasons, state } = rankSession(session);
-          session.score = score;
-          session.reasons = reasons;
-          session.state = state;
-          store.save(session);
+          // Bookkeeping only: keep updatedAt so the recency ranking reflects real activity
+          store.save(session, { touch: false });
+          anyChanged = true;
         }
       }
 
-      if (changed) {
+      if (anyChanged) {
         this.emit('sessionsUpdated', this.listSessions());
       }
     }, 10_000);
@@ -235,6 +288,7 @@ export class SessionManager extends EventEmitter {
     failoverFromId?: string;
     initialPrompt?: string;
   }): Promise<AcpSession> {
+    if (!hasAgent(opts.agentId)) throw new Error(`Unknown agent: ${opts.agentId}`);
     const id = `acp-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     const agent = getAgent(opts.agentId);
     let model = opts.model || agent.defaultModel;
@@ -278,8 +332,15 @@ export class SessionManager extends EventEmitter {
     store.save(session);
     this.emit('sessionsUpdated', this.listSessions());
 
-    // Spin up host
-    await this.ensureHost(session);
+    // Spin up host; a session whose agent never started is removed rather than left as a zombie
+    try {
+      await this.ensureHost(session);
+    } catch (err) {
+      this.dropHost(id);
+      store.delete(id);
+      this.emit('sessionsUpdated', this.listSessions());
+      throw err;
+    }
 
     if (opts.initialPrompt) {
       // fire prompt asynchronously
@@ -294,7 +355,29 @@ export class SessionManager extends EventEmitter {
   private async ensureHost(session: AcpSession): Promise<AcpClientHost> {
     const existing = this.activeHosts.get(session.id);
     if (existing) return existing;
+    const starting = this.startingHosts.get(session.id);
+    if (starting) return starting.promise;
 
+    const host = this.createHost(session);
+    const promise = (async () => {
+      try {
+        await host.start();
+      } catch (err) {
+        // Kill whatever start() managed to spawn so a failed start never leaks a process
+        host.shutdown();
+        throw err;
+      } finally {
+        if (this.startingHosts.get(session.id)?.host === host) this.startingHosts.delete(session.id);
+      }
+      if (host.isShutdown) throw new Error('Agent was stopped while starting');
+      this.activeHosts.set(session.id, host);
+      return host;
+    })();
+    this.startingHosts.set(session.id, { host, promise });
+    return promise;
+  }
+
+  private createHost(session: AcpSession): AcpClientHost {
     const agent = getAgent(session.agentId);
     const host = new AcpClientHost(
       session.id,
@@ -381,9 +464,10 @@ export class SessionManager extends EventEmitter {
       if (!s || !activeAgentTurn || !activeAgentTurn.toolCalls) return;
       const idx = activeAgentTurn.toolCalls.findIndex((t) => t.id === record.id);
       if (idx !== -1) {
+        const patch = Object.fromEntries(Object.entries(record).filter(([, v]) => v !== undefined));
         activeAgentTurn.toolCalls[idx] = {
           ...activeAgentTurn.toolCalls[idx],
-          ...record,
+          ...patch,
         };
       }
       store.save(s);
@@ -413,11 +497,11 @@ export class SessionManager extends EventEmitter {
       this.emit('sessionsUpdated', this.listSessions());
     });
 
-    host.on('permissionResolved', (permId: string) => {
+    host.on('permissionResolved', (permId: string, info?: { cancelled: boolean }) => {
       const s = store.get(session.id);
       if (!s) return;
       s.pendingPermission = null;
-      s.state = 'working';
+      if (!info?.cancelled) s.state = 'working';
       store.save(s);
       this.emit('permissionResolved', { sessionId: s.id, permId });
       this.emit('sessionsUpdated', this.listSessions());
@@ -471,6 +555,7 @@ export class SessionManager extends EventEmitter {
       const s = store.get(session.id);
       if (!s) return;
       s.state = 'needs_you';
+      s.pendingPermission = null;
       if (!activeAgentTurn) {
         activeAgentTurn = {
           id: `msg-${Date.now()}`,
@@ -512,30 +597,36 @@ export class SessionManager extends EventEmitter {
     });
 
     host.on('closed', () => {
+      // Only the registered host may clear the session; a replaced host's exit must not orphan its successor
+      if (this.activeHosts.get(session.id) !== host) return;
       this.activeHosts.delete(session.id);
+      this.activePrompts.delete(session.id);
+      activeAgentTurn = null;
       const s = store.get(session.id);
-      if (s && s.state === 'working') {
+      if (s && (s.state === 'working' || s.state === 'blocked' || s.pendingPermission)) {
         s.state = 'needs_you';
-        activeAgentTurn = null;
+        s.pendingPermission = null;
         store.save(s);
         this.emit('sessionStream', { sessionId: s.id, type: 'turnCompleted' });
         this.emit('sessionsUpdated', this.listSessions());
       }
     });
 
-    await host.start();
-    this.activeHosts.set(session.id, host);
     return host;
   }
 
   async sendPrompt(sessionId: string, promptText: string, attachments?: FileAttachment[]): Promise<void> {
     const session = store.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
+    // One turn at a time: the web client cancels the running turn before sending ("Send & Interrupt")
+    if (this.isTurnInFlight(sessionId)) throw new TurnInFlightError();
+    const seq = ++this.promptSeq;
+    this.activePrompts.set(sessionId, seq);
 
     // Process and save any attachments to disk
     const savedAttachments: FileAttachment[] = [];
     if (attachments && attachments.length > 0) {
-      const uploadDir = path.join(os.homedir(), '.acp-terminal', 'uploads', sessionId);
+      const uploadDir = path.join(getUploadsDir(), sessionId);
       fs.mkdirSync(uploadDir, { recursive: true });
       for (const att of attachments) {
         const safeName = (att.name || `file_${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -574,6 +665,7 @@ export class SessionManager extends EventEmitter {
     });
 
     session.state = 'working';
+    session.agentStopped = false;
     session.promptSuggestion = undefined;
     // If the host is not currently in memory (e.g. server daemon restarted or agent re-initialized),
     // automatically seed the newly spawned agent process with the prior conversation history
@@ -622,9 +714,11 @@ export class SessionManager extends EventEmitter {
       const host = await this.ensureHost(session);
       await host.sendPrompt(promptToSendToHost, savedAttachments);
     } catch (err: any) {
+      // Host torn down by stop/switch/rollback/delete: that action already updated the session
+      if (err instanceof HostClosedError && err.byShutdown) return;
       console.error(`[session-mgr] Error executing prompt for ${sessionId}:`, err);
       const s = store.get(sessionId);
-      if (s) {
+      if (s && this.activePrompts.get(sessionId) === seq) {
         const lastTurn = s.turns[s.turns.length - 1];
         if (!lastTurn || lastTurn.role !== 'agent') {
           s.turns.push({
@@ -641,8 +735,11 @@ export class SessionManager extends EventEmitter {
         store.save(s);
       }
     } finally {
-      // ABSOLUTE GUARANTEE: The session is NEVER left in 'working' status when sendPrompt ends
-      const s = store.get(sessionId);
+      // ABSOLUTE GUARANTEE: The session is NEVER left in 'working' status when sendPrompt ends,
+      // unless a newer prompt now owns the session
+      const owned = this.activePrompts.get(sessionId) === seq;
+      if (owned) this.activePrompts.delete(sessionId);
+      const s = owned ? store.get(sessionId) : null;
       if (s && (s.state === 'working' || s.state === 'crashed')) {
         s.state = 'needs_you';
         store.save(s);
@@ -663,9 +760,11 @@ export class SessionManager extends EventEmitter {
     if (host) {
       await host.cancel();
     }
+    this.activePrompts.delete(sessionId);
     const session = store.get(sessionId);
     if (session) {
       session.state = 'needs_you';
+      session.pendingPermission = null;
       store.save(session);
       this.emit('sessionStream', { sessionId: session.id, type: 'turnCompleted', session });
       this.emit('sessionsUpdated', this.listSessions());
@@ -682,16 +781,14 @@ export class SessionManager extends EventEmitter {
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
     const host = this.activeHosts.get(sessionId);
-    if (host) {
-      if (host.isTurnInFlight) {
-        await host.cancel().catch(() => {});
-      }
-      host.shutdown();
-      this.activeHosts.delete(sessionId);
+    if (host?.isTurnInFlight) {
+      await host.cancel().catch(() => {});
     }
+    this.dropHost(sessionId);
     ptyManager.release(`session-term-${sessionId}`);
 
     session.state = 'parked';
+    session.agentStopped = true;
     session.pendingPermission = null;
     session.activeTerminalId = undefined;
     session.isAgentRunning = false;
@@ -721,6 +818,7 @@ export class SessionManager extends EventEmitter {
 
     await this.ensureHost(session);
     session.isAgentRunning = true;
+    session.agentStopped = false;
     if (session.state === 'parked') {
       session.state = 'needs_you';
     }
@@ -755,6 +853,7 @@ export class SessionManager extends EventEmitter {
     const session = store.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
+    if (!hasAgent(newAgentId)) throw new Error(`Unknown agent: ${newAgentId}`);
     const prevAgentName = session.agentName;
     const targetAgent = getAgent(newAgentId);
     let targetModel = newModel || targetAgent.defaultModel;
@@ -763,11 +862,7 @@ export class SessionManager extends EventEmitter {
     }
 
     // Shutdown previous host process so new host can be spun up on next turn
-    const oldHost = this.activeHosts.get(sessionId);
-    if (oldHost) {
-      oldHost.shutdown();
-      this.activeHosts.delete(sessionId);
-    }
+    this.dropHost(sessionId);
 
     session.agentId = targetAgent.id;
     session.agentName = targetAgent.name;
@@ -815,15 +910,12 @@ export class SessionManager extends EventEmitter {
     session.effort = effort;
 
     // Shutdown running host so new reasoning budget applies on next prompt
-    const host = this.activeHosts.get(sessionId);
-    if (host) {
-      host.shutdown();
-      this.activeHosts.delete(sessionId);
-    }
+    this.dropHost(sessionId);
 
-    if (session.state === 'working' || session.state === 'crashed') {
+    if (session.state === 'working' || session.state === 'crashed' || session.state === 'blocked') {
       session.state = 'needs_you';
     }
+    session.pendingPermission = null;
 
     session.updatedAt = Date.now();
     store.save(session);
@@ -886,13 +978,10 @@ export class SessionManager extends EventEmitter {
     session.contextHandoffPending = true;
 
     // Reset host subprocess memory so on next prompt the agent starts with the lean context
-    const host = this.activeHosts.get(sessionId);
-    if (host) {
-      host.shutdown();
-      this.activeHosts.delete(sessionId);
-    }
+    this.dropHost(sessionId);
 
     session.state = 'needs_you';
+    session.pendingPermission = null;
     session.updatedAt = Date.now();
     store.save(session);
     this.emit('sessionsUpdated', this.listSessions());
@@ -1034,11 +1123,7 @@ export class SessionManager extends EventEmitter {
     }
 
     // Terminate running host process so old conversation state is cleared from process memory
-    const host = this.activeHosts.get(sessionId);
-    if (host) {
-      host.shutdown();
-      this.activeHosts.delete(sessionId);
-    }
+    this.dropHost(sessionId);
 
     // Recalculate session properties based on remaining turns
     const lastUserTurn = [...session.turns].reverse().find((t) => t.role === 'user');
@@ -1070,14 +1155,20 @@ export class SessionManager extends EventEmitter {
   }
 
   deleteSession(sessionId: string): boolean {
-    const host = this.activeHosts.get(sessionId);
-    if (host) {
-      host.shutdown();
-      this.activeHosts.delete(sessionId);
-    }
+    this.dropHost(sessionId);
     ptyManager.release(`session-term-${sessionId}`);
     const res = store.delete(sessionId);
     if (res) {
+      // Attachments are stored per session under uploads/<sessionId>
+      try {
+        const uploadsBase = getUploadsDir();
+        const uploadDir = path.resolve(uploadsBase, sessionId);
+        if (path.dirname(uploadDir) === path.resolve(uploadsBase)) {
+          fs.rmSync(uploadDir, { recursive: true, force: true });
+        }
+      } catch (err) {
+        console.warn(`[session-mgr] Failed to remove uploads for ${sessionId}:`, err);
+      }
       this.emit('sessionsUpdated', this.listSessions());
     }
     return res;
@@ -1085,10 +1176,11 @@ export class SessionManager extends EventEmitter {
 
   shutdown(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
-    for (const host of this.activeHosts.values()) {
-      host.shutdown();
+    for (const id of [...this.activeHosts.keys(), ...this.startingHosts.keys()]) {
+      this.dropHost(id);
     }
-    this.activeHosts.clear();
+    // Agent terminals go with their hosts; this also ends the interactive session shells
+    ptyManager.releaseAll();
   }
 }
 

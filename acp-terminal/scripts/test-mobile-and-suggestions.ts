@@ -1,7 +1,9 @@
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
+import { screenshotDir } from './lib/test-paths.js';
+import { getSessionsDir } from '../server/paths.js';
 
-const ARTIFACTS_DIR = '/Users/ritwikg/.gemini/antigravity/brain/d8dbf9a3-2cc2-4640-80bf-e5859d219b95';
+const ARTIFACTS_DIR = screenshotDir();
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 async function runMobileAndSuggestionsVerification() {
@@ -99,7 +101,7 @@ async function runMobileAndSuggestionsVerification() {
     if (activeSession) {
       // Update session via internal store or direct file to test
       const fs = await import('node:fs');
-      const storeFile = path.resolve('/Users/ritwikg/personal/claude-terminal/acp-terminal/sessions', `${activeSession.id}.json`);
+      const storeFile = path.join(getSessionsDir(), `${activeSession.id}.json`);
       if (fs.existsSync(storeFile)) {
         const raw = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
         raw.promptSuggestion = 'Run integration tests and check for regression';

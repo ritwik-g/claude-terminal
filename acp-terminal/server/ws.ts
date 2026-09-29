@@ -1,32 +1,36 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server } from 'node:http';
 import { sessionManager } from './acp/session-mgr.js';
 import { ptyManager } from './pty-manager.js';
 import { store } from './store.js';
 import { getOrCreateToken } from './paths.js';
+import { checkAccess } from './security.js';
 
 export function setupWebSockets(server: Server): void {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {
-    const url = new URL(request.url || '/', `http://${request.headers.host}`);
+    let url: URL;
+    try {
+      url = new URL(request.url || '/', `http://${request.headers.host}`);
+    } catch {
+      // Malformed Host header or request URL: refuse rather than let the throw crash the process
+      socket.destroy();
+      return;
+    }
     const pathname = url.pathname;
 
     if (pathname === '/ws' || pathname.startsWith('/ws/terminal/')) {
-      const ip = request.socket.remoteAddress;
-      const isLoopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-      if (!isLoopback) {
-        const token = getOrCreateToken();
-        const reqToken = url.searchParams.get('token') || (request.headers['x-acp-token'] as string);
-        if (!reqToken || reqToken !== token) {
-          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-          socket.destroy();
-          return;
-        }
+      const reqToken = url.searchParams.get('token') || (request.headers['x-acp-token'] as string | undefined);
+      const decision = checkAccess(request, reqToken || undefined, getOrCreateToken());
+      if (!decision.ok) {
+        socket.write(`HTTP/1.1 ${decision.status} ${decision.status === 403 ? 'Forbidden' : 'Unauthorized'}\r\n\r\n`);
+        socket.destroy();
+        return;
       }
 
       wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request);
+        wss.emit('connection', ws, request, url);
       });
     } else {
       socket.destroy();
@@ -75,8 +79,7 @@ export function setupWebSockets(server: Server): void {
     }
   });
 
-  wss.on('connection', (ws: WebSocket, req) => {
-    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, url: URL) => {
     const pathname = url.pathname;
 
     // Terminal attachment stream: /ws/terminal/:terminalId (or /ws/terminal/:sessionId)

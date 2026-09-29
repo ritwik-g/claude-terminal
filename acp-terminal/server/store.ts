@@ -55,13 +55,20 @@ class SessionStore {
     return this.sessions.get(id) ?? null;
   }
 
-  save(session: AcpSession): void {
+  /**
+   * Re-rank and persist a session. `touch: false` keeps updatedAt for bookkeeping writes
+   * (background git refresh, snooze expiry) so they do not count as user/agent activity
+   * in the recency ranking.
+   */
+  save(session: AcpSession, opts: { touch?: boolean } = {}): void {
     this.init();
     const { score, reasons, state } = rankSession(session);
     session.score = score;
     session.reasons = reasons;
     session.state = state;
-    session.updatedAt = Date.now();
+    if (opts.touch !== false) {
+      session.updatedAt = Date.now();
+    }
 
     this.sessions.set(session.id, session);
     this.persist(session);

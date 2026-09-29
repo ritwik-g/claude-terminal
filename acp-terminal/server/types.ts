@@ -151,6 +151,7 @@ export interface AcpSession {
   promptSuggestion?: string;
   rateLimits?: SessionRateLimits;
   isAgentRunning?: boolean;
+  agentStopped?: boolean; // Set by an explicit Stop; ranks the session 'parked' until restarted
 }
 
 export interface SessionSummary {

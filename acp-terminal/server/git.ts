@@ -6,7 +6,8 @@ import type { GitInfo } from './types.js';
 
 const exec = promisify(execFile);
 const TTL_MS = 15_000;
-const cache = new Map<string, { at: number; info: GitInfo }>();
+// Non-git directories cache `null` so repeated lookups stay stable within the TTL
+const cache = new Map<string, { at: number; info: GitInfo | null }>();
 
 export async function getGitInfo(cwd: string): Promise<GitInfo | null> {
   if (!cwd || !fs.existsSync(cwd)) return null;
@@ -59,7 +60,7 @@ export async function getGitInfo(cwd: string): Promise<GitInfo | null> {
     }
   } catch {
     // Not a git repository
-    cache.set(cwd, { at: Date.now(), info });
+    cache.set(cwd, { at: Date.now(), info: null });
     return null;
   }
 

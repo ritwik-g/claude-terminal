@@ -22,7 +22,7 @@ const PRIORITY_BOOST = {
 const PINNED_BOOST = 10_000;
 const SNOOZED_PENALTY = -100_000;
 
-export function deriveSessionState(session: Pick<AcpSession, 'pendingPermission' | 'turns' | 'git' | 'user' | 'state'>): SessionState {
+export function deriveSessionState(session: Pick<AcpSession, 'pendingPermission' | 'turns' | 'git' | 'user' | 'state' | 'agentStopped'>): SessionState {
   // Check snooze first
   if (session.user?.snoozedUntil && session.user.snoozedUntil > Date.now()) {
     return 'snoozed';
@@ -41,6 +41,11 @@ export function deriveSessionState(session: Pick<AcpSession, 'pendingPermission'
   // If marked crashed
   if (session.state === 'crashed') {
     return 'crashed';
+  }
+
+  // The user stopped the agent process: keep it parked until they start it or send a prompt
+  if (session.agentStopped) {
+    return 'parked';
   }
 
   // If the agent just completed its response, it needs the user's attention/input

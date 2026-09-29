@@ -6,8 +6,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-import { listAgents } from './agents/registry.js';
+import { hasAgent, listAgents } from './agents/registry.js';
 import { sessionManager } from './acp/session-mgr.js';
+import { TurnInFlightError } from './acp/client-host.js';
 import { searchSessions } from './search.js';
 import { getGitInfo } from './git.js';
 import { store } from './store.js';
@@ -19,18 +20,21 @@ import {
   refreshClaudeRateLimitsAsync,
 } from './subscriptions.js';
 import { getLocalNetworkIps } from './network.js';
-import { getOrCreateToken } from './paths.js';
+import { getOrCreateToken, getUploadsDir } from './paths.js';
+import { isLoopbackBind } from './security.js';
 
 export const apiRouter = Router();
 
-// Static directory for uploaded files and pictures
-const uploadsBaseDir = path.join(os.homedir(), '.acp-terminal', 'uploads');
-fs.mkdirSync(uploadsBaseDir, { recursive: true });
-apiRouter.use('/attachments', express.static(uploadsBaseDir));
+// @types/express v5 types route params as string | string[]; express v4 always gives a string
+const sid = (req: Request): string => String(req.params.id);
+
+// Static directory for uploaded files and pictures (under the app dir, so ACP_APP_DIR isolates it)
+apiRouter.use('/attachments', express.static(getUploadsDir()));
 
 // 1. List registered agents
 apiRouter.get('/agents', (req: Request, res: Response) => {
-  const includeMock = req.query.includeMock === 'true';
+  // Absent param -> undefined so the registry's env default (test mode / ACP_ENABLE_MOCK) applies
+  const includeMock = req.query.includeMock === undefined ? undefined : req.query.includeMock === 'true';
   res.json({ agents: listAgents(includeMock) });
 });
 
@@ -47,7 +51,25 @@ apiRouter.post('/sessions', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'agentId and cwd are required' });
       return;
     }
+    if (!hasAgent(agentId)) {
+      res.status(400).json({ error: `Unknown agent: ${agentId}` });
+      return;
+    }
+    if (typeof cwd !== 'string') {
+      res.status(400).json({ error: 'cwd must be a string' });
+      return;
+    }
     const targetCwd = path.resolve(cwd.replace(/^~/, os.homedir()));
+    let isDir = false;
+    try {
+      isDir = fs.statSync(targetCwd).isDirectory();
+    } catch {
+      // missing or unreadable
+    }
+    if (!isDir) {
+      res.status(400).json({ error: `Working directory does not exist: ${targetCwd}` });
+      return;
+    }
     const session = await sessionManager.createSession({
       agentId,
       cwd: targetCwd,
@@ -57,13 +79,13 @@ apiRouter.post('/sessions', async (req: Request, res: Response) => {
     });
     res.json({ session });
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to create session' });
+    res.status(500).json({ error: `Failed to start agent: ${err?.message || 'unknown error'}` });
   }
 });
 
 // 4. Get full session detail
 apiRouter.get('/sessions/:id', (req: Request, res: Response) => {
-  const session = sessionManager.getSession(req.params.id);
+  const session = sessionManager.getSession(sid(req));
   if (!session) {
     res.status(404).json({ error: 'Session not found' });
     return;
@@ -79,9 +101,18 @@ apiRouter.post('/sessions/:id/prompt', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'prompt or attachment is required' });
       return;
     }
+    const id = sid(req);
+    if (!store.get(id)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    if (sessionManager.isTurnInFlight(id)) {
+      res.status(409).json({ error: new TurnInFlightError().message });
+      return;
+    }
     // sendPrompt runs asynchronously in host
-    sessionManager.sendPrompt(req.params.id, prompt || '', attachments).catch((err) => {
-      console.error(`[api] Error executing prompt for ${req.params.id}:`, err);
+    sessionManager.sendPrompt(id, prompt || '', attachments).catch((err) => {
+      console.error(`[api] Error executing prompt for ${id}:`, err);
     });
     res.json({ ok: true });
   } catch (err: any) {
@@ -92,7 +123,7 @@ apiRouter.post('/sessions/:id/prompt', async (req: Request, res: Response) => {
 // 6. Cancel prompt (stop active turn)
 apiRouter.post('/sessions/:id/cancel', async (req: Request, res: Response) => {
   try {
-    await sessionManager.cancelPrompt(req.params.id);
+    await sessionManager.cancelPrompt(sid(req));
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -102,7 +133,7 @@ apiRouter.post('/sessions/:id/cancel', async (req: Request, res: Response) => {
 // 6b. Stop / Park underlying agent subprocess & terminal
 apiRouter.post('/sessions/:id/stop', async (req: Request, res: Response) => {
   try {
-    const session = await sessionManager.stopSessionAgent(req.params.id);
+    const session = await sessionManager.stopSessionAgent(sid(req));
     res.json({ session });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -112,7 +143,7 @@ apiRouter.post('/sessions/:id/stop', async (req: Request, res: Response) => {
 // 6c. Start / Resume underlying agent subprocess
 apiRouter.post('/sessions/:id/start', async (req: Request, res: Response) => {
   try {
-    const session = await sessionManager.startSessionAgent(req.params.id);
+    const session = await sessionManager.startSessionAgent(sid(req));
     res.json({ session });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -127,7 +158,7 @@ apiRouter.post('/sessions/:id/permission', async (req: Request, res: Response) =
       res.status(400).json({ error: 'optionId is required' });
       return;
     }
-    const ok = await sessionManager.resolvePermission(req.params.id, optionId);
+    const ok = await sessionManager.resolvePermission(sid(req), optionId);
     res.json({ ok });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -142,7 +173,11 @@ apiRouter.post('/sessions/:id/switch', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'targetAgentId is required' });
       return;
     }
-    const newSession = await sessionManager.switchAgent(req.params.id, targetAgentId, {
+    if (!hasAgent(targetAgentId)) {
+      res.status(400).json({ error: `Unknown agent: ${targetAgentId}` });
+      return;
+    }
+    const newSession = await sessionManager.switchAgent(sid(req), targetAgentId, {
       model,
       archivePrevious: Boolean(archivePrevious),
       inPlace: Boolean(inPlace),
@@ -160,7 +195,7 @@ apiRouter.post('/sessions/:id/switch', async (req: Request, res: Response) => {
 apiRouter.post('/sessions/:id/rollback', async (req: Request, res: Response) => {
   try {
     const { turnId, action } = req.body;
-    const result = await sessionManager.rollbackSession(req.params.id, {
+    const result = await sessionManager.rollbackSession(sid(req), {
       turnId,
       action: action || 'revert_to_this',
     });
@@ -173,7 +208,7 @@ apiRouter.post('/sessions/:id/rollback', async (req: Request, res: Response) => 
 // Compact conversation context in current session
 apiRouter.post('/sessions/:id/compact', async (req: Request, res: Response) => {
   try {
-    const session = await sessionManager.compactSession(req.params.id);
+    const session = await sessionManager.compactSession(sid(req));
     res.json({ session });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -188,7 +223,11 @@ apiRouter.patch('/sessions/:id/agent', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'agentId is required' });
       return;
     }
-    const session = await sessionManager.setSessionAgent(req.params.id, agentId, model, effort, contextMode);
+    if (!hasAgent(agentId)) {
+      res.status(400).json({ error: `Unknown agent: ${agentId}` });
+      return;
+    }
+    const session = await sessionManager.setSessionAgent(sid(req), agentId, model, effort, contextMode);
     res.json({ session });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -203,7 +242,7 @@ apiRouter.patch('/sessions/:id/effort', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'effort is required' });
       return;
     }
-    const session = await sessionManager.setSessionEffort(req.params.id, effort);
+    const session = await sessionManager.setSessionEffort(sid(req), effort);
     res.json({ session });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -212,7 +251,7 @@ apiRouter.patch('/sessions/:id/effort', async (req: Request, res: Response) => {
 
 // 9. Update user annotations (priority, pin, snooze, tags, cleanup)
 apiRouter.patch('/sessions/:id/annotations', (req: Request, res: Response) => {
-  const updated = sessionManager.updateAnnotations(req.params.id, req.body);
+  const updated = sessionManager.updateAnnotations(sid(req), req.body);
   if (!updated) {
     res.status(404).json({ error: 'Session not found' });
     return;
@@ -222,7 +261,7 @@ apiRouter.patch('/sessions/:id/annotations', (req: Request, res: Response) => {
 
 // 10. Rename session title
 apiRouter.patch('/sessions/:id/title', (req: Request, res: Response) => {
-  const session = store.get(req.params.id);
+  const session = store.get(sid(req));
   if (!session) {
     res.status(404).json({ error: 'Session not found' });
     return;
@@ -235,7 +274,7 @@ apiRouter.patch('/sessions/:id/title', (req: Request, res: Response) => {
 
 // 11. Delete session
 apiRouter.delete('/sessions/:id', (req: Request, res: Response) => {
-  const ok = sessionManager.deleteSession(req.params.id);
+  const ok = sessionManager.deleteSession(sid(req));
   res.json({ ok });
 });
 
@@ -361,7 +400,8 @@ apiRouter.post('/subscriptions/config', (req: Request, res: Response) => {
       geminiApiKey,
       preferredAuthMode,
     });
-    res.json({ success: true, credentials: updated, subscriptions: getVendorSubscriptions() });
+    // Never echo raw API keys back to the browser
+    res.json({ success: true, credentials: maskCredentials(updated), subscriptions: getVendorSubscriptions() });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to save credentials' });
   }
@@ -390,7 +430,7 @@ apiRouter.get('/usage/summary', (_req: Request, res: Response) => {
 // 18. Specific Session Usage Breakdown
 apiRouter.get('/sessions/:id/usage', (req: Request, res: Response) => {
   try {
-    const session = sessionManager.getSession(req.params.id);
+    const session = sessionManager.getSession(sid(req));
     if (!session) {
       res.status(404).json({ error: 'Session not found' });
       return;
@@ -410,13 +450,32 @@ apiRouter.get('/sessions/:id/usage', (req: Request, res: Response) => {
 apiRouter.get('/network', (_req: Request, res: Response) => {
   const token = getOrCreateToken();
   const port = Number(process.env.PORT || 7890);
-  const ips = getLocalNetworkIps();
+  const host = process.env.HOST || '0.0.0.0';
+  // A loopback-bound server is unreachable from the LAN, so advertise no network URLs
+  const lanEnabled = !isLoopbackBind(host);
+  const ips = lanEnabled ? getLocalNetworkIps() : [];
   res.json({
     port,
+    host,
+    lanEnabled,
     token,
     ips,
     localUrl: `http://127.0.0.1:${port}`,
     networkUrls: ips.map((ip) => `http://${ip}:${port}?token=${token}`),
   });
 });
+
+function maskSecret(value: unknown): unknown {
+  if (typeof value !== 'string' || !value) return value;
+  return value.length <= 8 ? '••••' : `${value.slice(0, 4)}••••${value.slice(-4)}`;
+}
+
+function maskCredentials<T>(creds: T): T {
+  if (!creds || typeof creds !== 'object') return creds;
+  const out: Record<string, unknown> = { ...(creds as Record<string, unknown>) };
+  for (const key of Object.keys(out)) {
+    if (/key|token|secret/i.test(key)) out[key] = maskSecret(out[key]);
+  }
+  return out as T;
+}
 

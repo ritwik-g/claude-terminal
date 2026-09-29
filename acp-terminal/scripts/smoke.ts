@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
 import WebSocket from 'ws';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -123,6 +124,38 @@ async function runSmokeTest() {
     }
 
     ws.close();
+
+    // Browser-origin protections: foreign Origin rejected on the API and on WebSocket upgrades
+    console.log('   Testing cross-origin rejection...');
+    const crossPost = await fetch('http://127.0.0.1:7891/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+      body: JSON.stringify({ agentId: 'mock', cwd: os.tmpdir() }),
+    });
+    if (crossPost.status !== 403) throw new Error(`Cross-origin POST should be 403, got ${crossPost.status}`);
+    const evilWs = new WebSocket('ws://127.0.0.1:7891/ws', { origin: 'http://evil.example' });
+    const evilOpened = await new Promise<boolean>((resolve) => {
+      evilWs.on('open', () => resolve(true));
+      evilWs.on('error', () => resolve(false));
+      setTimeout(() => resolve(false), 3000);
+    });
+    if (evilOpened) throw new Error('Cross-origin WebSocket upgrade must be rejected');
+    console.log('   ✅ Cross-origin POST and WebSocket rejected');
+
+    // A malformed Host header on an upgrade must not crash the server
+    console.log('   Testing malformed Host on WebSocket upgrade...');
+    await new Promise<void>((resolve) => {
+      const sock = net.connect(7891, '127.0.0.1', () => {
+        sock.write('GET /ws HTTP/1.1\r\nHost: [bad\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
+      });
+      sock.on('close', () => resolve());
+      sock.on('error', () => resolve());
+      setTimeout(() => { sock.destroy(); resolve(); }, 2000);
+    });
+    const alive = await httpGet('http://127.0.0.1:7891/api/agents', token);
+    if (alive.status !== 200) throw new Error(`Server unhealthy after malformed Host upgrade (status ${alive.status})`);
+    console.log('   ✅ Server survived malformed Host header');
+
     console.log('\n🎉 [Smoke Test Passed] Server, API routes, and WebSockets verified! 🚀');
   } finally {
     serverProcess.kill('SIGINT');

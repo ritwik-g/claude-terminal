@@ -111,8 +111,8 @@ class MockAcpAgent {
           ],
         });
 
-        const selectedOption = permResponse?.outcome?.optionId;
-        if (selectedOption === 'allow' || permResponse?.outcome?.outcome === 'selected') {
+        const outcome = permResponse?.outcome;
+        if (outcome?.outcome === 'selected' && outcome.optionId === 'allow') {
           // Execute command via client's terminal capability
           let execOutput = `Running \`${cmd}\` in ${session.cwd}...\nSuccess (exit code 0)\nEverything up to date.`;
           try {
@@ -126,9 +126,21 @@ class MockAcpAgent {
                 sessionId: params.sessionId,
                 terminalId: termRes.terminalId,
               });
-              if (waitRes?.output) {
-                execOutput = waitRes.output;
+              // ACP: wait_for_exit returns only the exit status; output comes from terminal/output
+              const outRes = await cx.request(acp.methods.client.terminal.output, {
+                sessionId: params.sessionId,
+                terminalId: termRes.terminalId,
+              });
+              if (outRes?.output) {
+                execOutput = outRes.output;
               }
+              if (waitRes?.exitCode != null && waitRes.exitCode !== 0) {
+                execOutput += `\n(exit code ${waitRes.exitCode})`;
+              }
+              await cx.request(acp.methods.client.terminal.release, {
+                sessionId: params.sessionId,
+                terminalId: termRes.terminalId,
+              });
             }
           } catch {
             // fallback simulated output if terminal client method not implemented or failed
@@ -208,10 +220,10 @@ class MockAcpAgent {
         },
       });
 
-      return { stopReason: 'end_turn' };
+      return { stopReason: 'end_turn' as const };
     } catch (err: any) {
       if (abortSignal.aborted) {
-        return { stopReason: 'cancelled' };
+        return { stopReason: 'cancelled' as const };
       }
       throw err;
     } finally {
@@ -239,13 +251,13 @@ class MockAcpAgent {
 
 async function main() {
   const input = Writable.toWeb(process.stdout);
-  const output = Readable.toWeb(process.stdin);
+  const output = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
   const stream = acp.ndJsonStream(input, output);
 
   const agent = new MockAcpAgent();
 
   acp
-    .agent({ name: 'mock-acp-agent', version: '1.0.0' })
+    .agent({ name: 'mock-acp-agent' })
     .onRequest('initialize', (ctx: any) => agent.initialize(ctx.params))
     .onRequest('session/new', (ctx: any) => agent.newSession(ctx.params))
     .onRequest('session/prompt', (ctx: any) => agent.prompt(ctx.params, ctx.client))

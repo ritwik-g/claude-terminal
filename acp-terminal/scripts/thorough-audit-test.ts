@@ -3,12 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+import { screenshotDir } from './lib/test-paths.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const ARTIFACTS_DIR = '/Users/ritwikg/.gemini/antigravity/brain/d8dbf9a3-2cc2-4640-80bf-e5859d219b95';
+const ARTIFACTS_DIR = screenshotDir();
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const BASE_URL = 'http://127.0.0.1:7890';
+// Test 10 simulates a LAN client with x-test-remote-ip, which the server honours only when it
+// runs with NODE_ENV=test, e.g. `NODE_ENV=test PORT=7991 ACP_APP_DIR=/tmp/acp-audit npx tsx server/cli.ts`
+const BASE_URL = process.env.ACP_BASE_URL || 'http://127.0.0.1:7890';
 
 interface TestResult {
   step: string;
