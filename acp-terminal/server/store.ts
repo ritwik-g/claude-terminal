@@ -1,0 +1,114 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { getSessionsDir, FILE_MODE, ensurePrivateDir, initStorage } from './paths.js';
+import type { AcpSession, UserAnnotations } from './types.js';
+import { rankSession } from './rank.js';
+
+class SessionStore {
+  private sessions = new Map<string, AcpSession>();
+  private initialized = false;
+
+  init(): void {
+    if (this.initialized) return;
+    initStorage();
+
+    const sessionsDir = getSessionsDir();
+    // Load persisted sessions from sessionsDir
+    try {
+      const files = fs.readdirSync(sessionsDir);
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+        try {
+          const filePath = path.join(sessionsDir, file);
+          const raw = fs.readFileSync(filePath, 'utf8');
+          const session = JSON.parse(raw) as AcpSession;
+          if (session && session.id) {
+            const { score, reasons, state } = rankSession(session);
+            session.score = score;
+            session.reasons = reasons;
+            session.state = state;
+            this.sessions.set(session.id, session);
+          }
+        } catch (err) {
+          console.warn(`[acp-terminal] Failed to parse session ${file}:`, err);
+        }
+      }
+    } catch {
+      // Directory empty or not created yet
+    }
+
+    this.initialized = true;
+  }
+
+  clear(): void {
+    this.sessions.clear();
+    this.initialized = false;
+  }
+
+  getAll(): AcpSession[] {
+    this.init();
+    return Array.from(this.sessions.values());
+  }
+
+  get(id: string): AcpSession | null {
+    this.init();
+    return this.sessions.get(id) ?? null;
+  }
+
+  save(session: AcpSession): void {
+    this.init();
+    const { score, reasons, state } = rankSession(session);
+    session.score = score;
+    session.reasons = reasons;
+    session.state = state;
+    session.updatedAt = Date.now();
+
+    this.sessions.set(session.id, session);
+    this.persist(session);
+  }
+
+  delete(id: string): boolean {
+    this.init();
+    const removed = this.sessions.delete(id);
+    if (removed) {
+      try {
+        const filePath = path.join(getSessionsDir(), `${id}.json`);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch {
+        // ignore delete failure
+      }
+    }
+    return removed;
+  }
+
+  updateAnnotations(id: string, updates: Partial<UserAnnotations>): AcpSession | null {
+    const session = this.get(id);
+    if (!session) return null;
+
+    session.user = {
+      ...session.user,
+      ...updates,
+    };
+
+    this.save(session);
+    return session;
+  }
+
+  private persist(session: AcpSession): void {
+    try {
+      const sessionsDir = getSessionsDir();
+      ensurePrivateDir(sessionsDir);
+      const filePath = path.join(sessionsDir, `${session.id}.json`);
+      fs.writeFileSync(filePath, JSON.stringify(session, null, 2), {
+        mode: FILE_MODE,
+        encoding: 'utf8',
+      });
+    } catch (err) {
+      console.error(`[acp-terminal] Failed to persist session ${session.id}:`, err);
+    }
+  }
+}
+
+export const store = new SessionStore();
