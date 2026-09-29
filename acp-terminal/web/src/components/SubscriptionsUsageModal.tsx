@@ -113,6 +113,8 @@ export const SubscriptionsUsageModal: React.FC<SubscriptionsUsageModalProps> = (
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
         className="modal-card"
         onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: '880px', width: '95%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}

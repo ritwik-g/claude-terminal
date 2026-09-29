@@ -11,19 +11,46 @@ export const SearchModal: React.FC<SearchModalProps> = ({ onClose, onSelectSessi
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<AcpSession[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const requestSeq = useRef(0);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Only the newest request may update results, so a slow response for an old
+  // query can't overwrite the current one.
+  const runSearch = (val: string) => {
+    const seq = ++requestSeq.current;
+    setLoading(true);
+    api
+      .search(val)
+      .then((res) => {
+        if (seq !== requestSeq.current) return;
+        setResults(res.sessions);
+        setSelectedIndex(0);
+        setError(null);
+      })
+      .catch((err) => {
+        if (seq === requestSeq.current) setError(err.message || 'Search failed');
+      })
+      .finally(() => {
+        if (seq === requestSeq.current) setLoading(false);
+      });
+  };
+
+  useEffect(() => () => {
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+  }, []);
 
   useEffect(() => {
     inputRef.current?.focus();
-    api.search('').then((res) => setResults(res.sessions)).catch(() => {});
+    runSearch('');
   }, []);
 
   const handleQueryChange = (val: string) => {
     setQuery(val);
-    api.search(val).then((res) => {
-      setResults(res.sessions);
-      setSelectedIndex(0);
-    }).catch(() => {});
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => runSearch(val), 150);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -47,6 +74,8 @@ export const SearchModal: React.FC<SearchModalProps> = ({ onClose, onSelectSessi
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
         className="modal-card"
         style={{ width: '600px', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
         onClick={(e) => e.stopPropagation()}
@@ -97,8 +126,14 @@ export const SearchModal: React.FC<SearchModalProps> = ({ onClose, onSelectSessi
           ))}
 
           {results.length === 0 && (
-            <div style={{ padding: '30px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
-              No sessions match "{query}"
+            <div style={{ padding: '30px', textAlign: 'center', color: error ? '#f87171' : 'var(--text-dim)', fontSize: '13px' }}>
+              {error
+                ? `Search failed: ${error}`
+                : loading
+                ? 'Searching…'
+                : query
+                ? `No sessions match "${query}"`
+                : 'No sessions yet'}
             </div>
           )}
         </div>

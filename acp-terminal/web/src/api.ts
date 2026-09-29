@@ -1,6 +1,16 @@
-import type { AcpSession, AgentDescriptor, FileAttachment, SessionSummary, UserAnnotations } from './types';
+import type {
+  AcpSession,
+  AgentDescriptor,
+  FileAttachment,
+  SessionCostDetail,
+  SessionSummary,
+  StoredCredentials,
+  UsageReport,
+  UserAnnotations,
+  VendorSubscriptionInfo,
+} from './types';
 
-function getToken(): string {
+export function getToken(): string {
   const urlParams = new URLSearchParams(window.location.search);
   const t = urlParams.get('token');
   if (t) {
@@ -168,29 +178,83 @@ export const api = {
       ips: string[];
       localUrl: string;
       networkUrls: string[];
+      lanEnabled?: boolean;
+      host?: string;
     }>('/api/network'),
 };
 
+/**
+ * Appends the access token to a same-origin URL. Needed where a request can't
+ * carry the x-acp-token header: <img src>, links and WebSocket URLs. Without it,
+ * LAN clients get 401 on attachments and the live terminal.
+ */
+export function withToken(url: string): string {
+  const token = getToken();
+  if (!token || !url.startsWith('/')) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+}
+
+/**
+ * True when the page is served to the machine running the server. The native
+ * Finder picker opens on the host's screen, so it is only offered there.
+ */
+export function isHostMachine(): boolean {
+  return ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(window.location.hostname);
+}
+
+export function wsUrl(path: string): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}${withToken(path)}`;
+}
+
+export interface LiveSocket {
+  close: () => void;
+}
+
+/**
+ * Opens the event socket and keeps it open: when the server restarts or the
+ * network drops, it reconnects with capped exponential backoff. onOpen fires on
+ * every (re)connect so callers can refetch whatever they missed while offline.
+ */
 export function connectWebSocket(
   onMessage: (msg: any) => void,
   onOpen?: () => void,
   onClose?: () => void
-): WebSocket {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = getToken();
-  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
-  const ws = new WebSocket(`${protocol}//${window.location.host}/ws${tokenQuery}`);
+): LiveSocket {
+  let ws: WebSocket | null = null;
+  let closedByCaller = false;
+  let attempt = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  ws.onopen = () => onOpen?.();
-  ws.onclose = () => onClose?.();
-  ws.onmessage = (event) => {
-    try {
-      const parsed = JSON.parse(event.data);
-      onMessage(parsed);
-    } catch {
-      // ignore
-    }
+  const open = () => {
+    ws = new WebSocket(wsUrl('/ws'));
+    ws.onopen = () => {
+      attempt = 0;
+      onOpen?.();
+    };
+    ws.onclose = () => {
+      if (closedByCaller) return;
+      onClose?.();
+      const delay = Math.min(10_000, 500 * 2 ** attempt);
+      attempt += 1;
+      retryTimer = setTimeout(open, delay);
+    };
+    ws.onmessage = (event) => {
+      try {
+        onMessage(JSON.parse(event.data));
+      } catch {
+        // ignore malformed frames
+      }
+    };
   };
 
-  return ws;
+  open();
+
+  return {
+    close: () => {
+      closedByCaller = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      ws?.close();
+    },
+  };
 }

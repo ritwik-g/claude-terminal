@@ -2,12 +2,20 @@ import React, { useState, useEffect, useCallback } from 'react';
 import type { AcpSession, AgentDescriptor, SessionSummary } from './types';
 import { api, connectWebSocket } from './api';
 import { Sidebar } from './components/Sidebar';
-import { SessionDetail } from './components/SessionDetail';
+import { SessionDetail, nextPriority } from './components/SessionDetail';
 import { NewSessionModal } from './components/NewSessionModal';
 import { SwitchAgentModal } from './components/SwitchAgentModal';
 import { SearchModal } from './components/SearchModal';
 import { SubscriptionsUsageModal } from './components/SubscriptionsUsageModal';
 import { NetworkModal } from './components/NetworkModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
+
+/** Session ids in the order the sidebar shows them, honouring its filters and grouping. */
+function visibleSessionOrder(): string[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('.sidebar [data-session-id]')).map(
+    (el) => el.dataset.sessionId!
+  );
+}
 
 export const App: React.FC = () => {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -21,15 +29,21 @@ export const App: React.FC = () => {
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [authError, setAuthError] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
-  const [mobileView, setMobileView] = useState<'list' | 'session'>('session');
+  // Start on the list: with nothing selected yet, the session pane on mobile is a dead end.
+  const [mobileView, setMobileView] = useState<'list' | 'session'>('list');
   const [loading, setLoading] = useState(true);
+  const [offline, setOffline] = useState(false);
 
   const fetchSessions = useCallback(async () => {
     try {
       const res = await api.getSessions();
       setSessions(res.sessions);
       setAuthError(false);
-      if (!selectedId && res.sessions.length > 0) {
+      setOffline(false);
+      if (selectedId && !res.sessions.some((s) => s.id === selectedId)) {
+        // The open session was deleted (here or from another tab/device).
+        setSelectedId(res.sessions[0]?.id ?? null);
+      } else if (!selectedId && res.sessions.length > 0) {
         setSelectedId(res.sessions[0].id);
       } else if (selectedId) {
         const match = res.sessions.find((s) => s.id === selectedId);
@@ -47,6 +61,8 @@ export const App: React.FC = () => {
       console.error('[App] Failed to fetch sessions:', err);
       if (err.message?.includes('401') || err.message?.includes('Unauthorized')) {
         setAuthError(true);
+      } else {
+        setOffline(true);
       }
     }
   }, [selectedId]);
@@ -99,12 +115,15 @@ export const App: React.FC = () => {
 
   // WebSocket reactive updates
   useEffect(() => {
+    let wasOffline = false;
     const ws = connectWebSocket((msg) => {
       if (msg.type === 'sessionsUpdated' && Array.isArray(msg.sessions)) {
         setSessions(msg.sessions);
         if (selectedId) {
-          const match = msg.sessions.find((s) => s.id === selectedId);
-          if (match) {
+          const match = msg.sessions.find((s: SessionSummary) => s.id === selectedId);
+          if (!match) {
+            setSelectedId(msg.sessions[0]?.id ?? null);
+          } else {
             setActiveSession((prev) => {
               if (!prev || prev.id !== selectedId) return prev;
               if (prev.state !== match.state) {
@@ -155,6 +174,17 @@ export const App: React.FC = () => {
           fetchSessions();
         }
       }
+    }, () => {
+      // Reconnected: resync everything streamed while the socket was down.
+      if (wasOffline) {
+        wasOffline = false;
+        setOffline(false);
+        fetchSessions();
+        if (selectedId) fetchSessionDetail(selectedId);
+      }
+    }, () => {
+      wasOffline = true;
+      setOffline(true);
     });
 
     return () => {
@@ -162,50 +192,98 @@ export const App: React.FC = () => {
     };
   }, [selectedId, fetchSessionDetail, fetchSessions]);
 
+  const anyModalOpen =
+    showNewModal || showSwitchModal || showSearchModal || showSubscriptionsModal || showNetworkModal;
+
+  const handleDeleted = useCallback(
+    (deletedId: string) => {
+      // Move to the neighbouring session in sidebar order rather than leaving the
+      // deleted one on screen.
+      const order = visibleSessionOrder();
+      const idx = order.indexOf(deletedId);
+      const remaining = order.filter((id) => id !== deletedId);
+      const next = remaining[Math.min(Math.max(idx, 0), remaining.length - 1)] ?? null;
+      setSelectedId(next);
+      if (!next) {
+        setActiveSession(null);
+        setMobileView('list');
+      }
+      fetchSessions();
+    },
+    [fetchSessions]
+  );
+
   // Keyboard navigation shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't intercept if focus is inside input/textarea
-      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
-        return;
-      }
-
-      if (e.key === '/') {
-        e.preventDefault();
-        setShowSearchModal(true);
-      } else if (e.key === 'j' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (sessions.length === 0) return;
-        const idx = sessions.findIndex((s) => s.id === selectedId);
-        const next = idx === -1 || idx === sessions.length - 1 ? 0 : idx + 1;
-        setSelectedId(sessions[next].id);
-      } else if (e.key === 'k' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (sessions.length === 0) return;
-        const idx = sessions.findIndex((s) => s.id === selectedId);
-        const prev = idx <= 0 ? sessions.length - 1 : idx - 1;
-        setSelectedId(sessions[prev].id);
-      } else if (e.key.toLowerCase() === 'n' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        setShowNewModal(true);
-      } else if (e.key === 'c' && selectedId && activeSession) {
-        api.updateAnnotations(selectedId, { cleanup: !activeSession.user.cleanup }).then(() => {
-          fetchSessions();
-          fetchSessionDetail(selectedId);
-        });
-      } else if (e.key === 'Escape') {
+      if (e.key === 'Escape') {
+        // Esc must close a modal even while focus is in one of its inputs.
         setShowNewModal(false);
         setShowSwitchModal(false);
         setShowSearchModal(false);
         setShowSubscriptionsModal(false);
         setShowNetworkModal(false);
+        return;
+      }
+
+      if (e.key.toLowerCase() === 'n' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        setShowNewModal(true);
+        return;
+      }
+
+      // Everything below is a bare single-key shortcut: never steal Cmd/Ctrl/Alt
+      // combos (Cmd+C must copy, not toggle cleanup), typing, or keys meant for a modal.
+      if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
+      if (target?.closest?.('.xterm')) return;
+      if (anyModalOpen) return;
+
+      if (e.key === '/') {
+        e.preventDefault();
+        setShowSearchModal(true);
+      } else if (['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
+        // Arrows navigate only from the page or the sidebar, so they still scroll
+        // the conversation when it has focus.
+        const isArrow = e.key.startsWith('Arrow');
+        if (isArrow && target !== document.body && !target?.closest?.('.sidebar')) return;
+        e.preventDefault();
+        const order = visibleSessionOrder();
+        if (order.length === 0) return;
+        const idx = selectedId ? order.indexOf(selectedId) : -1;
+        const nextIdx =
+          e.key === 'j' || e.key === 'ArrowDown'
+            ? idx === -1 || idx === order.length - 1 ? 0 : idx + 1
+            : idx <= 0 ? order.length - 1 : idx - 1;
+        const nextId = order[nextIdx];
+        setSelectedId(nextId);
+        document.querySelector(`[data-session-id="${CSS.escape(nextId)}"]`)?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter' && selectedId) {
+        setMobileView('session');
+      } else if (e.key === 'p' && selectedId && activeSession) {
+        api
+          .updateAnnotations(selectedId, { priority: nextPriority(activeSession.user.priority) })
+          .then(() => {
+            fetchSessions();
+            fetchSessionDetail(selectedId);
+          })
+          .catch((err) => alert(`Could not update priority: ${err.message}`));
+      } else if (e.key === 'c' && selectedId && activeSession) {
+        api
+          .updateAnnotations(selectedId, { cleanup: !activeSession.user.cleanup })
+          .then(() => {
+            fetchSessions();
+            fetchSessionDetail(selectedId);
+          })
+          .catch((err) => alert(`Could not update cleanup mark: ${err.message}`));
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [sessions, selectedId, activeSession, fetchSessions, fetchSessionDetail]);
+  }, [selectedId, activeSession, anyModalOpen, fetchSessions, fetchSessionDetail]);
 
   if (authError && sessions.length === 0) {
     return (
@@ -256,6 +334,7 @@ export const App: React.FC = () => {
       />
 
       {activeSession ? (
+        <ErrorBoundary resetKey={activeSession.id}>
         <SessionDetail
           session={activeSession}
           agents={agents}
@@ -266,15 +345,33 @@ export const App: React.FC = () => {
           onOpenSwitchModal={() => setShowSwitchModal(true)}
           onOpenSubscriptionsModal={() => setShowSubscriptionsModal(true)}
           onBackToList={() => setMobileView('list')}
+          onDeleted={handleDeleted}
           totalSessionsCount={sessions.length}
         />
+        </ErrorBoundary>
+      ) : loading ? (
+        <div className="app-loading">Loading sessions…</div>
       ) : (
         <div className="empty-state-view" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', flexDirection: 'column', gap: '12px' }}>
           <div style={{ fontSize: '40px' }}>⚡</div>
-          <div style={{ fontSize: '16px', fontWeight: 600 }}>No Session Selected</div>
+          <div style={{ fontSize: '16px', fontWeight: 600 }}>
+            {sessions.length === 0 ? 'No sessions yet' : 'No Session Selected'}
+          </div>
           <button className="btn-new" onClick={() => setShowNewModal(true)}>
             + Start a Session
           </button>
+          <div className="empty-state-hints">
+            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>N</kbd> new session · <kbd>j</kbd>/<kbd>k</kbd> move between sessions ·{' '}
+            <kbd>/</kbd> search
+            <br />
+            <kbd>p</kbd> cycle priority · <kbd>c</kbd> mark for cleanup · <kbd>Esc</kbd> close dialogs
+          </div>
+        </div>
+      )}
+
+      {offline && (
+        <div className="connection-banner" role="status">
+          Lost connection to the ACP Terminal server. Reconnecting…
         </div>
       )}
 

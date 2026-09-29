@@ -15,6 +15,8 @@ interface SidebarProps {
   onReturnToActiveSession?: () => void;
 }
 
+const needsYou = (s: SessionSummary) => s.state === 'blocked' || s.state === 'needs_you' || s.state === 'crashed';
+
 export const Sidebar: React.FC<SidebarProps> = ({
   sessions,
   selectedId,
@@ -30,34 +32,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [filterTab, setFilterTab] = useState<'all' | 'active' | 'needs_you' | 'cleanup'>('all');
   const [filterText, setFilterText] = useState('');
 
-  const filteredSessions = sessions.filter((s) => {
-    // Text search filter
-    if (filterText) {
-      const q = filterText.toLowerCase();
-      const match =
-        s.title.toLowerCase().includes(q) ||
-        s.cwd.toLowerCase().includes(q) ||
-        s.agentName.toLowerCase().includes(q) ||
-        (s.git?.branch && s.git.branch.toLowerCase().includes(q));
-      if (!match) return false;
-    }
+  const textFiltered = sessions.filter((s) => {
+    if (!filterText) return true;
+    const q = filterText.toLowerCase();
+    return (
+      s.title.toLowerCase().includes(q) ||
+      s.cwd.toLowerCase().includes(q) ||
+      s.agentName.toLowerCase().includes(q) ||
+      Boolean(s.git?.branch && s.git.branch.toLowerCase().includes(q))
+    );
+  });
 
-    // Tab filter
-    if (filterTab === 'active') {
-      return s.state === 'working' || s.state === 'blocked' || s.state === 'needs_you';
-    }
-    if (filterTab === 'needs_you') {
-      return s.state === 'blocked' || s.state === 'needs_you';
-    }
-    if (filterTab === 'cleanup') {
-      return s.user.cleanup;
-    }
+  // Tab counts come from the text-filtered set, so they stay put while switching tabs.
+  const tabCounts = {
+    all: textFiltered.length,
+    needs_you: textFiltered.filter(needsYou).length,
+    active: textFiltered.filter((s) => needsYou(s) || s.state === 'working').length,
+    cleanup: textFiltered.filter((s) => s.user.cleanup).length,
+  };
+
+  const filteredSessions = textFiltered.filter((s) => {
+    if (filterTab === 'active') return needsYou(s) || s.state === 'working';
+    if (filterTab === 'needs_you') return needsYou(s);
+    if (filterTab === 'cleanup') return s.user.cleanup;
     return true;
   });
 
   // Group sessions by attention buckets
   const groups = {
-    needs_you: filteredSessions.filter((s) => s.state === 'blocked' || s.state === 'needs_you' || s.state === 'crashed'),
+    needs_you: filteredSessions.filter(needsYou),
     working: filteredSessions.filter((s) => s.state === 'working'),
     parked: filteredSessions.filter((s) => s.state === 'parked'),
     quiet: filteredSessions.filter((s) => s.state === 'quiet'),
@@ -90,7 +93,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <input
           type="text"
           className="search-input"
-          placeholder="Filter sessions... (press / to search)"
+          placeholder="Filter by title, folder, agent or branch…"
+          aria-label="Filter sessions"
           value={filterText}
           onChange={(e) => setFilterText(e.target.value)}
         />
@@ -101,25 +105,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
           className={`filter-tab ${filterTab === 'all' ? 'active' : ''}`}
           onClick={() => setFilterTab('all')}
         >
-          All ({sessions.length})
+          All ({tabCounts.all})
         </button>
         <button
           className={`filter-tab ${filterTab === 'needs_you' ? 'active' : ''}`}
           onClick={() => setFilterTab('needs_you')}
         >
-          Needs You ({groups.needs_you.length})
+          Needs You ({tabCounts.needs_you})
         </button>
         <button
           className={`filter-tab ${filterTab === 'active' ? 'active' : ''}`}
           onClick={() => setFilterTab('active')}
         >
-          Active ({groups.needs_you.length + groups.working.length})
+          Active ({tabCounts.active})
         </button>
         <button
           className={`filter-tab ${filterTab === 'cleanup' ? 'active' : ''}`}
           onClick={() => setFilterTab('cleanup')}
         >
-          Cleanup
+          Cleanup{tabCounts.cleanup > 0 ? ` (${tabCounts.cleanup})` : ''}
         </button>
       </div>
 
@@ -223,7 +227,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {filteredSessions.length === 0 && (
           <div style={{ padding: '30px 16px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
-            No sessions match the filter.
+            {sessions.length === 0 ? (
+              <>
+                No sessions yet.
+                <br />
+                <button type="button" className="btn-link" onClick={onOpenNewModal}>
+                  Start your first agent session
+                </button>
+              </>
+            ) : filterText ? (
+              <>No sessions match “{filterText}”.</>
+            ) : (
+              <>Nothing in this tab right now.</>
+            )}
           </div>
         )}
       </div>
@@ -269,6 +285,16 @@ const SessionCard: React.FC<{
     <div
       className={`session-card ${session.state} ${isSelected ? 'active' : ''}`}
       onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-current={isSelected ? 'true' : undefined}
+      data-session-id={session.id}
     >
       <div className="session-card-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -316,7 +342,11 @@ const SessionCard: React.FC<{
         )}
       </div>
 
-      {session.reasons && session.reasons.length > 0 && (
+      {session.hasPendingPermission && session.pendingPermissionTitle ? (
+        <div className="reasons-hint approval-hint" title={session.pendingPermissionTitle}>
+          Approve: {session.pendingPermissionTitle}
+        </div>
+      ) : session.reasons && session.reasons.length > 0 && (
         <div className="reasons-hint" title={session.reasons.join(' | ')}>
           {session.reasons[session.reasons.length - 1]}
         </div>

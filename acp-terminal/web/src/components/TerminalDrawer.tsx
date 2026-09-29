@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { wsUrl } from '../api';
 
 interface TerminalDrawerProps {
   terminalId?: string;
@@ -52,9 +53,7 @@ export const TerminalDrawer: React.FC<TerminalDrawerProps> = ({ terminalId, sess
 
     // Attach to active terminal or dedicated interactive workspace session shell
     const targetId = terminalId || sessionId;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/terminal/${encodeURIComponent(targetId)}`;
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl(`/ws/terminal/${encodeURIComponent(targetId)}`));
     wsRef.current = ws;
 
     ws.onopen = () => {

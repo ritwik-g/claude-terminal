@@ -1,5 +1,6 @@
 import React, { useMemo, useEffect, useRef } from 'react';
 import { marked } from 'marked';
+import { escapeHtml, sanitizeHtml } from '../sanitize';
 
 interface MarkdownContentProps {
   content: string;
@@ -12,13 +13,15 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, class
   const html = useMemo(() => {
     if (!content) return '';
     try {
-      return marked.parse(content, {
-        gfm: true,
-        breaks: true,
-      }) as string;
+      return sanitizeHtml(
+        marked.parse(content, {
+          gfm: true,
+          breaks: true,
+        }) as string
+      );
     } catch (err) {
       console.error('Failed to parse markdown:', err);
-      return content;
+      return `<pre>${escapeHtml(content)}</pre>`;
     }
   }, [content]);
 

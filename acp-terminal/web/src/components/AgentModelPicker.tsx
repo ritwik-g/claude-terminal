@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useEscapeLayer } from '../hooks';
 import type { AgentDescriptor } from '../types';
 import { VendorIcon } from './VendorLogos';
 
@@ -396,6 +397,12 @@ export const AgentModelPicker: React.FC<AgentModelPickerProps> = ({
 
   const vendorRef = useRef<HTMLDivElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
+
+  // Esc closes an open dropdown without also closing the dialog around it.
+  useEscapeLayer(vendorOpen || modelOpen, () => {
+    setVendorOpen(false);
+    setModelOpen(false);
+  });
 
   // Close dropdowns on outside click
   useEffect(() => {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { api } from '../api';
+import { useEscapeLayer } from '../hooks';
+import { api, isHostMachine } from '../api';
 
 interface FolderEntry {
   name: string;
@@ -29,6 +30,9 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   const [isEditingPath, setIsEditingPath] = useState<boolean>(false);
   const [pathInput, setPathInput] = useState<string>('');
   const [nativeBrowsing, setNativeBrowsing] = useState<boolean>(false);
+
+  // Esc closes only this browser, not the New Session dialog underneath.
+  useEscapeLayer(true, onClose);
 
   const fetchDirectory = async (targetPath?: string) => {
     setLoading(true);
@@ -103,6 +107,8 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   return (
     <div className="modal-overlay folder-browser-overlay" onClick={onClose} style={{ zIndex: 1100 }}>
       <div
+        role="dialog"
+        aria-modal="true"
         className="modal-card folder-browser-card"
         onClick={(e) => e.stopPropagation()}
         style={{ width: '640px', maxWidth: '95vw', maxHeight: '88vh' }}
@@ -114,6 +120,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
             <span style={{ fontWeight: 700 }}>Select Project Folder</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {isHostMachine() && (
             <button
               type="button"
               className="btn-action"
@@ -125,6 +132,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
               <span>🖥️</span>
               <span>{nativeBrowsing ? 'Opening...' : 'Finder'}</span>
             </button>
+            )}
             <button
               type="button"
               className="close-button"

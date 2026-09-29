@@ -73,7 +73,7 @@ export const SwitchAgentModal: React.FC<SwitchAgentModalProps> = ({
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span>🔄 Failover / Switch Coding Agent</span>
         </div>
@@ -229,7 +229,11 @@ export const SwitchAgentModal: React.FC<SwitchAgentModalProps> = ({
           <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '12px', border: '1px solid var(--border-subtle)' }}>
             <div style={{ fontWeight: 600, marginBottom: '6px', color: 'var(--text-main)' }}>Context Transferred:</div>
             <div style={{ color: 'var(--text-muted)' }}>• Repository: <code>{currentSession.cwd}</code></div>
-            <div style={{ color: 'var(--text-muted)' }}>• Git branch: <code>{currentSession.git?.branch || 'main'}</code> ({currentSession.git?.uncommittedFiles || 0} uncommitted files)</div>
+            {currentSession.git?.branch ? (
+              <div style={{ color: 'var(--text-muted)' }}>• Git branch: <code>{currentSession.git.branch}</code> ({currentSession.git.uncommittedFiles || 0} uncommitted files)</div>
+            ) : (
+              <div style={{ color: 'var(--text-muted)' }}>• Git: not a git repository</div>
+            )}
             <div style={{ color: 'var(--text-muted)' }}>• Active goal: "{currentSession.lastPrompt || currentSession.recap}"</div>
             <div style={{ color: 'var(--text-muted)' }}>• History mode: <strong>{contextMode === 'compact' ? 'Compact summary of prior turns' : contextMode === 'full' ? 'Full recent turns' : 'Clean slate (None)'}</strong></div>
           </div>

@@ -12,15 +12,18 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({ onClose }) => {
     ips: string[];
     localUrl: string;
     networkUrls: string[];
+    lanEnabled?: boolean;
+    host?: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [copiedUrlIndex, setCopiedUrlIndex] = useState<number | null>(null);
   const [copiedToken, setCopiedToken] = useState(false);
 
   useEffect(() => {
     api.getNetworkInfo()
       .then((info) => setNetworkInfo(info))
-      .catch((err) => console.error('Failed to fetch network info:', err))
+      .catch((err) => setLoadError(err.message || 'Failed to load network info'))
       .finally(() => setLoading(false));
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -42,8 +45,8 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({ onClose }) => {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card network-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '580px' }}>
+    <div className="modal-overlay" onClick={onClose}>
+      <div role="dialog" aria-modal="true" className="modal-card network-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '580px' }}>
         <div className="modal-header">
           <div>
             <h3 style={{ margin: 0, fontSize: '17px', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -53,13 +56,26 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({ onClose }) => {
               Connect to ACP Terminal from any device on your Wi-Fi or local network.
             </div>
           </div>
-          <button className="btn-close" onClick={onClose}>✕</button>
+          <button type="button" className="btn-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
 
         <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {loading ? (
             <div style={{ padding: '30px', textAlign: 'center', color: 'var(--text-dim)' }}>
               Loading network interfaces...
+            </div>
+          ) : loadError ? (
+            <div style={{ padding: '20px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '8px' }}>
+              <div style={{ fontWeight: 600, color: '#f87171', marginBottom: '4px' }}>Could not load network info</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{loadError}</div>
+            </div>
+          ) : networkInfo?.lanEnabled === false ? (
+            <div style={{ padding: '20px', background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.3)', borderRadius: '8px' }}>
+              <div style={{ fontWeight: 600, color: '#fbbf24', marginBottom: '4px' }}>LAN access is off</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                The server is listening on <code>{networkInfo.host || '127.0.0.1'}</code>, so other devices cannot reach it.
+                Restart it with <code>HOST=0.0.0.0</code> to allow connections from your local network.
+              </div>
             </div>
           ) : !networkInfo || networkInfo.ips.length === 0 ? (
             <div style={{ padding: '20px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '8px' }}>

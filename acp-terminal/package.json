@@ -9,6 +9,7 @@
     "dev:web": "vite",
     "start": "tsx server/cli.ts",
     "build": "vite build",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p web",
     "test": "NODE_ENV=test tsx scripts/test-acp.ts",
     "smoke": "NODE_ENV=test tsx scripts/smoke.ts",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin*/spawn-helper 2>/dev/null || true"

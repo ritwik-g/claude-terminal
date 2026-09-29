@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { AcpSession, AgentDescriptor, FileAttachment, TurnMessage, SlashCommandItem } from '../types';
-import { api } from '../api';
+import { api, withToken } from '../api';
+import { useEscapeLayer } from '../hooks';
 import { TerminalDrawer } from './TerminalDrawer';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolCallView } from './ToolCallView';
@@ -8,24 +9,33 @@ import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
 import { getSlashCommandsForAgent, filterSlashCommands } from '../slashCommands';
 
+export function nextPriority(current: 'p0' | 'p1' | 'p2' | null | undefined): 'p0' | 'p1' | 'p2' | null {
+  const cycle: Record<string, 'p0' | 'p1' | 'p2' | null> = { null: 'p0', p0: 'p1', p1: 'p2', p2: null };
+  return cycle[String(current ?? null)];
+}
+
 interface AgentTurnExecutionCardProps {
   turn: TurnMessage;
   isWorking: boolean;
+  isBlocked?: boolean;
   isLatest: boolean;
 }
 
 export const AgentTurnExecutionCard: React.FC<AgentTurnExecutionCardProps> = ({
   turn,
   isWorking,
+  isBlocked,
   isLatest,
 }) => {
   const toolCalls = turn.toolCalls || [];
   const hasThoughts = Boolean(turn.thoughts && turn.thoughts.trim().length > 0);
   const hasInternalWork = hasThoughts || toolCalls.length > 0;
 
-  if (!hasInternalWork) return null;
-
-  const isActiveTurn = isWorking && isLatest;
+  // A turn waiting on a permission decision is still in flight, not done.
+  const isAwaitingApproval = Boolean(isBlocked) && isLatest;
+  const isActiveTurn = (isWorking || Boolean(isBlocked)) && isLatest;
+  // Hooks run on every render: a turn often starts as plain text and gains its
+  // first tool call later, so the early return below must come after them.
   const [isOpen, setIsOpen] = useState(isActiveTurn);
 
   useEffect(() => {
@@ -33,6 +43,8 @@ export const AgentTurnExecutionCard: React.FC<AgentTurnExecutionCardProps> = ({
       setIsOpen(true);
     }
   }, [isActiveTurn]);
+
+  if (!hasInternalWork) return null;
 
   const runningTool = toolCalls.find((tc) => tc.status === 'running' || tc.status === 'pending');
   const completedTools = toolCalls.filter((tc) => tc.status === 'completed').length;
@@ -53,7 +65,13 @@ export const AgentTurnExecutionCard: React.FC<AgentTurnExecutionCardProps> = ({
             <span className="progress-status-icon">🧠</span>
           )}
           <span className="progress-title">
-            {isActiveTurn ? (
+            {isAwaitingApproval ? (
+              runningTool ? (
+                <>Waiting for your approval: <code className="active-tool-code">{runningTool.title}</code></>
+              ) : (
+                'Waiting for your approval...'
+              )
+            ) : isActiveTurn ? (
               runningTool ? (
                 <>Running: <code className="active-tool-code">{runningTool.title}</code></>
               ) : (
@@ -73,6 +91,11 @@ export const AgentTurnExecutionCard: React.FC<AgentTurnExecutionCardProps> = ({
             {hasThoughts && (
               <span className="progress-badge thoughts">
                 💭 Reasoning
+              </span>
+            )}
+            {isAwaitingApproval && (
+              <span className="progress-badge awaiting">
+                ⚠ Needs approval
               </span>
             )}
             {!isActiveTurn && (
@@ -122,6 +145,7 @@ interface SessionDetailProps {
   onOpenSwitchModal: () => void;
   onOpenSubscriptionsModal?: () => void;
   onBackToList?: () => void;
+  onDeleted?: (id: string) => void;
   totalSessionsCount?: number;
 }
 
@@ -132,6 +156,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   onOpenSwitchModal,
   onOpenSubscriptionsModal,
   onBackToList,
+  onDeleted,
   totalSessionsCount,
 }) => {
   const [activeTab, setActiveTab] = useState<'conversation' | 'terminal' | 'usage'>('conversation');
@@ -150,7 +175,13 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  useEscapeLayer(Boolean(previewImage), () => setPreviewImage(null));
+  useEscapeLayer(showMobileActions, () => setShowMobileActions(false));
+  useEscapeLayer(showModelPicker, () => setShowModelPicker(false));
   const chatEndRef = useRef<HTMLDivElement>(null);
+  // Follow new output only while the reader is at the bottom; scrolling up to
+  // read earlier turns must not be yanked back on every streamed chunk.
+  const stickToBottomRef = useRef(true);
   const composerPickerRef = useRef<HTMLDivElement>(null);
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -304,8 +335,14 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   }, [session.title]);
 
   useEffect(() => {
+    stickToBottomRef.current = true;
+  }, [session.id, activeTab]);
+
+  useEffect(() => {
     if (activeTab === 'conversation') {
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      // Instant, not smooth: a smooth scroll emits intermediate scroll events that
+      // would read as "user scrolled up" and unstick the view.
+      if (stickToBottomRef.current) chatEndRef.current?.scrollIntoView({ block: 'end' });
     } else if (activeTab === 'usage') {
       const el = document.querySelector('.session-usage-tab-content');
       if (el) el.scrollTop = 0;
@@ -421,6 +458,13 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
       }
     }
 
+    if (
+      session.state === 'working' &&
+      !confirm('The agent is still working on the current turn. Stop it and send this message instead?')
+    ) {
+      return;
+    }
+
     const outgoingAttachments = [...attachments];
     setPromptText('');
     setAttachments([]);
@@ -518,44 +562,59 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
     }
   };
 
-  const handleTogglePriority = async () => {
-    const cycle: Record<string, 'p0' | 'p1' | 'p2' | null> = {
-      null: 'p0',
-      p0: 'p1',
-      p1: 'p2',
-      p2: null,
-    };
-    const next = cycle[String(session.user.priority)];
-    await api.updateAnnotations(session.id, { priority: next });
-    onRefresh();
+  const updateAnnotations = async (patch: Parameters<typeof api.updateAnnotations>[1]) => {
+    try {
+      await api.updateAnnotations(session.id, patch);
+      onRefresh();
+    } catch (err: any) {
+      alert(`Could not update session: ${err.message}`);
+    }
   };
 
-  const handleTogglePin = async () => {
-    await api.updateAnnotations(session.id, { pinned: !session.user.pinned });
-    onRefresh();
-  };
+  const handleTogglePriority = () =>
+    updateAnnotations({ priority: nextPriority(session.user.priority) });
 
-  const handleToggleCleanup = async () => {
-    await api.updateAnnotations(session.id, { cleanup: !session.user.cleanup });
-    onRefresh();
-  };
+  const handleTogglePin = () => updateAnnotations({ pinned: !session.user.pinned });
 
-  const handleToggleAutoApprove = async () => {
-    await api.updateAnnotations(session.id, { autoApprove: !session.user.autoApprove });
-    onRefresh();
-  };
+  const handleToggleCleanup = () => updateAnnotations({ cleanup: !session.user.cleanup });
+
+  const handleToggleAutoApprove = () => updateAnnotations({ autoApprove: !session.user.autoApprove });
 
   const handleRename = async () => {
-    if (editableTitle !== session.title) {
-      await api.renameSession(session.id, editableTitle);
-      onRefresh();
+    const next = editableTitle.trim();
+    if (!next) {
+      // An empty title would leave the session unlabeled everywhere; revert instead.
+      setEditableTitle(session.title);
+      return;
+    }
+    if (next !== session.title) {
+      try {
+        await api.renameSession(session.id, next);
+        onRefresh();
+      } catch (err: any) {
+        alert(`Could not rename session: ${err.message}`);
+        setEditableTitle(session.title);
+      }
+    }
+  };
+
+  const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      // Blurring triggers onBlur → handleRename, so the rename is sent once.
+      e.currentTarget.blur();
+    } else if (e.key === 'Escape') {
+      setEditableTitle(session.title);
+      e.currentTarget.blur();
     }
   };
 
   const handleDelete = async () => {
-    if (confirm(`Delete session "${session.title}"?`)) {
+    if (!confirm(`Delete session "${session.title}"? This stops its agent and removes its history.`)) return;
+    try {
       await api.deleteSession(session.id);
-      onRefresh();
+      onDeleted?.(session.id);
+    } catch (err: any) {
+      alert(`Could not delete session: ${err.message}`);
     }
   };
 
@@ -745,7 +804,8 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
     if (!lastAgentText) return chips;
     const textLower = lastAgentText.toLowerCase();
 
-    if (textLower.includes('pr') || textLower.includes('pull request')) {
+    // Word boundaries matter: a bare includes('pr') matched "approval", "prompt", "improve"...
+    if (session.git?.branch && /\b(pr|pull request)\b/.test(textLower)) {
       chips.push({
         label: '🚀 Proceed with PR',
         prompt: 'Please proceed with creating the pull request.',
@@ -758,7 +818,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
       });
     }
 
-    if (textLower.includes('test') || textLower.includes('validate') || textLower.includes('verify')) {
+    if (/\b(tests?|validate|verify)\b/.test(textLower)) {
       chips.push({
         label: '🧪 Run tests',
         prompt: 'Please run the test suite and verify everything passes.',
@@ -786,7 +846,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
     });
 
     return chips;
-  }, [lastAgentText, session.state, session.promptSuggestion, hasActiveToolCalls]);
+  }, [lastAgentText, session.state, session.promptSuggestion, session.git?.branch, hasActiveToolCalls]);
 
   const renderEngineSwitcherPopover = () => (
     <div className="engine-switcher-popover popover-above">
@@ -1020,12 +1080,16 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             value={editableTitle}
             onChange={(e) => setEditableTitle(e.target.value)}
             onBlur={handleRename}
-            onKeyDown={(e) => e.key === 'Enter' && handleRename()}
+            onKeyDown={handleTitleKeyDown}
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            {session.git?.branch && (
+            {session.git?.branch ? (
               <span className="branch-tag" title={session.cwd}>
                 🌿 {session.git.branch}
+              </span>
+            ) : (
+              <span className="branch-tag" title={session.cwd}>
+                📁 {session.cwd.split('/').filter(Boolean).pop() || session.cwd}
               </span>
             )}
             <div style={{ position: 'relative' }}>
@@ -1115,6 +1179,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className="btn-action"
             onClick={handleTogglePriority}
             title={`Toggle priority (P0/P1/P2) - Current: ${session.user.priority ? session.user.priority.toUpperCase() : 'None'}`}
+            aria-label={`Priority: ${session.user.priority ? session.user.priority.toUpperCase() : 'none'}`}
           >
             ⭐{session.user.priority ? ` ${session.user.priority.toUpperCase()}` : ''}
           </button>
@@ -1122,6 +1187,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className="btn-action"
             onClick={handleTogglePin}
             title={session.user.pinned ? 'Pinned to top (Click to unpin)' : 'Pin session to top'}
+            aria-label={session.user.pinned ? 'Unpin session' : 'Pin session'}
             style={{ color: session.user.pinned ? '#38bdf8' : 'inherit' }}
           >
             📌
@@ -1130,6 +1196,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className="btn-action"
             onClick={handleToggleCleanup}
             title={session.user.cleanup ? 'Marked cleaned up (Click to unmark)' : 'Mark session cleaned up'}
+            aria-label={session.user.cleanup ? 'Unmark cleanup' : 'Mark for cleanup'}
             style={{ color: session.user.cleanup ? '#10b981' : 'inherit' }}
           >
             ✓
@@ -1165,6 +1232,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className="btn-action"
             onClick={handleDelete}
             title="Delete session"
+            aria-label="Delete session"
             style={{ color: '#ef4444' }}
           >
             🗑
@@ -1178,6 +1246,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className={`btn-mobile-auto ${session.user.autoApprove ? 'active' : ''}`}
             onClick={handleToggleAutoApprove}
             title={session.user.autoApprove ? 'Auto-Approve: ON' : 'Auto-Approve: OFF'}
+            aria-label={session.user.autoApprove ? 'Auto-approve on' : 'Auto-approve off'}
           >
             ⚡
           </button>
@@ -1186,6 +1255,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className="btn-mobile-more"
             onClick={() => setShowMobileActions(true)}
             title="More actions"
+            aria-label="More actions"
           >
             ⋯
           </button>
@@ -1200,7 +1270,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             value={editableTitle}
             onChange={(e) => setEditableTitle(e.target.value)}
             onBlur={handleRename}
-            onKeyDown={(e) => e.key === 'Enter' && handleRename()}
+            onKeyDown={handleTitleKeyDown}
             placeholder="Session title..."
           />
         </div>
@@ -1301,7 +1371,13 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
 
       {/* Body Views */}
       {activeTab === 'conversation' ? (
-        <div className="conversation-body">
+        <div
+          className="conversation-body"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          }}
+        >
           {session.turns.length === 0 && (
             <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-dim)' }}>
               <div style={{ fontSize: '32px', marginBottom: '12px' }}>💬</div>
@@ -1365,11 +1441,11 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                             {att.isImage ? (
                               <div
                                 className="turn-image-container"
-                                onClick={() => setPreviewImage(att.url || att.data || null)}
+                                onClick={() => setPreviewImage(att.url ? withToken(att.url) : att.data || null)}
                                 title="Click to view full size image"
                               >
                                 <img
-                                  src={att.url || att.data}
+                                  src={att.url ? withToken(att.url) : att.data}
                                   alt={att.name}
                                   className="turn-image-thumb"
                                 />
@@ -1377,7 +1453,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                               </div>
                             ) : (
                               <a
-                                href={att.url || '#'}
+                                href={att.url ? withToken(att.url) : '#'}
                                 download={att.name}
                                 className="turn-file-card"
                                 title={`Download ${att.name}`}
@@ -1445,6 +1521,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                     <AgentTurnExecutionCard
                       turn={turn}
                       isWorking={session.state === 'working'}
+                      isBlocked={Boolean(session.pendingPermission)}
                       isLatest={index === session.turns.length - 1}
                     />
 
@@ -1464,7 +1541,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
           {/* Turn Status Banner & Quick Action Suggestions */}
           {session.turns.length > 0 && (
             <div className="conversation-status-area">
-              {session.state === 'working' ? (
+              {session.state === 'working' && !session.pendingPermission ? (
                 <div className="turn-status-banner working">
                   <div className="status-banner-left">
                     <span className="pulse-indicator" />
@@ -1494,6 +1571,15 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                     >
                       ⏹ Stop Turn
                     </button>
+                  </div>
+                </div>
+              ) : session.pendingPermission ? (
+                <div className="turn-status-banner blocked">
+                  <div className="status-banner-left">
+                    <span className="status-dot">⚠️</span>
+                    <span className="status-banner-text">
+                      <strong>Waiting for your approval</strong> · {session.pendingPermission.title}
+                    </span>
                   </div>
                 </div>
               ) : (

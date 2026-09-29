@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { AgentDescriptor } from '../types';
-import { api } from '../api';
+import { api, isHostMachine } from '../api';
 import { AgentModelPicker } from './AgentModelPicker';
 import { FolderBrowserModal } from './FolderBrowserModal';
 
@@ -45,7 +45,9 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 
   useEffect(() => {
     api.getFolders().then((res) => {
-      setCwd(res.current);
+      // Prefill with the most recent project rather than $HOME, and never
+      // overwrite a path the user already started typing.
+      setCwd((prev) => prev || res.recent?.[0] || res.current);
       setSuggestedFolders(res.entries);
       if (res.recent && res.recent.length > 0) {
         setRecentWorkspaces(res.recent);
@@ -94,7 +96,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   return (
     <>
       <div className="modal-overlay" onClick={onClose}>
-        <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div role="dialog" aria-modal="true" className="modal-card" onClick={(e) => e.stopPropagation()}>
           <div className="modal-header">
             <span>Start New ACP Agent Session</span>
           </div>
@@ -151,6 +153,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                     <span>📂</span>
                     <span>Browse...</span>
                   </button>
+                  {isHostMachine() && (
                   <button
                     type="button"
                     className="btn-action"
@@ -170,6 +173,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                     <span>🖥️</span>
                     <span>{isNativeBrowsing ? '...' : 'Finder'}</span>
                   </button>
+                  )}
                 </div>
 
                 {/* Quick Pick: Recent Workspaces */}
