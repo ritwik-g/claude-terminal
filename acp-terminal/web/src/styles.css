@@ -4150,3 +4150,11 @@ body {
   font-size: 11px;
   padding: 1px 5px;
 }
+
+/* On narrow screens code lines reach the right edge, so the floating Copy
+   button would sit on top of the code; give it its own row instead. */
+@media (max-width: 768px) {
+  .markdown-content pre:has(.code-copy-btn) {
+    padding-top: 36px;
+  }
+}

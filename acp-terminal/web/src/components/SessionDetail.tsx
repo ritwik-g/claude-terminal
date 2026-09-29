@@ -578,6 +578,12 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
 
   const handleToggleCleanup = () => updateAnnotations({ cleanup: !session.user.cleanup });
 
+  const isSnoozed = Boolean(session.user.snoozedUntil && session.user.snoozedUntil > Date.now());
+  // Snoozing drops the session to the bottom of the ranking for an hour; the
+  // server wakes it automatically when the time is up.
+  const handleToggleSnooze = () =>
+    updateAnnotations({ snoozedUntil: isSnoozed ? null : Date.now() + 60 * 60 * 1000 });
+
   const handleToggleAutoApprove = () => updateAnnotations({ autoApprove: !session.user.autoApprove });
 
   const handleRename = async () => {
@@ -738,6 +744,10 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   // Model pricing & context window calculation
   const getSessionPricing = () => {
     const m = (session.model || '').toLowerCase();
+    if (session.agentId === 'mock') {
+      // The built-in demo agent runs locally and costs nothing.
+      return { contextWindow: 200_000, inputPerMillion: 0, outputPerMillion: 0, cachePerMillion: 0 };
+    }
     if (m.includes('gemini') || m.includes('flash') || m.includes('pro')) {
       const isPro = m.includes('pro');
       return {
@@ -1200,6 +1210,19 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             style={{ color: session.user.cleanup ? '#10b981' : 'inherit' }}
           >
             ✓
+          </button>
+          <button
+            className="btn-action"
+            onClick={handleToggleSnooze}
+            title={
+              isSnoozed
+                ? `Snoozed until ${new Date(session.user.snoozedUntil!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (click to wake)`
+                : 'Snooze for 1 hour: move to the bottom of the list'
+            }
+            aria-label={isSnoozed ? 'Wake session' : 'Snooze session for 1 hour'}
+            style={{ color: isSnoozed ? '#a78bfa' : 'inherit' }}
+          >
+            💤
           </button>
           {session.isAgentRunning !== false ? (
             <button
@@ -2308,6 +2331,15 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                   <div className="mobile-action-desc">Filter completed work away from active queue</div>
                 </div>
                 <span className="mobile-action-tag">{session.user.cleanup ? 'Cleaned' : 'Active'}</span>
+              </button>
+
+              <button type="button" className="mobile-action-item" onClick={handleToggleSnooze}>
+                <span className="mobile-action-icon">💤</span>
+                <div className="mobile-action-info">
+                  <div className="mobile-action-label">{isSnoozed ? 'Wake Session' : 'Snooze for 1 Hour'}</div>
+                  <div className="mobile-action-desc">Move to the bottom of the list until later</div>
+                </div>
+                <span className="mobile-action-tag">{isSnoozed ? 'Snoozed' : 'Off'}</span>
               </button>
 
               {onOpenSubscriptionsModal && (
