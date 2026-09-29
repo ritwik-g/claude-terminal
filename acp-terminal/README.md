@@ -77,7 +77,7 @@ Claude Terminal pioneered **attention ranking**—sorting AI coding sessions by 
 ## Supported Agents
 
 ### 1. Built-in Demo Agent (`mock`)
-- Ships pre-installed and runs out of the box with zero configuration or API keys.
+- Ships pre-installed and needs no configuration or API keys. It is hidden from the agent picker unless you start the server with `ACP_ENABLE_MOCK=1` (it is always listed under `NODE_ENV=test`).
 - Fully exercises the ACP spec: streaming thoughts, generating text, requesting permissions, and running terminal commands.
 
 ### 2. OpenAI Codex ACP (`codex`)
@@ -114,6 +114,11 @@ npm test
 npm run smoke
 ```
 
+Type-check the server and the web client:
+```bash
+npm run typecheck
+```
+
 ### 3. Build & Start the Server
 ```bash
 npm run build
@@ -139,11 +144,14 @@ Open **http://127.0.0.1:5280**.
 | :--- | :--- |
 | `j` / `↓` | Select next session |
 | `k` / `↑` | Select previous session |
-| `Enter` | Open selected session / submit prompt |
+| `Enter` | Open selected session (mobile) / submit prompt |
+| `⌘N` / `Ctrl+N` | New session |
 | `/` | Open full-text search modal across all sessions |
 | `p` | Cycle priority (`P0` → `P1` → `P2` → Normal) |
 | `c` | Toggle cleanup mark |
-| `Esc` | Dismiss open modals |
+| `Esc` | Close the topmost dropdown or dialog |
+
+Single-key shortcuts are ignored while typing, while a dialog is open, inside the terminal, and when combined with ⌘/Ctrl/Alt, so ⌘C still copies.
 
 ---
 
