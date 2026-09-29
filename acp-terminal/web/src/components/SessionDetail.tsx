@@ -2,9 +2,11 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { AcpSession, AgentDescriptor, FileAttachment, TurnMessage, SlashCommandItem } from '../types';
 import { api, withToken } from '../api';
 import { useEscapeLayer } from '../hooks';
-import { TerminalDrawer } from './TerminalDrawer';
+import { LiveTerminalPanel } from './LiveTerminalPanel';
+import { AgentTurnBody } from './AgentTurn';
+import { ActivityStrip } from './ActivityStrip';
+import { commandOf, isShellCall } from '../toolDisplay';
 import { MarkdownContent } from './MarkdownContent';
-import { ToolCallView } from './ToolCallView';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
 import { getSlashCommandsForAgent, filterSlashCommands } from '../slashCommands';
@@ -13,130 +15,6 @@ export function nextPriority(current: 'p0' | 'p1' | 'p2' | null | undefined): 'p
   const cycle: Record<string, 'p0' | 'p1' | 'p2' | null> = { null: 'p0', p0: 'p1', p1: 'p2', p2: null };
   return cycle[String(current ?? null)];
 }
-
-interface AgentTurnExecutionCardProps {
-  turn: TurnMessage;
-  isWorking: boolean;
-  isBlocked?: boolean;
-  isLatest: boolean;
-}
-
-export const AgentTurnExecutionCard: React.FC<AgentTurnExecutionCardProps> = ({
-  turn,
-  isWorking,
-  isBlocked,
-  isLatest,
-}) => {
-  const toolCalls = turn.toolCalls || [];
-  const hasThoughts = Boolean(turn.thoughts && turn.thoughts.trim().length > 0);
-  const hasInternalWork = hasThoughts || toolCalls.length > 0;
-
-  // A turn waiting on a permission decision is still in flight, not done.
-  const isAwaitingApproval = Boolean(isBlocked) && isLatest;
-  const isActiveTurn = (isWorking || Boolean(isBlocked)) && isLatest;
-  // Hooks run on every render: a turn often starts as plain text and gains its
-  // first tool call later, so the early return below must come after them.
-  const [isOpen, setIsOpen] = useState(isActiveTurn);
-
-  useEffect(() => {
-    if (isActiveTurn) {
-      setIsOpen(true);
-    }
-  }, [isActiveTurn]);
-
-  if (!hasInternalWork) return null;
-
-  const runningTool = toolCalls.find((tc) => tc.status === 'running' || tc.status === 'pending');
-  const completedTools = toolCalls.filter((tc) => tc.status === 'completed').length;
-  const failedTools = toolCalls.filter((tc) => tc.status === 'failed').length;
-
-  return (
-    <div className={`antigravity-progress-card ${isActiveTurn ? 'active' : 'completed'} ${isOpen ? 'expanded' : 'collapsed'}`}>
-      <div
-        className="progress-card-header"
-        onClick={() => setIsOpen(!isOpen)}
-        title="Click to toggle internal reasoning & tool executions"
-      >
-        <div className="progress-header-left">
-          <span className="progress-chevron">{isOpen ? '▾' : '▸'}</span>
-          {isActiveTurn ? (
-            <span className="progress-spinner-dot" />
-          ) : (
-            <span className="progress-status-icon">🧠</span>
-          )}
-          <span className="progress-title">
-            {isAwaitingApproval ? (
-              runningTool ? (
-                <>Waiting for your approval: <code className="active-tool-code">{runningTool.title}</code></>
-              ) : (
-                'Waiting for your approval...'
-              )
-            ) : isActiveTurn ? (
-              runningTool ? (
-                <>Running: <code className="active-tool-code">{runningTool.title}</code></>
-              ) : (
-                'Analyzing and reasoning...'
-              )
-            ) : (
-              'Internal reasoning & execution steps'
-            )}
-          </span>
-          <div className="progress-header-badges">
-            {toolCalls.length > 0 && (
-              <span className="progress-badge tools">
-                ⚡ {toolCalls.length} tool {toolCalls.length === 1 ? 'call' : 'calls'}
-                {failedTools > 0 ? ` (${failedTools} failed)` : ''}
-              </span>
-            )}
-            {hasThoughts && (
-              <span className="progress-badge thoughts">
-                💭 Reasoning
-              </span>
-            )}
-            {isAwaitingApproval && (
-              <span className="progress-badge awaiting">
-                ⚠ Needs approval
-              </span>
-            )}
-            {!isActiveTurn && (
-              <span className="progress-badge done">
-                ✓ Done
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="progress-header-right">
-          <span className="progress-toggle-hint">
-            {isOpen ? 'Collapse' : 'Show details'}
-          </span>
-        </div>
-      </div>
-
-      {isOpen && (
-        <div className="progress-card-body">
-          {hasThoughts && (
-            <div className="internal-thoughts-block">
-              <div className="internal-thoughts-label">
-                <span>💭 Internal Thought Process</span>
-              </div>
-              <div className="internal-thoughts-content">
-                <MarkdownContent content={turn.thoughts!} />
-              </div>
-            </div>
-          )}
-
-          {toolCalls.length > 0 && (
-            <div className="internal-tools-list">
-              {toolCalls.map((tc) => (
-                <ToolCallView key={tc.id} toolCall={tc} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
 
 interface SessionDetailProps {
   session: AcpSession;
@@ -179,6 +57,10 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   useEscapeLayer(showMobileActions, () => setShowMobileActions(false));
   useEscapeLayer(showModelPicker, () => setShowModelPicker(false));
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const shellCommandCount = session.turns.reduce(
+    (n, t) => n + (t.toolCalls || []).filter((c) => isShellCall(c) && Boolean(commandOf(c))).length,
+    0
+  );
   // Follow new output only while the reader is at the bottom; scrolling up to
   // read earlier turns must not be yanked back on every streamed chunk.
   const stickToBottomRef = useRef(true);
@@ -1359,13 +1241,14 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className={`view-tab ${activeTab === 'conversation' ? 'active' : ''}`}
             onClick={() => setActiveTab('conversation')}
           >
-            Conversation ({session.turns.length} turns)
+            Conversation
           </button>
           <button
             className={`view-tab ${activeTab === 'terminal' ? 'active' : ''}`}
             onClick={() => setActiveTab('terminal')}
           >
-            Live Terminal {session.activeTerminalId ? '●' : ''}
+            Terminal
+            {shellCommandCount > 0 && <span className="tab-count">{shellCommandCount}</span>}
           </button>
           <button
             className={`view-tab ${activeTab === 'usage' ? 'active' : ''}`}
@@ -1394,6 +1277,8 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
 
       {/* Body Views */}
       {activeTab === 'conversation' ? (
+        <>
+        <ActivityStrip session={session} />
         <div
           className="conversation-body"
           onScroll={(e) => {
@@ -1540,20 +1425,14 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                       </div>
                     </div>
 
-                    {/* Antigravity-Style Collapsible Progress Card */}
-                    <AgentTurnExecutionCard
+                    <AgentTurnBody
                       turn={turn}
-                      isWorking={session.state === 'working'}
-                      isBlocked={Boolean(session.pendingPermission)}
-                      isLatest={index === session.turns.length - 1}
+                      isActiveTurn={
+                        index === session.turns.length - 1 &&
+                        (session.state === 'working' || Boolean(session.pendingPermission))
+                      }
+                      isAwaitingApproval={index === session.turns.length - 1 && Boolean(session.pendingPermission)}
                     />
-
-                    {/* Clean Final Response Markdown */}
-                    {turn.content && (
-                      <div className="agent-turn-content">
-                        <MarkdownContent content={turn.content} />
-                      </div>
-                    )}
                   </div>
                 );
               })()}
@@ -1642,11 +1521,9 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
           )}
           <div ref={chatEndRef} />
         </div>
+        </>
       ) : activeTab === 'terminal' ? (
-        <TerminalDrawer
-          terminalId={session.activeTerminalId}
-          sessionId={session.id}
-        />
+        <LiveTerminalPanel session={session} />
       ) : (
         <div className="session-usage-tab-content">
           {/* Top Context Meter Banner */}

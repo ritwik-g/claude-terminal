@@ -57,6 +57,37 @@ export interface ToolCallRecord {
   error?: string;
   startedAt: number;
   completedAt?: number;
+  /** Agent-side tool name (e.g. Bash, Read, Agent), from _meta.claudeCode.toolName or ACP `name`. */
+  toolName?: string;
+  /** Human description of the call when the agent gives one (e.g. Bash `description`). */
+  description?: string;
+  /** Set on calls made by a subagent: the id of the tool call that spawned it. */
+  parentToolUseId?: string;
+  /** True when this call spawns a subagent (Claude's Agent/Task tool). */
+  isSubagent?: boolean;
+  subagentType?: string;
+  /** Text the subagent streamed back, kept out of the main conversation. */
+  subagentText?: string;
+  /** Shell exit code, from ACP terminal_exit meta. */
+  exitCode?: number | null;
+  /** The command keeps running after the call returns (background shell, async agent). */
+  background?: boolean;
+}
+
+/**
+ * The chronological parts of an agent turn. Agents interleave several messages
+ * with tool calls in one turn; keeping the order lets the UI show them as
+ * separate messages instead of one merged blob.
+ */
+export type TurnSegment =
+  | { kind: 'text'; id: string; text: string; messageId?: string }
+  | { kind: 'thought'; id: string; text: string }
+  | { kind: 'tool'; id: string; toolCallId: string };
+
+export interface PlanEntry {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  priority?: 'high' | 'medium' | 'low';
 }
 
 export interface FileAttachment {
@@ -77,6 +108,7 @@ export interface TurnMessage {
   thoughts?: string;
   attachments?: FileAttachment[];
   toolCalls?: ToolCallRecord[];
+  segments?: TurnSegment[];
   timestamp: number;
   agentId?: string;
   agentName?: string;
@@ -152,6 +184,8 @@ export interface AcpSession {
   rateLimits?: SessionRateLimits;
   isAgentRunning?: boolean;
   agentStopped?: boolean; // Set by an explicit Stop; ranks the session 'parked' until restarted
+  /** The agent's latest todo list (ACP `plan` update). */
+  plan?: PlanEntry[];
 }
 
 export interface SessionSummary {

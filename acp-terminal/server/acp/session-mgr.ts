@@ -6,11 +6,11 @@ import { store } from '../store.js';
 import { getGitInfo } from '../git.js';
 import { rankSession, sortSessions } from '../rank.js';
 import { getAgent, hasAgent } from '../agents/registry.js';
-import { AcpClientHost, HostClosedError, TurnInFlightError, normalizeClaudeModel } from './client-host.js';
+import { AcpClientHost, HostClosedError, TurnInFlightError, normalizeClaudeModel, type ChunkMeta } from './client-host.js';
 import { ptyManager } from '../pty-manager.js';
 import { getUploadsDir } from '../paths.js';
 import { getClaudeRateLimits, updateClaudeRateLimitsFromSdk } from '../subscriptions.js';
-import type { AcpSession, ContextTransferMode, FileAttachment, PendingPermission, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
+import type { AcpSession, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
 
 /**
  * Format conversation history into a structured briefing block for context transfer.
@@ -393,9 +393,7 @@ export class SessionManager extends EventEmitter {
 
     let activeAgentTurn: TurnMessage | null = null;
 
-    host.on('thought', (text: string) => {
-      const s = store.get(session.id);
-      if (!s) return;
+    const ensureAgentTurn = (s: AcpSession): TurnMessage => {
       if (!activeAgentTurn) {
         activeAgentTurn = {
           id: `msg-${Date.now()}`,
@@ -403,6 +401,7 @@ export class SessionManager extends EventEmitter {
           thoughts: '',
           content: '',
           toolCalls: [],
+          segments: [],
           timestamp: Date.now(),
           agentId: s.agentId,
           agentName: s.agentName,
@@ -410,68 +409,76 @@ export class SessionManager extends EventEmitter {
         };
         s.turns.push(activeAgentTurn);
       }
-      activeAgentTurn.thoughts = (activeAgentTurn.thoughts || '') + text;
-      this.emit('sessionStream', { sessionId: s.id, type: 'thought', text, turn: activeAgentTurn });
+      activeAgentTurn.segments = activeAgentTurn.segments || [];
+      return activeAgentTurn;
+    };
+
+    host.on('thought', (text: string, meta: ChunkMeta) => {
+      const s = store.get(session.id);
+      if (!s) return;
+      if (meta.parentToolUseId) return; // subagent reasoning stays out of the main transcript
+      const turn = ensureAgentTurn(s);
+      turn.thoughts = (turn.thoughts || '') + text;
+      appendTextSegment(turn, 'thought', text);
+      this.emit('sessionStream', { sessionId: s.id, type: 'thought', text, turn });
     });
 
-    host.on('message', (text: string) => {
+    host.on('message', (text: string, meta: ChunkMeta) => {
       const s = store.get(session.id);
       if (!s) return;
-      if (!activeAgentTurn) {
-        activeAgentTurn = {
-          id: `msg-${Date.now()}`,
-          role: 'agent',
-          thoughts: '',
-          content: '',
-          toolCalls: [],
-          timestamp: Date.now(),
-          agentId: s.agentId,
-          agentName: s.agentName,
-          model: s.model,
-        };
-        s.turns.push(activeAgentTurn);
+      if (meta.parentToolUseId) {
+        // A subagent's reply belongs to the call that spawned it, not the main thread.
+        const owner = findToolCall(s, meta.parentToolUseId);
+        if (owner) {
+          owner.call.subagentText = (owner.call.subagentText || '') + text;
+          this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: owner.call, turn: owner.turn });
+        }
+        return;
       }
-      activeAgentTurn.content = (activeAgentTurn.content || '') + text;
-      s.recap = activeAgentTurn.content.slice(0, 160).replace(/\n/g, ' ') + (activeAgentTurn.content.length > 160 ? '...' : '');
-      this.emit('sessionStream', { sessionId: s.id, type: 'message', text, turn: activeAgentTurn });
+      const turn = ensureAgentTurn(s);
+      // A new messageId starts a new message; join with a paragraph break so the
+      // aggregate content doesn't glue sentences together ("…instead.I'll…").
+      const startsNewMessage = Boolean(turn.content) && !continuesLastText(turn, meta.messageId);
+      turn.content = (turn.content || '') + (startsNewMessage && !turn.content!.endsWith('\n') ? '\n\n' : '') + text;
+      appendTextSegment(turn, 'text', text, meta.messageId);
+      s.recap = turn.content.slice(0, 160).replace(/\n/g, ' ') + (turn.content.length > 160 ? '...' : '');
+      this.emit('sessionStream', { sessionId: s.id, type: 'message', text, turn });
     });
 
     host.on('toolCall', (record: ToolCallRecord) => {
       const s = store.get(session.id);
       if (!s) return;
-      if (!activeAgentTurn) {
-        activeAgentTurn = {
-          id: `msg-${Date.now()}`,
-          role: 'agent',
-          thoughts: '',
-          content: '',
-          toolCalls: [],
-          timestamp: Date.now(),
-          agentId: s.agentId,
-          agentName: s.agentName,
-          model: s.model,
-        };
-        s.turns.push(activeAgentTurn);
+      // A subagent's calls can arrive after the parent's turn has ended; keep
+      // them with the turn that holds the spawning call.
+      const owner = record.parentToolUseId ? findToolCall(s, record.parentToolUseId) : null;
+      const turn = owner ? owner.turn : ensureAgentTurn(s);
+      turn.toolCalls = turn.toolCalls || [];
+      turn.toolCalls.push(record);
+      if (!record.parentToolUseId) {
+        turn.segments = turn.segments || [];
+        turn.segments.push({ kind: 'tool', id: `seg-${record.id}`, toolCallId: record.id });
       }
-      activeAgentTurn.toolCalls = activeAgentTurn.toolCalls || [];
-      activeAgentTurn.toolCalls.push(record);
       store.save(s);
-      this.emit('sessionStream', { sessionId: s.id, type: 'toolCall', toolCall: record, turn: activeAgentTurn });
+      this.emit('sessionStream', { sessionId: s.id, type: 'toolCall', toolCall: record, turn });
     });
 
     host.on('toolCallUpdate', (record: ToolCallRecord) => {
       const s = store.get(session.id);
-      if (!s || !activeAgentTurn || !activeAgentTurn.toolCalls) return;
-      const idx = activeAgentTurn.toolCalls.findIndex((t) => t.id === record.id);
-      if (idx !== -1) {
-        const patch = Object.fromEntries(Object.entries(record).filter(([, v]) => v !== undefined));
-        activeAgentTurn.toolCalls[idx] = {
-          ...activeAgentTurn.toolCalls[idx],
-          ...patch,
-        };
-      }
+      if (!s) return;
+      const owner = findToolCall(s, record.id);
+      if (!owner) return;
+      const patch = Object.fromEntries(Object.entries(record).filter(([, v]) => v !== undefined));
+      Object.assign(owner.call, patch);
       store.save(s);
-      this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: record, turn: activeAgentTurn });
+      this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: owner.call, turn: owner.turn });
+    });
+
+    host.on('plan', (entries: PlanEntry[]) => {
+      const s = store.get(session.id);
+      if (!s) return;
+      s.plan = entries;
+      store.save(s);
+      this.emit('sessionStream', { sessionId: s.id, type: 'plan', plan: entries, session: { plan: entries } });
     });
 
     host.on('usageUpdate', (usage) => {
@@ -1185,3 +1192,31 @@ export class SessionManager extends EventEmitter {
 }
 
 export const sessionManager = new SessionManager();
+
+/** Appends streamed text to the turn's last segment of the same kind and message, or starts a new one. */
+function appendTextSegment(turn: TurnMessage, kind: 'text' | 'thought', text: string, messageId?: string): void {
+  const segments = (turn.segments = turn.segments || []);
+  const last = segments[segments.length - 1];
+  if (last && last.kind === kind && (kind === 'thought' || continuesLastText(turn, messageId))) {
+    last.text += text;
+    return;
+  }
+  const id = `seg-${Date.now().toString(36)}-${segments.length}`;
+  segments.push(kind === 'text' ? { kind, id, text, messageId } : { kind, id, text });
+}
+
+/** True when a text chunk extends the turn's last segment rather than starting a new message. */
+function continuesLastText(turn: TurnMessage, messageId?: string): boolean {
+  const last = turn.segments?.[turn.segments.length - 1];
+  return last?.kind === 'text' && (last.messageId ?? null) === (messageId ?? null);
+}
+
+/** Finds a tool call anywhere in the session, newest turn first. */
+function findToolCall(s: AcpSession, toolCallId: string): { turn: TurnMessage; call: ToolCallRecord } | null {
+  for (let i = s.turns.length - 1; i >= 0; i--) {
+    const turn = s.turns[i];
+    const call = turn.toolCalls?.find((t) => t.id === toolCallId);
+    if (call) return { turn, call };
+  }
+  return null;
+}

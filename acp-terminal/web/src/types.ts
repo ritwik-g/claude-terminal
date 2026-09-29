@@ -56,6 +56,27 @@ export interface ToolCallRecord {
   error?: string;
   startedAt: number;
   completedAt?: number;
+  toolName?: string;
+  description?: string;
+  /** Set on calls made by a subagent: the id of the tool call that spawned it. */
+  parentToolUseId?: string;
+  isSubagent?: boolean;
+  subagentType?: string;
+  subagentText?: string;
+  exitCode?: number | null;
+  background?: boolean;
+}
+
+/** Chronological parts of an agent turn (see server/types.ts). */
+export type TurnSegment =
+  | { kind: 'text'; id: string; text: string; messageId?: string }
+  | { kind: 'thought'; id: string; text: string }
+  | { kind: 'tool'; id: string; toolCallId: string };
+
+export interface PlanEntry {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  priority?: 'high' | 'medium' | 'low';
 }
 
 export interface FileAttachment {
@@ -76,6 +97,7 @@ export interface TurnMessage {
   thoughts?: string;
   attachments?: FileAttachment[];
   toolCalls?: ToolCallRecord[];
+  segments?: TurnSegment[];
   timestamp: number;
   agentId?: string;
   agentName?: string;
@@ -138,6 +160,9 @@ export interface AcpSession {
   promptSuggestion?: string;
   rateLimits?: VendorRateLimits;
   isAgentRunning?: boolean;
+  agentStopped?: boolean;
+  /** The agent's latest todo list. */
+  plan?: PlanEntry[];
 }
 
 export interface SessionSummary {

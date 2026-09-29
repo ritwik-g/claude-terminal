@@ -6,7 +6,7 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import * as acp from '@agentclientprotocol/sdk';
 import { ptyManager } from '../pty-manager.js';
-import type { AgentDescriptor, FileAttachment, PendingPermission, ToolCallRecord, TokenUsage } from '../types.js';
+import type { AgentDescriptor, FileAttachment, PendingPermission, PlanEntry, ToolCallRecord, TokenUsage } from '../types.js';
 
 export function normalizeClaudeModel(model?: string): string {
   if (!model) return 'sonnet';
@@ -46,10 +46,11 @@ type PermissionEntry = {
 };
 
 export interface ClientHostEvents {
-  thought: (text: string) => void;
-  message: (text: string) => void;
+  thought: (text: string, meta: ChunkMeta) => void;
+  message: (text: string, meta: ChunkMeta) => void;
   toolCall: (record: ToolCallRecord) => void;
   toolCallUpdate: (record: ToolCallRecord) => void;
+  plan: (entries: PlanEntry[]) => void;
   usageUpdate: (usage: TokenUsage) => void;
   permissionRequested: (perm: PendingPermission) => void;
   permissionResolved: (permId: string, info: { cancelled: boolean }) => void;
@@ -289,90 +290,50 @@ export class AcpClientHost extends EventEmitter {
       const update = ctx.params?.update;
       if (!update) return;
       this.touch();
+      if (process.env.ACP_DEBUG_UPDATES) {
+        fs.appendFileSync(process.env.ACP_DEBUG_UPDATES, JSON.stringify(ctx.params) + '\n');
+      }
 
       switch (update.sessionUpdate) {
         case 'agent_thought_chunk': {
           const text = update.content?.text || '';
-          if (text) this.emit('thought', text);
+          if (text) this.emit('thought', text, chunkMeta(update));
           break;
         }
         case 'agent_message_chunk': {
           const text = update.content?.text || '';
-          if (text) this.emit('message', text);
+          if (text) this.emit('message', text, chunkMeta(update));
           break;
         }
         case 'tool_call': {
-          let title = update.title;
-          const input = update.rawInput;
-          if (!title || title === 'Tool Call') {
-            if (input?.command) {
-              title = `$ ${input.command}`;
-            } else if (input?.path) {
-              title = `${update.kind === 'write' ? 'Write' : 'Read'}: ${input.path}`;
-            } else if (update.name) {
-              title = update.name;
-            } else if (update.kind) {
-              title = `Tool: ${update.kind}`;
-            } else {
-              title = 'Tool Call';
-            }
-          }
-
           const record: ToolCallRecord = {
+            ...toolCallFields(update),
             id: update.toolCallId,
-            title,
-            kind: update.kind,
-            status: update.status || 'pending',
-            input,
+            title: toolTitle(update) || update.name || (update.kind ? `Tool: ${update.kind}` : 'Tool Call'),
+            status: normalizeToolStatus(update.status) || 'pending',
             startedAt: Date.now(),
           };
           this.emit('toolCall', record);
           break;
         }
         case 'tool_call_update': {
-          let outputStr: string | undefined;
-          const raw = update.rawOutput;
-          if (raw !== undefined && raw !== null) {
-            if (typeof raw === 'string') {
-              outputStr = raw;
-            } else if (typeof raw.formatted_output === 'string') {
-              outputStr = raw.formatted_output;
-            } else if (typeof raw.output === 'string') {
-              outputStr = raw.output;
-            } else if (typeof raw.stdout === 'string') {
-              outputStr = raw.stdout;
-            } else if (Array.isArray(raw.content)) {
-              outputStr = raw.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
-            } else if (raw.result !== undefined) {
-              outputStr = typeof raw.result === 'string' ? raw.result : JSON.stringify(raw.result, null, 2);
-            } else {
-              outputStr = JSON.stringify(raw, null, 2);
-            }
-          }
-
-          let title = update.title;
-          const input = update.rawInput;
-          if (!title || title === 'Tool Call') {
-            if (input?.command) {
-              title = `$ ${input.command}`;
-            } else if (input?.path) {
-              title = `${update.kind === 'write' ? 'Write' : 'Read'}: ${input.path}`;
-            }
-          }
-
+          const status = normalizeToolStatus(update.status);
           // Every tool_call_update field is optional in ACP: send only what this
           // update carries, so the merge keeps the original title, input and status.
           const record = {
+            ...toolCallFields(update),
             id: update.toolCallId,
-            title: title || undefined,
-            kind: update.kind,
-            status: update.status,
-            input,
-            output: outputStr,
+            title: toolTitle(update),
+            status,
+            output: toolOutput(update),
             error: update.rawOutput?.error,
-            completedAt: update.status === 'completed' || update.status === 'failed' ? Date.now() : undefined,
+            completedAt: status === 'completed' || status === 'failed' ? Date.now() : undefined,
           } as ToolCallRecord;
           this.emit('toolCallUpdate', record);
+          break;
+        }
+        case 'plan': {
+          if (Array.isArray(update.entries)) this.emit('plan', update.entries as PlanEntry[]);
           break;
         }
         case 'usage_update': {
@@ -425,6 +386,14 @@ export class AcpClientHost extends EventEmitter {
           writeTextFile: true,
         },
         terminal: true,
+        _meta: {
+          // Agents that run shell commands themselves (Claude Code, Codex) only
+          // report command output and exit codes when the client asks for it.
+          terminal_output: true,
+          // JetBrains AIR extension: report background work (background shells,
+          // workflows, monitors) as async_task_* updates.
+          jetbrains: { air: { version: 1, capabilities: ['asyncTasks'] } },
+        },
       },
     }));
 
@@ -674,4 +643,92 @@ export class AcpClientHost extends EventEmitter {
     }
     this.connection = null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// session/update decoding helpers
+// ---------------------------------------------------------------------------
+
+export interface ChunkMeta {
+  messageId?: string;
+  /** Present when a subagent produced the chunk: the tool call that spawned it. */
+  parentToolUseId?: string;
+}
+
+function chunkMeta(update: any): ChunkMeta {
+  return {
+    messageId: typeof update.messageId === 'string' ? update.messageId : undefined,
+    parentToolUseId: update._meta?.claudeCode?.parentToolUseId,
+  };
+}
+
+function normalizeToolStatus(status: unknown): ToolCallRecord['status'] | undefined {
+  if (status === 'in_progress' || status === 'running') return 'running';
+  if (status === 'pending' || status === 'completed' || status === 'failed') return status;
+  return undefined;
+}
+
+function toolTitle(update: any): string | undefined {
+  const title: string | undefined = update.title;
+  const input = update.rawInput;
+  // "Terminal"/"Task"/"Tool Call" are placeholders sent before the input streams in.
+  if (title && !['Tool Call', 'Terminal', 'Task'].includes(title)) return title;
+  if (input?.command) return `$ ${input.command}`;
+  if (input?.description) return input.description;
+  if (input?.path || input?.file_path) {
+    return `${update.kind === 'edit' || update.kind === 'write' ? 'Edit' : 'Read'}: ${input.path || input.file_path}`;
+  }
+  return title || undefined;
+}
+
+/** Fields shared by tool_call and tool_call_update; undefined means "unchanged". */
+function toolCallFields(update: any): Partial<ToolCallRecord> {
+  const claude = update._meta?.claudeCode || {};
+  const input = update.rawInput && Object.keys(update.rawInput).length > 0 ? update.rawInput : undefined;
+  const exit = update._meta?.terminal_exit;
+  const backgrounded =
+    update._meta?.jetbrains?.air?.asyncTasks?.backgrounded === true ||
+    Boolean(claude.toolResponse?.backgroundTaskId) ||
+    claude.toolResponse?.isAsync === true;
+  return {
+    kind: update.kind,
+    input,
+    toolName: claude.toolName || update.name,
+    description: typeof claude.title === 'string' ? claude.title : input?.description,
+    parentToolUseId: claude.parentToolUseId,
+    isSubagent: claude.subagent === true ? true : undefined,
+    subagentType: input?.subagent_type,
+    exitCode: exit ? (typeof exit.exit_code === 'number' ? exit.exit_code : null) : undefined,
+    background: backgrounded ? true : undefined,
+  };
+}
+
+function toolOutput(update: any): string | undefined {
+  // Shell tools report their bytes through terminal_output meta, not rawOutput.
+  const term = update._meta?.terminal_output_delta ?? update._meta?.terminal_output;
+  if (term && typeof term.data === 'string') return term.data;
+
+  const raw = update.rawOutput;
+  if (raw !== undefined && raw !== null) {
+    if (typeof raw === 'string') return raw;
+    if (typeof raw.formatted_output === 'string') return raw.formatted_output;
+    if (typeof raw.output === 'string') return raw.output;
+    if (typeof raw.stdout === 'string') return raw.stdout;
+    if (Array.isArray(raw)) {
+      const text = raw.map((c: any) => c?.text).filter((t: unknown) => typeof t === 'string');
+      if (text.length > 0) return text.join('\n');
+    }
+    if (Array.isArray(raw.content)) return raw.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
+    if (raw.result !== undefined) return typeof raw.result === 'string' ? raw.result : JSON.stringify(raw.result, null, 2);
+    return JSON.stringify(raw, null, 2);
+  }
+
+  // Fall back to text content blocks on a finished call (e.g. a subagent's result).
+  if ((update.status === 'completed' || update.status === 'failed') && Array.isArray(update.content)) {
+    const text = update.content
+      .map((c: any) => (c?.type === 'content' && c.content?.type === 'text' ? c.content.text : undefined))
+      .filter((t: unknown) => typeof t === 'string');
+    if (text.length > 0) return text.join('\n');
+  }
+  return undefined;
 }
