@@ -325,7 +325,7 @@ export class AcpClientHost extends EventEmitter {
             id: update.toolCallId,
             title: toolTitle(update),
             status,
-            output: toolOutput(update),
+            output: capToolOutput(toolOutput(update)),
             error: update.rawOutput?.error,
             completedAt: status === 'completed' || status === 'failed' ? Date.now() : undefined,
           } as ToolCallRecord;
@@ -701,6 +701,16 @@ function toolCallFields(update: any): Partial<ToolCallRecord> {
     exitCode: exit ? (typeof exit.exit_code === 'number' ? exit.exit_code : null) : undefined,
     background: backgrounded ? true : undefined,
   };
+}
+
+// Tool output is stored on the session and resent with every turn update, so a
+// huge result (a cat of a log, a big diff) keeps its head and tail only.
+const TOOL_OUTPUT_CAP = 32 * 1024;
+
+function capToolOutput(output: string | undefined): string | undefined {
+  if (!output || output.length <= TOOL_OUTPUT_CAP) return output;
+  const kb = Math.round(output.length / 1024);
+  return `${output.slice(0, 16 * 1024)}\n\n... [output truncated: ${kb} KB] ...\n${output.slice(-8 * 1024)}`;
 }
 
 function toolOutput(update: any): string | undefined {

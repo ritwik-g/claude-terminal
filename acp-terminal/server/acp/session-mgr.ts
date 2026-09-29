@@ -420,7 +420,7 @@ export class SessionManager extends EventEmitter {
       const turn = ensureAgentTurn(s);
       turn.thoughts = (turn.thoughts || '') + text;
       appendTextSegment(turn, 'thought', text);
-      this.emit('sessionStream', { sessionId: s.id, type: 'thought', text, turn });
+      this.emit('sessionStream', { sessionId: s.id, type: 'thought', text, turn: withoutToolCalls(turn) });
     });
 
     host.on('message', (text: string, meta: ChunkMeta) => {
@@ -444,7 +444,7 @@ export class SessionManager extends EventEmitter {
       // The recap previews the agent's latest message, not the start of the turn.
       const latest = (turn.segments!.filter((seg) => seg.kind === 'text').pop() as { text: string } | undefined)?.text || turn.content;
       s.recap = latest.trim().replace(/\s+/g, ' ').slice(0, 160) + (latest.length > 160 ? '…' : '');
-      this.emit('sessionStream', { sessionId: s.id, type: 'message', text, turn });
+      this.emit('sessionStream', { sessionId: s.id, type: 'message', text, turn: withoutToolCalls(turn) });
     });
 
     host.on('toolCall', (record: ToolCallRecord) => {
@@ -1205,6 +1205,16 @@ function appendTextSegment(turn: TurnMessage, kind: 'text' | 'thought', text: st
   }
   const id = `seg-${Date.now().toString(36)}-${segments.length}`;
   segments.push(kind === 'text' ? { kind, id, text, messageId } : { kind, id, text });
+}
+
+/**
+ * The turn as sent with each text chunk. Tool calls (and their output) are left
+ * out because a chunk never changes them and the client merges the turn into
+ * its copy, keeping the tool calls it already has.
+ */
+function withoutToolCalls(turn: TurnMessage): Omit<TurnMessage, 'toolCalls'> {
+  const { toolCalls: _toolCalls, ...rest } = turn;
+  return rest;
 }
 
 /** True when a text chunk extends the turn's last segment rather than starting a new message. */
