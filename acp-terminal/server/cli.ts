@@ -13,7 +13,8 @@ import { getLocalNetworkIps, resolveBindHost } from './network.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DIST_DIR = path.resolve(__dirname, '../dist');
+// ACP_DIST_DIR lets parallel UI builds each serve their own bundle.
+const DIST_DIR = process.env.ACP_DIST_DIR ? path.resolve(process.env.ACP_DIST_DIR) : path.resolve(__dirname, '../dist');
 
 const app = express();
 const server = http.createServer(app);
