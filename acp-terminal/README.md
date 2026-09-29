@@ -113,7 +113,7 @@ Open **MCP and plugins** in the sidebar (or type `/mcp` in the composer) to give
 - **Antigravity** runs through its desktop app, which reads MCP servers from its own settings rather than from the session. Each server row offers the matching `agy mcp add` command to copy.
 - **Agent plugins and skills** is a read-only view of what each agent loads by itself: Claude Code plugins, skills and user-scope MCP servers (`~/.claude`, `~/.claude.json`), Codex plugins, skills and MCP servers (`~/.codex`), and Antigravity skills, plugins and MCP servers (`~/.gemini`, `agy plugin list`, `agy mcp list`). Only names, versions and descriptions are shown, never tokens.
 
-The Built-in Demo Agent answers a prompt containing "mcp" with the servers it received, which is handy for checking scope and transport filtering.
+The Built-in Demo Agent answers a prompt containing "mcp" with the servers it received, which is handy for checking scope and transport filtering. A prompt containing "background" starts a command that finishes two seconds after the turn, the way Claude Code reports background shells.
 
 ---
 

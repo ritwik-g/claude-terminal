@@ -87,6 +87,11 @@ export function isActive(call: ToolCallRecord): boolean {
   return call.status === 'pending' || call.status === 'running';
 }
 
+/** Background work (a background shell, an async subagent) that has not reported an end. */
+export function backgroundRunning(call: ToolCallRecord): boolean {
+  return Boolean(call.background) && (call.backgroundState ?? 'running') === 'running';
+}
+
 /**
  * Tool calls that can still be going: every call in the newest turn while the
  * session is working (or waiting on an approval), plus background work from
@@ -99,7 +104,7 @@ export function liveCallIds(session: AcpSession): Set<string> {
   const last = session.turns[session.turns.length - 1];
   for (const t of session.turns) {
     for (const c of t.toolCalls || []) {
-      if (isActive(c) && (c.background || (busy && t === last))) ids.add(c.id);
+      if (isActive(c) && (backgroundRunning(c) || (busy && t === last))) ids.add(c.id);
     }
   }
   return ids;
@@ -226,7 +231,8 @@ export type SubagentStatus = 'running' | 'background' | 'done' | 'failed';
 export function subagentStatus(call: ToolCallRecord, children: ToolCallRecord[]): SubagentStatus {
   if (call.status === 'failed') return 'failed';
   if (isActive(call) || children.some(isActive)) return 'running';
-  if (call.background && !call.subagentText) return 'background';
+  if (call.backgroundState === 'failed') return 'failed';
+  if (backgroundRunning(call) && !call.subagentText) return 'background';
   return 'done';
 }
 

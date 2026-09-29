@@ -391,7 +391,7 @@ const SessionRow: React.FC<{
       tabIndex={0}
       aria-current={isSelected ? 'true' : undefined}
       data-session-id={session.id}
-      title={session.reasons?.length ? `Ranking: ${session.reasons.join(' · ')}` : undefined}
+      title={session.rankSummary || undefined}
     >
       <div className="sb-row-top">
         <span className="sb-row-dot" title={status.label}>

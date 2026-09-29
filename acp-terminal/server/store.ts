@@ -4,6 +4,15 @@ import { getSessionsDir, FILE_MODE, ensurePrivateDir, initStorage } from './path
 import type { AcpSession, UserAnnotations } from './types.js';
 import { rankSession } from './rank.js';
 
+function applyRank(session: AcpSession): void {
+  const { score, reasons, factors, summary, state } = rankSession(session);
+  session.score = score;
+  session.reasons = reasons;
+  session.rankFactors = factors;
+  session.rankSummary = summary;
+  session.state = state;
+}
+
 class SessionStore {
   private sessions = new Map<string, AcpSession>();
   private initialized = false;
@@ -23,10 +32,7 @@ class SessionStore {
           const raw = fs.readFileSync(filePath, 'utf8');
           const session = JSON.parse(raw) as AcpSession;
           if (session && session.id) {
-            const { score, reasons, state } = rankSession(session);
-            session.score = score;
-            session.reasons = reasons;
-            session.state = state;
+            applyRank(session);
             this.sessions.set(session.id, session);
           }
         } catch (err) {
@@ -62,13 +68,11 @@ class SessionStore {
    */
   save(session: AcpSession, opts: { touch?: boolean } = {}): void {
     this.init();
-    const { score, reasons, state } = rankSession(session);
-    session.score = score;
-    session.reasons = reasons;
-    session.state = state;
+    // Touch first so "Active just now" reflects this write
     if (opts.touch !== false) {
       session.updatedAt = Date.now();
     }
+    applyRank(session);
 
     this.sessions.set(session.id, session);
     this.persist(session);

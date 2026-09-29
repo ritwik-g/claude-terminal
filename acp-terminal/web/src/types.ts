@@ -67,6 +67,11 @@ export interface ToolCallRecord {
   subagentText?: string;
   exitCode?: number | null;
   background?: boolean;
+  /** Lifecycle of that background work; absent means still running (or never reported). */
+  backgroundState?: 'running' | 'completed' | 'failed' | 'stopped';
+  /** How the background work ended, e.g. the agent's summary or why it was cut off. */
+  backgroundSummary?: string;
+  backgroundEndedAt?: number;
 }
 
 /** Chronological parts of an agent turn (see server/types.ts). */
@@ -146,6 +151,9 @@ export interface AcpSession {
   state: SessionState;
   score: number;
   reasons: string[];
+  /** The score's parts in plain language, and one sentence on why it sits where it does. */
+  rankFactors?: Array<{ label: string; points: number }>;
+  rankSummary?: string;
   lastPrompt: string;
   recap: string;
   usage: TokenUsage;
@@ -182,6 +190,9 @@ export interface SessionSummary {
   state: SessionState;
   score: number;
   reasons: string[];
+  /** The score's parts in plain language, and one sentence on why it sits where it does. */
+  rankFactors?: Array<{ label: string; points: number }>;
+  rankSummary?: string;
   lastPrompt: string;
   recap: string;
   git: GitInfo | null;

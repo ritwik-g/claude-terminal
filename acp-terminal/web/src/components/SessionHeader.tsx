@@ -50,6 +50,15 @@ const TitleInput: React.FC<{
   );
 };
 
+/** The score's parts; sessions ranked by an older server only have "label (+n)" strings. */
+function rankFactors(session: AcpSession): Array<{ label: string; points: number }> {
+  if (session.rankFactors?.length) return session.rankFactors;
+  return session.reasons.map((r) => {
+    const m = r.match(/^(.*?)\s*\(([+-]?\d+)\)$/);
+    return m ? { label: m[1], points: Number(m[2]) } : { label: r, points: 0 };
+  });
+}
+
 /** State label with a popover explaining the attention score. */
 const StateButton: React.FC<{ session: AcpSession }> = ({ session }) => {
   const [open, setOpen] = useState(false);
@@ -73,28 +82,37 @@ const StateButton: React.FC<{ session: AcpSession }> = ({ session }) => {
         className={cx('ws-state-btn', `tone-${view.tone}`)}
         onClick={() => setOpen(!open)}
         aria-expanded={open}
-        title={`Attention score ${session.score}. Click for the breakdown.`}
+        title={session.rankSummary ? `${session.rankSummary} Click for details.` : 'Why this session ranks where it does'}
       >
         <StatusDot tone={view.tone} pulse={view.pulse} />
         {view.label}
       </button>
       {open && (
-        <div className="ws-popover ws-reasons" role="dialog" aria-label="Attention score breakdown">
+        <div className="ws-popover ws-reasons" role="dialog" aria-label="Why this session ranks here">
           <div className="ws-reasons-head">
             <span>Why it ranks here</span>
-            <span className="ws-reasons-score">{session.score}</span>
+            <span className="ws-reasons-score" title="Attention score">
+              Score {session.score}
+            </span>
           </div>
-          <ul className="ws-reasons-list">
-            {session.reasons.map((r, i) => {
-              const m = r.match(/^(.*?)\s*\(([+-]?\d+)\)$/);
-              return (
-                <li key={i}>
-                  <span>{m ? m[1] : r}</span>
-                  {m && <span className="ws-reasons-points">{m[2]}</span>}
-                </li>
-              );
-            })}
+          {session.rankSummary && <p className="ws-reasons-summary">{session.rankSummary}</p>}
+          <ul className="ws-reasons-list" aria-label="What adds to the score">
+            {rankFactors(session).map((f, i) => (
+              <li key={i}>
+                <span>{f.label}</span>
+                {f.points !== 0 && (
+                  <span className={cx('ws-reasons-points', f.points < 0 && 'is-down')}>
+                    {f.points > 0 ? '+' : ''}
+                    {f.points}
+                  </span>
+                )}
+              </li>
+            ))}
           </ul>
+          <p className="ws-reasons-foot">
+            The sidebar groups sessions by state and puts the highest score first in each group. Pin a session or give it a
+            priority to move it up; snooze it to move it down.
+          </p>
         </div>
       )}
     </div>

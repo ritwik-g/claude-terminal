@@ -6,7 +6,7 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import * as acp from '@agentclientprotocol/sdk';
 import { ptyManager } from '../pty-manager.js';
-import type { AgentDescriptor, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
+import type { AgentDescriptor, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
 import { appliesTo, listMcpServers, resolveSessionMcpServers } from '../mcp/config.js';
 
 export function normalizeClaudeModel(model?: string): string {
@@ -21,6 +21,14 @@ export function normalizeClaudeModel(model?: string): string {
   if (m.includes('opus')) return 'opus';
   return 'sonnet';
 }
+
+/**
+ * The SDK resolves a response at once but handles notifications through a few
+ * async steps without awaiting them, so a prompt response can overtake the
+ * updates the agent sent just before it. Every such update has already been
+ * read, so one macrotask lets their handlers finish before the turn ends.
+ */
+const settleNotifications = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** Thrown by sendPrompt when the session already has a turn running. */
 export class TurnInFlightError extends Error {
@@ -57,6 +65,7 @@ export interface ClientHostEvents {
   permissionResolved: (permId: string, info: { cancelled: boolean }) => void;
   turnCompleted: (stopReason: string) => void;
   promptSuggestion: (suggestion: string) => void;
+  asyncTask: (update: AsyncTaskUpdate) => void;
   error: (err: Error) => void;
   closed: () => void;
 }
@@ -167,7 +176,16 @@ export class AcpClientHost extends EventEmitter {
     }
 
     const input = Writable.toWeb(this.child.stdin);
-    const output = Readable.toWeb(this.child.stdout) as ReadableStream<Uint8Array>;
+    // AIR async_task_* updates are not in the ACP schema, so the SDK would drop them
+    // (logging a validation error); take them off the wire before it parses anything.
+    const output = (Readable.toWeb(this.child.stdout) as ReadableStream<Uint8Array>).pipeThrough(
+      extractAsyncTaskUpdates((update) => {
+        this.touch();
+        if (process.env.ACP_DEBUG_UPDATES) fs.appendFileSync(process.env.ACP_DEBUG_UPDATES, JSON.stringify({ update }) + '\n');
+        const parsed = parseAsyncTaskUpdate(update);
+        if (parsed) this.emit('asyncTask', parsed);
+      })
+    );
     const stream = acp.ndJsonStream(input, output);
 
     const clientApp = acp.client({
@@ -490,6 +508,7 @@ export class AcpClientHost extends EventEmitter {
     this.inflightPrompt = run.catch(() => {});
     try {
       const stopReason = await run;
+      await settleNotifications();
       if (turn === this.turnSeq) this.emit('turnCompleted', stopReason);
       return { stopReason };
     } catch (err: any) {
@@ -672,6 +691,66 @@ export class AcpClientHost extends EventEmitter {
 // session/update decoding helpers
 // ---------------------------------------------------------------------------
 
+const ASYNC_TASK_STATES = new Set(['running', 'completed', 'failed', 'stopped']);
+
+/** Decode an `async_task_spawned` / `_progress` / `_state_update` update. */
+export function parseAsyncTaskUpdate(update: any): AsyncTaskUpdate | null {
+  const kind =
+    update?.sessionUpdate === 'async_task_spawned' ? 'spawned'
+    : update?.sessionUpdate === 'async_task_progress' ? 'progress'
+    : update?.sessionUpdate === 'async_task_state_update' ? 'state'
+    : null;
+  if (!kind || typeof update.asyncTaskId !== 'string') return null;
+  return {
+    kind,
+    asyncTaskId: update.asyncTaskId,
+    toolCallId: typeof update.toolCallId === 'string' ? update.toolCallId : undefined,
+    state: ASYNC_TASK_STATES.has(update.state) ? update.state : undefined,
+    summary: typeof update.summary === 'string' ? update.summary : undefined,
+    name: typeof update.name === 'string' ? update.name : undefined,
+    outputFilePath: typeof update.outputFilePath === 'string' ? update.outputFilePath : undefined,
+  };
+}
+
+/**
+ * Pass the agent's NDJSON stream through unchanged, except session/update
+ * lines carrying an async_task_* update: those go to `onUpdate` instead.
+ */
+export function extractAsyncTaskUpdates(onUpdate: (update: any) => void): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = '';
+  const pass = (line: string, controller: TransformStreamDefaultController<Uint8Array>) => {
+    if (line.includes('"async_task_')) {
+      try {
+        const msg = JSON.parse(line);
+        const update = msg?.method === 'session/update' ? msg.params?.update : undefined;
+        if (typeof update?.sessionUpdate === 'string' && update.sessionUpdate.startsWith('async_task_')) {
+          onUpdate(update);
+          return;
+        }
+      } catch {
+        // not JSON we understand: let the SDK decide
+      }
+    }
+    controller.enqueue(encoder.encode(line + '\n'));
+  };
+  return new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        pass(buffer.slice(0, nl), controller);
+        buffer = buffer.slice(nl + 1);
+      }
+    },
+    flush(controller) {
+      buffer += decoder.decode();
+      if (buffer) controller.enqueue(encoder.encode(buffer));
+    },
+  });
+}
+
 export interface ChunkMeta {
   messageId?: string;
   /** Present when a subagent produced the chunk: the tool call that spawned it. */
@@ -730,7 +809,7 @@ function toolCallFields(update: any): Partial<ToolCallRecord> {
 // huge result (a cat of a log, a big diff) keeps its head and tail only.
 const TOOL_OUTPUT_CAP = 32 * 1024;
 
-function capToolOutput(output: string | undefined): string | undefined {
+export function capToolOutput(output: string | undefined): string | undefined {
   if (!output || output.length <= TOOL_OUTPUT_CAP) return output;
   const kb = Math.round(output.length / 1024);
   return `${output.slice(0, 16 * 1024)}\n\n... [output truncated: ${kb} KB] ...\n${output.slice(-8 * 1024)}`;

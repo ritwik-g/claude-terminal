@@ -137,6 +137,12 @@ async function runTests() {
     if (blockedSession.state !== 'blocked' || blockedSession.score < 200) {
       throw new Error(`Expected state 'blocked' with score >= 200, got ${blockedSession.state} with ${blockedSession.score}`);
     }
+    console.log(`   Summary: ${blockedSession.rankSummary}`);
+    if (!blockedSession.rankSummary?.includes(permEvent.permission.title) || blockedSession.rankFactors?.[0]?.label !== 'Waiting for your approval') {
+      throw new Error(`Ranking should explain the approval in plain words: ${blockedSession.rankSummary} / ${JSON.stringify(blockedSession.rankFactors)}`);
+    }
+    const factorSum = (blockedSession.rankFactors || []).reduce((n, f) => n + f.points, 0);
+    if (factorSum !== blockedSession.score) throw new Error(`Factors (${factorSum}) must add up to the score (${blockedSession.score})`);
     console.log('   ✅ Blocked state correctly surfaced to top of attention ranking\n');
 
     // 6. Test Resolving Permission
@@ -173,6 +179,11 @@ async function runTests() {
     if (prioritizedSession.score < 10000) {
       throw new Error('Pinned boost not applied properly');
     }
+    const labels = (prioritizedSession.rankFactors || []).map((f) => f.label);
+    if (!labels.includes('Pinned') || !labels.includes('You set priority P0') || !/pinned/.test(prioritizedSession.rankSummary || '')) {
+      throw new Error(`Pin and priority should be explained: ${JSON.stringify(labels)} / ${prioritizedSession.rankSummary}`);
+    }
+    if (prioritizedSession.reasons.some((r) => /base|_/.test(r))) throw new Error(`Reasons still use rule names: ${prioritizedSession.reasons}`);
     console.log('   ✅ Priority P0 and Pinned boosts verified\n');
 
     // 8. Test Agent Failover / Switching (Claude -> Codex / Target)
@@ -286,6 +297,33 @@ async function runTests() {
       throw new Error('Search failed to find sessions by message content');
     }
     console.log('   ✅ Full-text search over message content verified\n');
+
+    // 9b. Background work settles after its turn, and never outlives the agent
+    console.log('9️⃣b Testing background work lifecycle...');
+    const bgSession = await sessionManager.createSession({ agentId: 'mock', cwd: testDir, title: 'Background work' });
+    const bgCall = () => sessionManager.getSession(bgSession.id)!.turns.flatMap((t) => t.toolCalls || []).filter((c) => c.background).at(-1);
+    await sessionManager.sendPrompt(bgSession.id, 'Run the build in the background');
+    await waitForIdle(bgSession.id);
+    if (!bgCall() || bgCall()!.status !== 'completed' || bgCall()!.backgroundState !== 'running') {
+      throw new Error(`Background call should be running after its turn: ${JSON.stringify(bgCall())}`);
+    }
+    for (let i = 0; i < 50 && bgCall()!.backgroundState === 'running'; i++) await new Promise((r) => setTimeout(r, 100));
+    if (bgCall()!.backgroundState !== 'completed' || !bgCall()!.output?.includes('background work finished')) {
+      throw new Error(`Background call should complete with its real output: ${JSON.stringify(bgCall())}`);
+    }
+    if (sessionManager.getSession(bgSession.id)!.state === 'working') throw new Error('A task finishing after the turn must not mark the session working');
+    // The call and the reply sent right before the prompt response share one turn
+    const bgTurns = sessionManager.getSession(bgSession.id)!.turns.filter((t) => t.role === 'agent' && (t.toolCalls?.length || t.content?.includes('Started it in the background')));
+    if (bgTurns.length !== 1 || !bgTurns[0].toolCalls?.length || !bgTurns[0].content?.includes('Started it in the background')) {
+      throw new Error(`Tool call and reply split across turns: ${JSON.stringify(bgTurns.map((t) => ({ calls: t.toolCalls?.length, content: t.content })))}`);
+    }
+    await sessionManager.sendPrompt(bgSession.id, 'Another background job please');
+    await waitForIdle(bgSession.id);
+    await sessionManager.stopSessionAgent(bgSession.id);
+    if (bgCall()!.backgroundState !== 'stopped' || !/stopped/i.test(bgCall()!.backgroundSummary || '')) {
+      throw new Error(`Stopping the agent should stop its background work: ${JSON.stringify(bgCall())}`);
+    }
+    console.log('   ✅ Background work completes after the turn, shows its output, and stops with the agent\n');
 
     // 10. Regression checks
     console.log('🔟 Regression checks...');

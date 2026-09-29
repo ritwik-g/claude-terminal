@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { ToolCallRecord, TurnMessage, TurnSegment } from '../types';
 import { MarkdownContent } from './MarkdownContent';
 import { Badge, Button, Icon, IconButton, Spinner, type Tone } from '../ui';
+import { BackgroundBadge } from './BackgroundBadge';
 import {
+  backgroundRunning,
   commandOf,
   copyToClipboard,
   describeTool,
@@ -173,7 +175,7 @@ const SummaryText: React.FC<{ text: string }> = ({ text }) => {
  * update (the agent stopped or the server restarted mid-call). Background work
  * legitimately outlives its turn, so it is left alone.
  */
-const isInterrupted = (call: ToolCallRecord, stale: boolean) => stale && isActive(call) && !call.background;
+const isInterrupted = (call: ToolCallRecord, stale: boolean) => stale && isActive(call) && !backgroundRunning(call);
 
 const StatusGlyph: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolean; interrupted?: boolean }> = ({
   call,
@@ -194,9 +196,15 @@ const StatusGlyph: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolean; 
   } else if (isFailed(call)) {
     tone = 'danger';
     content = <Icon name="x" size={13} title="Failed" />;
-  } else if (call.background) {
+  } else if (backgroundRunning(call)) {
     tone = 'neutral';
     content = <Icon name="clock" size={13} title="Running in background" />;
+  } else if (call.backgroundState === 'failed') {
+    tone = 'danger';
+    content = <Icon name="x" size={13} title="Failed in the background" />;
+  } else if (call.backgroundState === 'stopped') {
+    tone = 'neutral';
+    content = <Icon name="stop" size={12} title={call.backgroundSummary || 'Stopped'} />;
   } else {
     content = <Icon name="check" size={13} title="Done" />;
   }
@@ -362,8 +370,8 @@ export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolea
             </Badge>
           )}
           {interrupted && <Badge tone="neutral">Interrupted</Badge>}
-          {call.background && !isActive(call) && <Badge tone="info">Background</Badge>}
-          {failedExit ? (
+          {!isActive(call) && <BackgroundBadge call={call} />}
+          {failedExit && !backgroundRunning(call) ? (
             <Badge tone="danger" mono>
               exit {call.exitCode}
             </Badge>

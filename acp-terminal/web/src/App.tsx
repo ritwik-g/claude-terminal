@@ -171,7 +171,7 @@ export const App: React.FC = () => {
           if (['thought', 'message', 'toolCall', 'toolCallUpdate'].includes(msg.event || msg.type)) {
             setActiveSession((prev) => (prev && prev.id === selectedId && prev.state !== 'working' ? { ...prev, state: 'working' } : prev));
           }
-          if (['turnCompleted', 'sessionStopped', 'sessionStarted', 'sessionSwitched', 'sessionCompacted', 'sessionRollback'].includes(msg.event || msg.type)) {
+          if (['turnCompleted', 'sessionStopped', 'sessionStarted', 'sessionSwitched', 'sessionCompacted', 'sessionRollback', 'backgroundSettled'].includes(msg.event || msg.type)) {
             if (msg.event === 'turnCompleted' || msg.type === 'turnCompleted') {
               setActiveSession((prev) => (prev && prev.id === selectedId ? { ...prev, state: 'needs_you' } : prev));
             }

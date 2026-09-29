@@ -79,7 +79,14 @@ Status key: **Fixed** (on branch `acp-ux-gaps`), **Open** (not addressed yet).
 | R7 | Long transcripts re-rendered every turn on every chunk | Fixed (memoized turn bodies; the newest 120 turns render, older ones on demand) |
 | R8 | Visual polish: emoji-heavy chrome, a crowded header, score noise, loud banners | Fixed: SVG icons, a header with an overflow menu, plain state labels, a quieter status row, redesigned sidebar cards and composer |
 
+## Closing round
+
+| # | Change | Status |
+|---|--------|--------|
+| C1 | The attention score was a raw list of rules ("needs_you base (+100)"). Ranking now returns plain-language factors ("Waiting for your approval", "3 uncommitted files", "Active 25 minutes ago") and a one-sentence summary; the state popover shows them and explains how the sidebar orders sessions, and the sidebar row tooltip shows the summary | Fixed |
+| C2 | Background commands stayed "Background" forever. The adapter does send AIR `async_task_*` updates, but they are not in the ACP schema, so the SDK dropped them (logging a validation error). The client now takes them off the wire before the SDK parses anything, settles the call as done, failed or stopped, and replaces the "running in background" notice with the command's real output. Background work still running when the agent stops, exits or the server restarts is marked stopped | Fixed |
+| C3 | Found while fixing C2: the SDK resolves a prompt response before it has finished handling the updates sent just ahead of it, so the last message or tool call of a turn could land in a separate turn (and the next prompt's first call in the previous one). The turn now ends one macrotask later, after those updates are handled | Fixed |
+
 ## Still open
 
-- The attention score breakdown is still a raw list of rules; a plain-language explanation would help.
-- Background shell completion isn't reported by the adapter without the AIR async-task stream, so a background command stays marked "background" until the session moves on.
+Nothing from this audit.

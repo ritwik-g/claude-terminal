@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { AcpSession, PlanEntry, ToolCallRecord } from '../types';
 import { Badge, Icon, Progress, Spinner } from '../ui';
-import { commandOf, describeTool, isActive, liveCallIds, subagentStatus } from '../toolDisplay';
+import { backgroundRunning, commandOf, describeTool, isActive, liveCallIds, subagentStatus } from '../toolDisplay';
 
 /**
  * A strip above the conversation answering "what is going on right now?":
@@ -32,7 +32,7 @@ export const ActivityStrip: React.FC<{ session: AcpSession }> = ({ session }) =>
     .map((c) => ({ call: c, status: subagentStatus(c, childrenOf(c.id)) }))
     .filter((s) => s.status === 'running' || s.status === 'background');
   const commands = recent.filter(
-    (c): c is ToolCallRecord => !c.isSubagent && !c.parentToolUseId && Boolean(commandOf(c)) && (isActive(c) || Boolean(c.background))
+    (c): c is ToolCallRecord => !c.isSubagent && !c.parentToolUseId && Boolean(commandOf(c)) && (isActive(c) || backgroundRunning(c))
   );
 
   // Close the plan popover on Escape or a click elsewhere.
@@ -108,7 +108,7 @@ export const ActivityStrip: React.FC<{ session: AcpSession }> = ({ session }) =>
             {isActive(call) ? <Spinner size={10} /> : <Icon name="clock" size={12} className="strip-chip-icon" />}
             <Icon name="terminal" size={13} className="strip-chip-icon" />
             <span className="strip-chip-detail mono">{commandOf(call)}</span>
-            {call.background && <Badge tone="info">Background</Badge>}
+            {backgroundRunning(call) && <Badge tone="info">Background</Badge>}
           </span>
         ))}
       </div>

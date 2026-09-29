@@ -2,6 +2,9 @@
 import * as acp from '@agentclientprotocol/sdk';
 import { Readable, Writable } from 'node:stream';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 interface SessionData {
   id: string;
@@ -56,6 +59,31 @@ class MockAcpAgent {
     }
 
     const lower = promptText.toLowerCase();
+
+    // "background" starts a command that finishes after the turn, reported the way
+    // Claude Code does it: AIR async_task_* updates tied to the tool call
+    if (/\bbackground\b/.test(lower)) {
+      const callId = `call-bg-${crypto.randomUUID().slice(0, 8)}`;
+      const taskId = `task-${crypto.randomUUID().slice(0, 8)}`;
+      const command = 'sleep 2 && echo background work finished';
+      const outputFile = path.join(os.tmpdir(), `mock-agent-${taskId}.output`);
+      const send = (update: Record<string, unknown>) => cx.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update });
+      await send({ sessionUpdate: 'tool_call', toolCallId: callId, title: command, kind: 'execute', status: 'pending', rawInput: { command, run_in_background: true } });
+      await send({ sessionUpdate: 'async_task_spawned', asyncTaskId: taskId, name: command, taskType: 'shell', toolCallId: callId, canStop: true, showInTranscript: false });
+      await send({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        status: 'completed',
+        rawOutput: `Command running in background with ID: ${taskId}. Output is being written to: ${outputFile}`,
+        _meta: { jetbrains: { air: { version: 1, asyncTasks: { backgrounded: true } } } },
+      });
+      await send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Started it in the background; it finishes in about two seconds.' } });
+      setTimeout(() => {
+        fs.writeFileSync(outputFile, 'background work finished\n');
+        void send({ sessionUpdate: 'async_task_state_update', asyncTaskId: taskId, state: 'completed', toolCallId: callId, outputFilePath: outputFile }).catch(() => {});
+      }, 2000);
+      return { stopReason: 'end_turn' as const };
+    }
 
     // "mcp" lists the MCP servers this session was given, so the app's injection can be checked
     if (/\bmcp\b/.test(lower)) {

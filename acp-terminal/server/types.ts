@@ -74,6 +74,11 @@ export interface ToolCallRecord {
   exitCode?: number | null;
   /** The command keeps running after the call returns (background shell, async agent). */
   background?: boolean;
+  /** Lifecycle of that background work; absent means still running (or never reported). */
+  backgroundState?: BackgroundState;
+  /** How the background work ended, e.g. the agent's summary or why it was cut off. */
+  backgroundSummary?: string;
+  backgroundEndedAt?: number;
 }
 
 /**
@@ -169,6 +174,9 @@ export interface AcpSession {
   state: SessionState;
   score: number;
   reasons: string[];
+  /** The score's parts in plain language, and one sentence on why it sits where it does. */
+  rankFactors?: Array<{ label: string; points: number }>;
+  rankSummary?: string;
   lastPrompt: string;
   recap: string;
   usage: TokenUsage;
@@ -205,6 +213,9 @@ export interface SessionSummary {
   state: SessionState;
   score: number;
   reasons: string[];
+  /** The score's parts in plain language, and one sentence on why it sits where it does. */
+  rankFactors?: Array<{ label: string; points: number }>;
+  rankSummary?: string;
   lastPrompt: string;
   recap: string;
   git: GitInfo | null;
@@ -246,4 +257,18 @@ export type McpServerInput = Partial<Omit<McpServerConfig, 'id' | 'createdAt' | 
 export interface SessionMcpInfo {
   attached: string[];
   skipped: Array<{ name: string; reason: string }>;
+}
+
+export type BackgroundState = 'running' | 'completed' | 'failed' | 'stopped';
+
+/** An AIR `async_task_*` session update (background shell, workflow, monitor). */
+export interface AsyncTaskUpdate {
+  kind: 'spawned' | 'progress' | 'state';
+  asyncTaskId: string;
+  toolCallId?: string;
+  state?: BackgroundState;
+  summary?: string;
+  name?: string;
+  /** File the agent writes the task's output to. */
+  outputFilePath?: string;
 }

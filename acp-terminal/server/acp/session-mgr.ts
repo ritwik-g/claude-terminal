@@ -6,11 +6,11 @@ import { store } from '../store.js';
 import { getGitInfo } from '../git.js';
 import { rankSession, sortSessions } from '../rank.js';
 import { getAgent, hasAgent } from '../agents/registry.js';
-import { AcpClientHost, HostClosedError, TurnInFlightError, normalizeClaudeModel, type ChunkMeta } from './client-host.js';
+import { AcpClientHost, HostClosedError, TurnInFlightError, capToolOutput, normalizeClaudeModel, type ChunkMeta } from './client-host.js';
 import { ptyManager } from '../pty-manager.js';
 import { getUploadsDir } from '../paths.js';
 import { getClaudeRateLimits, updateClaudeRateLimitsFromSdk } from '../subscriptions.js';
-import type { AcpSession, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
+import type { AcpSession, AsyncTaskUpdate, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
 
 /**
  * Format conversation history into a structured briefing block for context transfer.
@@ -93,6 +93,7 @@ export class SessionManager extends EventEmitter {
 
   /** Shut down the session's agent (running or still starting) and drop turn ownership. */
   private dropHost(sessionId: string): void {
+    this.settleBackgroundWork(sessionId, 'Stopped when the agent was stopped');
     const host = this.activeHosts.get(sessionId);
     if (host) {
       host.shutdown();
@@ -104,6 +105,13 @@ export class SessionManager extends EventEmitter {
       this.startingHosts.delete(sessionId);
     }
     this.activePrompts.delete(sessionId);
+  }
+
+  private settleBackgroundWork(sessionId: string, reason: string): void {
+    const s = store.get(sessionId);
+    if (!s || !endBackgroundWork(s, reason)) return;
+    store.save(s, { touch: false });
+    this.emit('sessionStream', { sessionId, type: 'backgroundSettled' });
   }
 
   init(): void {
@@ -161,6 +169,9 @@ export class SessionManager extends EventEmitter {
       // No agent survives a server restart, so a stored approval request can never be answered
       if (session.pendingPermission && !host) {
         session.pendingPermission = null;
+        sessionChanged = true;
+      }
+      if (!host && endBackgroundWork(session, 'Stopped when the server restarted')) {
         sessionChanged = true;
       }
       if (session.activeTerminalId && !ptyManager.getTerminal(session.activeTerminalId)) {
@@ -253,6 +264,8 @@ export class SessionManager extends EventEmitter {
       state: s.state,
       score: s.score,
       reasons: s.reasons,
+      rankFactors: s.rankFactors,
+      rankSummary: s.rankSummary,
       lastPrompt: s.lastPrompt,
       recap: s.recap,
       git: s.git,
@@ -480,6 +493,35 @@ export class SessionManager extends EventEmitter {
       this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: owner.call, turn: owner.turn });
     });
 
+    // Background shells and other async work settle after their tool call has
+    // completed; the task's final state is what ends the "Background" status.
+    const taskCalls = new Map<string, string>();
+    const taskOutputs = new Map<string, string>();
+    host.on('asyncTask', (u: AsyncTaskUpdate) => {
+      if (u.toolCallId) taskCalls.set(u.asyncTaskId, u.toolCallId);
+      const callId = u.toolCallId ?? taskCalls.get(u.asyncTaskId);
+      const s = store.get(session.id);
+      if (!s || !callId) return;
+      const owner = findToolCall(s, callId);
+      if (!owner) return;
+      const call = owner.call;
+      call.background = true;
+      if (u.outputFilePath) taskOutputs.set(u.asyncTaskId, u.outputFilePath);
+      if (u.state && u.state !== 'running') {
+        call.backgroundState = u.state;
+        call.backgroundEndedAt = Date.now();
+        if (u.summary) call.backgroundSummary = u.summary;
+        // The call's own output is only "running in background with ID …"; show what it printed
+        const output = readTaskOutput(u.outputFilePath ?? taskOutputs.get(u.asyncTaskId));
+        if (output !== undefined) call.output = output;
+      } else if (!call.backgroundState) {
+        call.backgroundState = 'running';
+      }
+      store.save(s, { touch: false });
+      // Not 'toolCallUpdate': the turn may be long over, and that event marks the session working
+      this.emit('sessionStream', { sessionId: s.id, type: 'backgroundUpdate', toolCall: call, turn: owner.turn });
+    });
+
     host.on('plan', (entries: PlanEntry[]) => {
       const s = store.get(session.id);
       if (!s) return;
@@ -616,6 +658,7 @@ export class SessionManager extends EventEmitter {
       this.activeHosts.delete(session.id);
       this.activePrompts.delete(session.id);
       activeAgentTurn = null;
+      this.settleBackgroundWork(session.id, 'Stopped when the agent exited');
       const s = store.get(session.id);
       if (s && (s.state === 'working' || s.state === 'blocked' || s.pendingPermission)) {
         s.state = 'needs_you';
@@ -1229,6 +1272,44 @@ function continuesLastText(turn: TurnMessage, messageId?: string): boolean {
 }
 
 /** Finds a tool call anywhere in the session, newest turn first. */
+const TASK_OUTPUT_READ_LIMIT = 256 * 1024;
+
+/** The tail of a background task's output file, capped like any tool output. */
+function readTaskOutput(file: string | undefined): string | undefined {
+  // The adapter names files like <tmp>/…/tasks/<id>.output; read nothing else
+  if (!file || !path.isAbsolute(file) || !file.endsWith('.output')) return undefined;
+  try {
+    const { size } = fs.statSync(file);
+    const fd = fs.openSync(file, 'r');
+    try {
+      const len = Math.min(size, TASK_OUTPUT_READ_LIMIT);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      return capToolOutput(buf.toString('utf8'));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** Mark background work still running as stopped: it cannot outlive the agent process. */
+function endBackgroundWork(s: AcpSession, reason: string): boolean {
+  let changed = false;
+  for (const turn of s.turns) {
+    for (const call of turn.toolCalls || []) {
+      if (call.background && (call.backgroundState ?? 'running') === 'running') {
+        call.backgroundState = 'stopped';
+        call.backgroundSummary = reason;
+        call.backgroundEndedAt = Date.now();
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 function findToolCall(s: AcpSession, toolCallId: string): { turn: TurnMessage; call: ToolCallRecord } | null {
   for (let i = s.turns.length - 1; i >= 0; i--) {
     const turn = s.turns[i];

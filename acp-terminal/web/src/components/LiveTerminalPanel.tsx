@@ -3,7 +3,8 @@ import type { AcpSession, ToolCallRecord } from '../types';
 import { TerminalDrawer } from './TerminalDrawer';
 import { CopyButton, OutputText } from './AgentTurn';
 import { Badge, Button, EmptyState, Icon, Segmented, Spinner } from '../ui';
-import { commandOf, durationLabel, isActive, isFailed, isShellCall, liveCallIds } from '../toolDisplay';
+import { backgroundRunning, commandOf, durationLabel, isActive, isFailed, isShellCall, liveCallIds } from '../toolDisplay';
+import { BackgroundBadge } from './BackgroundBadge';
 
 // Agents such as Claude Code and Codex run shell commands inside their own
 // process, so nothing ever appears in a client-side PTY. This panel shows
@@ -147,14 +148,14 @@ const CommandFeed: React.FC<{
                     Subagent
                   </Badge>
                 )}
-                {call.background && <Badge tone="info">Background</Badge>}
+                <BackgroundBadge call={call} />
                 {interrupted && <Badge tone="neutral">Interrupted</Badge>}
                 {active ? (
                   <Badge tone="accent">
                     <Spinner size={9} />
                     Running
                   </Badge>
-                ) : call.exitCode != null ? (
+                ) : call.exitCode != null && !backgroundRunning(call) ? (
                   <Badge tone={failed ? 'danger' : 'ok'} mono>
                     exit {call.exitCode}
                   </Badge>
@@ -169,7 +170,7 @@ const CommandFeed: React.FC<{
               <pre className="feed-output">
                 <OutputText text={output} />
               </pre>
-            ) : !active && !interrupted && !call.background ? (
+            ) : !active && !interrupted && !backgroundRunning(call) ? (
               <div className="feed-desc feed-empty-output">No output</div>
             ) : null}
             {call.error && <pre className="feed-output feed-error">{String(call.error)}</pre>}
