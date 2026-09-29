@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api, isHostMachine } from '../api';
-import { Icon } from './Icons';
+import { Badge, Button, EmptyState, Icon, IconButton, Input, Kbd, Spinner } from '../ui';
 import { Modal } from './Modal';
+import { useEscapeLayer } from '../hooks';
 
 interface FolderEntry {
   name: string;
@@ -14,6 +15,8 @@ interface FolderBrowserModalProps {
   onSelect: (selectedPath: string) => void;
   onClose: () => void;
 }
+
+const baseName = (p: string) => p.split('/').filter(Boolean).pop() || p;
 
 export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   initialPath,
@@ -31,11 +34,20 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   const [isEditingPath, setIsEditingPath] = useState<boolean>(false);
   const [pathInput, setPathInput] = useState<string>('');
   const [nativeBrowsing, setNativeBrowsing] = useState<boolean>(false);
+  const [activeIndex, setActiveIndex] = useState<number>(0);
+  const lastRequested = useRef<string | undefined>(initialPath);
+  const listHadFocus = useRef(false);
+
+  const filterRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const crumbsRef = useRef<HTMLElement>(null);
 
   const fetchDirectory = async (targetPath?: string) => {
+    lastRequested.current = targetPath;
     setLoading(true);
     setError(null);
     setFilterQuery('');
+    setActiveIndex(0);
     try {
       const res = await api.getFolders(targetPath);
       setCurrentPath(res.current);
@@ -47,7 +59,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       }
       setPathInput(res.current);
     } catch (err: any) {
-      setError(err.message || 'Failed to read directory');
+      setError(err.message || "This folder couldn't be read.");
     } finally {
       setLoading(false);
     }
@@ -56,6 +68,12 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   useEffect(() => {
     fetchDirectory(initialPath);
   }, []);
+
+  // Keep the deepest breadcrumb in view on long paths.
+  useEffect(() => {
+    const el = crumbsRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [currentPath, isEditingPath]);
 
   const handleNativeBrowse = async () => {
     setNativeBrowsing(true);
@@ -77,12 +95,9 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
     onClose();
   };
 
-  const handleBreadcrumbClick = (targetPath: string) => {
-    fetchDirectory(targetPath);
-  };
-
   const handleManualPathSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     if (pathInput.trim()) {
       fetchDirectory(pathInput.trim());
       setIsEditingPath(false);
@@ -91,376 +106,368 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
 
   // Build breadcrumb segments from currentPath
   const pathParts = currentPath.split('/').filter(Boolean);
-  const breadcrumbs = pathParts.map((part, index) => {
-    const segPath = '/' + pathParts.slice(0, index + 1).join('/');
-    return { name: part, path: segPath };
-  });
+  const breadcrumbs = pathParts.map((part, index) => ({
+    name: part,
+    path: '/' + pathParts.slice(0, index + 1).join('/'),
+  }));
 
-  const filteredEntries = entries.filter((e) =>
-    e.name.toLowerCase().includes(filterQuery.toLowerCase())
-  );
+  const filteredEntries = entries.filter((e) => e.name.toLowerCase().includes(filterQuery.toLowerCase()));
 
-  const currentFolderBasename = currentPath.split('/').filter(Boolean).pop() || currentPath;
+  const focusRow = (idx: number) => {
+    const rows = listRef.current?.querySelectorAll<HTMLElement>('[data-row]');
+    if (!rows || rows.length === 0) return;
+    const clamped = Math.max(0, Math.min(rows.length - 1, idx));
+    setActiveIndex(clamped);
+    rows[clamped].focus();
+    rows[clamped].scrollIntoView({ block: 'nearest' });
+  };
+
+  const onListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const entry = filteredEntries[activeIndex];
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        focusRow(activeIndex + 1);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        if (activeIndex === 0) filterRef.current?.focus();
+        else focusRow(activeIndex - 1);
+        break;
+      case 'Home':
+        e.preventDefault();
+        focusRow(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        focusRow(filteredEntries.length - 1);
+        break;
+      case 'ArrowRight':
+        if (entry) {
+          e.preventDefault();
+          listHadFocus.current = true;
+          fetchDirectory(entry.path);
+        }
+        break;
+      case 'ArrowLeft':
+      case 'Backspace':
+        if (parentPath) {
+          e.preventDefault();
+          listHadFocus.current = true;
+          fetchDirectory(parentPath);
+        }
+        break;
+    }
+  };
+
+  // Focus returns to the list after navigating, so arrow keys keep working.
+  useEffect(() => {
+    if (!loading && listHadFocus.current) {
+      listHadFocus.current = false;
+      if (filteredEntries.length > 0) focusRow(0);
+      else filterRef.current?.focus();
+    }
+  }, [loading]);
+
+  const cancelPathEdit = () => {
+    setIsEditingPath(false);
+    setPathInput(currentPath);
+  };
+  // Esc while typing a path cancels the edit instead of closing the browser.
+  useEscapeLayer(isEditingPath, cancelPathEdit);
 
   return (
     // Nested: Esc closes only this browser, not the New Session dialog underneath.
     <Modal
       nested
       onClose={onClose}
-      labelledBy="folder-browser-title"
-      overlayClassName="folder-browser-overlay"
-      overlayStyle={{ zIndex: 1100 }}
-      className="folder-browser-card"
-      style={{ width: '640px', maxWidth: '95vw', maxHeight: '88vh' }}
-    >
-      {/* Header */}
-      <div className="modal-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Icon name="folder" size={16} />
-          <span id="folder-browser-title" style={{ fontWeight: 700 }}>Select Project Folder</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {isHostMachine() && (
-          <button
-            type="button"
-            className="btn-action"
+      size="md"
+      icon="folder"
+      heading="Choose a project folder"
+      description="The agent reads and edits files inside this folder."
+      className="fb-card"
+      bodyClassName="fb-body"
+      initialFocusRef={filterRef}
+      headerActions={
+        isHostMachine() ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon="external"
+            loading={nativeBrowsing}
             onClick={handleNativeBrowse}
-            disabled={nativeBrowsing}
-            title="Open macOS Finder to pick folder"
-            style={{ padding: '4px 10px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
+            title="Pick a folder with the macOS Finder dialog"
           >
-            <Icon name="cpu" size={14} />
-            <span>{nativeBrowsing ? 'Opening...' : 'Finder'}</span>
-          </button>
-          )}
-          <button
-            type="button"
-            className="close-button"
-            onClick={onClose}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-dim)',
-              fontSize: '18px',
-              cursor: 'pointer',
-              padding: '2px 6px',
-              lineHeight: 1,
-            }}
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-
-      {/* Modal Body */}
-      <div className="modal-body folder-browser-body" style={{ padding: '16px', gap: '12px', display: 'flex', flexDirection: 'column' }}>
-        {error && (
-          <div style={{ color: '#ef4444', fontSize: '12.5px', padding: '6px 10px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '6px' }}>
-            {error}
-          </div>
-        )}
-
-        {/* Breadcrumbs or Manual Path Bar */}
-        <div className="folder-browser-pathbar">
-          {isEditingPath ? (
-            <form onSubmit={handleManualPathSubmit} style={{ display: 'flex', gap: '6px', width: '100%' }}>
-              <input
-                type="text"
-                className="form-input"
-                value={pathInput}
-                onChange={(e) => setPathInput(e.target.value)}
-                placeholder="/Users/username/repo"
-                autoFocus
-                style={{ fontSize: '12.5px', padding: '6px 10px' }}
-              />
-              <button type="submit" className="btn-action" style={{ padding: '6px 12px', fontSize: '12px' }}>
-                Go
-              </button>
+            Finder
+          </Button>
+        ) : null
+      }
+      footerStart={
+        <span className="dlg-hint fb-keys">
+          <Kbd>↑</Kbd>
+          <Kbd>↓</Kbd>
+          <span>move</span>
+          <Kbd>Enter</Kbd>
+          <span>open</span>
+          <Kbd>⌫</Kbd>
+          <span>up</span>
+        </span>
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="primary" icon="check" onClick={() => handleSelect(currentPath)} disabled={!currentPath || loading}>
+            Use this folder
+          </Button>
+        </>
+      }
+    >
+      {/* Path bar: parent, home, breadcrumbs, and a typed-path mode */}
+      <div className="fb-pathbar">
+        {isEditingPath ? (
+          <form className="fb-pathform" onSubmit={handleManualPathSubmit}>
+            <Input
+              mono
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+              placeholder="/Users/you/projects/my-app"
+              aria-label="Folder path"
+              spellCheck={false}
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+            />
+            <Button size="sm" variant="primary" type="submit">
+              Go
+            </Button>
+            <Button size="sm" variant="ghost" onClick={cancelPathEdit}>
+              Cancel
+            </Button>
+          </form>
+        ) : (
+          <>
+            <IconButton
+              icon="arrowUp"
+              label="Parent folder"
+              size="sm"
+              disabled={!parentPath || loading}
+              onClick={() => parentPath && fetchDirectory(parentPath)}
+            />
+            <IconButton icon="home" label="Home folder" size="sm" disabled={loading} onClick={() => fetchDirectory('~')} />
+            <nav className="fb-crumbs" aria-label="Folder path" ref={crumbsRef}>
               <button
                 type="button"
-                className="btn-action"
-                onClick={() => {
-                  setIsEditingPath(false);
-                  setPathInput(currentPath);
-                }}
-                style={{ padding: '6px 10px', fontSize: '12px' }}
+                className={`fb-crumb${currentPath === '/' ? ' is-current' : ''}`}
+                onClick={() => fetchDirectory('/')}
+                title="Root (/)"
+                aria-current={currentPath === '/' ? 'location' : undefined}
               >
-                Cancel
+                /
               </button>
-            </form>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', gap: '8px' }}>
-              <div className="folder-breadcrumbs" style={{ display: 'flex', alignItems: 'center', overflowX: 'auto', gap: '4px', flex: 1, padding: '2px 0' }}>
-                <button
-                  type="button"
-                  className="breadcrumb-chip"
-                  onClick={() => fetchDirectory('~')}
-                  title="Jump to Home (~)"
-                  style={{ fontSize: '13px' }}
-                >
-                  🏠
-                </button>
-                <span style={{ color: 'var(--text-dim)', opacity: 0.5 }}>|</span>
-                <button
-                  type="button"
-                  className={`breadcrumb-chip ${currentPath === '/' ? 'active' : ''}`}
-                  onClick={() => handleBreadcrumbClick('/')}
-                  title="Root (/)"
-                >
-                  /
-                </button>
-                {breadcrumbs.map((crumb) => (
+              {breadcrumbs.map((crumb, i) => {
+                const isLast = i === breadcrumbs.length - 1;
+                return (
                   <React.Fragment key={crumb.path}>
+                    {i > 0 && <Icon name="chevronRight" size={12} className="fb-crumb-sep" />}
                     <button
                       type="button"
-                      className={`breadcrumb-chip ${crumb.path === currentPath ? 'active' : ''}`}
-                      onClick={() => handleBreadcrumbClick(crumb.path)}
+                      className={`fb-crumb${isLast ? ' is-current' : ''}`}
+                      onClick={() => fetchDirectory(crumb.path)}
                       title={crumb.path}
+                      aria-current={isLast ? 'location' : undefined}
                     >
                       {crumb.name}
                     </button>
-                    <span style={{ color: 'var(--text-dim)', fontSize: '11px', opacity: 0.6 }}>/</span>
                   </React.Fragment>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="btn-action"
-                onClick={() => setIsEditingPath(true)}
-                title="Directly edit or paste path"
-                style={{ padding: '3px 8px', fontSize: '11px', flexShrink: 0 }}
-              >
-                ✏️ Edit
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Current Selection Banner */}
-        <div className="folder-current-banner">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
-            <span style={{ fontSize: '24px', flexShrink: 0 }}>{isGit ? '📦' : '📁'}</span>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-main)' }}>
-                  {currentFolderBasename}
-                </span>
-                {isGit && (
-                  <span
-                    style={{
-                      background: 'rgba(16, 185, 129, 0.15)',
-                      color: '#10b981',
-                      border: '1px solid rgba(16, 185, 129, 0.3)',
-                      padding: '1px 6px',
-                      borderRadius: '4px',
-                      fontSize: '11px',
-                      fontWeight: 600,
-                    }}
-                  >
-                    ⎇ git repo
-                  </span>
-                )}
-              </div>
-              <div
-                style={{
-                  fontSize: '11.5px',
-                  color: 'var(--text-dim)',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-                title={currentPath}
-              >
-                {currentPath}
-              </div>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="btn-new"
-            onClick={() => handleSelect(currentPath)}
-            style={{
-              padding: '6px 14px',
-              fontSize: '12.5px',
-              fontWeight: 600,
-              flexShrink: 0,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-            }}
-          >
-            <span>✓</span>
-            <span>Use This Folder</span>
-          </button>
-        </div>
-
-        {/* Recent Workspaces Quick Bar */}
-        {recentWorkspaces.length > 0 && (
-          <div className="folder-recent-section">
-            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-              Recent Workspaces:
-            </span>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
-              {recentWorkspaces.map((rw) => {
-                const name = rw.split('/').filter(Boolean).pop() || rw;
-                const isCurrent = rw === currentPath;
-                return (
-                  <button
-                    key={rw}
-                    type="button"
-                    className={`recent-workspace-pill ${isCurrent ? 'active' : ''}`}
-                    onClick={() => fetchDirectory(rw)}
-                    title={rw}
-                  >
-                    <span style={{ opacity: 0.7 }}>📁</span> {name}
-                  </button>
                 );
               })}
-            </div>
-          </div>
+            </nav>
+            <IconButton icon="edit" label="Type a path" size="sm" onClick={() => setIsEditingPath(true)} />
+          </>
         )}
+      </div>
 
-        {/* Navigation Controls: Parent & Filter */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {parentPath && (
-            <button
-              type="button"
-              className="btn-action"
-              onClick={() => fetchDirectory(parentPath)}
-              title="Go to parent directory"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-                padding: '6px 12px',
-                fontSize: '12px',
-                flexShrink: 0,
-              }}
-            >
-              <span>⬆️</span>
-              <span>Parent Folder</span>
-            </button>
-          )}
-          <div style={{ flex: 1, position: 'relative' }}>
-            <input
-              type="text"
-              className="form-input"
-              value={filterQuery}
-              onChange={(e) => setFilterQuery(e.target.value)}
-              placeholder="🔍 Filter subdirectories..."
-              style={{ fontSize: '12px', padding: '6px 10px', height: '32px' }}
-            />
-            {filterQuery && (
-              <button
-                type="button"
-                onClick={() => setFilterQuery('')}
-                style={{
-                  position: 'absolute',
-                  right: '8px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--text-dim)',
-                  cursor: 'pointer',
-                  fontSize: '12px',
-                }}
-              >
-                ✕
-              </button>
+      {/* The folder that "Use this folder" picks */}
+      <div className="fb-current">
+        <span className={`fb-current-icon${isGit ? ' is-git' : ''}`}>
+          <Icon name={isGit ? 'branch' : 'folder'} size={16} />
+        </span>
+        <div className="fb-current-text">
+          <div className="fb-current-name">
+            <span>{baseName(currentPath) || '/'}</span>
+            {isGit && (
+              <Badge tone="ok" icon="branch">
+                Git repository
+              </Badge>
             )}
           </div>
-        </div>
-
-        {/* Directory Entries List */}
-        <div className="folder-entries-container">
-          {loading ? (
-            <div style={{ padding: '30px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
-              Loading folders...
-            </div>
-          ) : filteredEntries.length === 0 ? (
-            <div style={{ padding: '30px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
-              {filterQuery ? 'No matching folders found' : 'No subdirectories in this folder'}
-            </div>
-          ) : (
-            <div className="folder-entries-list">
-              {filteredEntries.map((entry) => (
-                <div
-                  key={entry.path}
-                  className="folder-entry-row"
-                  onClick={() => fetchDirectory(entry.path)}
-                  title={`Click to open ${entry.name}`}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
-                    <span style={{ fontSize: '16px', flexShrink: 0 }}>{entry.isGit ? '📦' : '📁'}</span>
-                    <span className="folder-entry-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '13px', fontWeight: 500 }}>
-                      {entry.name}
-                    </span>
-                    {entry.isGit && (
-                      <span
-                        style={{
-                          background: 'rgba(16, 185, 129, 0.12)',
-                          color: '#10b981',
-                          border: '1px solid rgba(16, 185, 129, 0.25)',
-                          padding: '1px 5px',
-                          borderRadius: '3px',
-                          fontSize: '10px',
-                          fontWeight: 600,
-                          flexShrink: 0,
-                        }}
-                      >
-                        git
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                    <button
-                      type="button"
-                      className="btn-select-folder-chip"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSelect(entry.path);
-                      }}
-                      title={`Select ${entry.name} immediately`}
-                    >
-                      Select
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <div className="fb-current-path mono" title={currentPath}>
+            {currentPath}
+          </div>
         </div>
       </div>
 
-      {/* Footer */}
-      <div className="modal-footer" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-        <div
-          style={{
-            fontSize: '11px',
-            color: 'var(--text-dim)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            maxWidth: '350px',
+      {recentWorkspaces.length > 0 && (
+        <div className="dlg-chips" role="group" aria-label="Recent projects">
+          <span className="dlg-eyebrow">Recent</span>
+          {recentWorkspaces.slice(0, 8).map((rw) => (
+            <button
+              key={rw}
+              type="button"
+              className={`dlg-chip${rw === currentPath ? ' is-selected' : ''}`}
+              aria-pressed={rw === currentPath}
+              onClick={() => fetchDirectory(rw)}
+              title={rw}
+            >
+              <Icon name="clock" size={12} />
+              {baseName(rw)}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="dlg-input-icon fb-filter">
+        <Icon name="search" size={14} />
+        <Input
+          ref={filterRef}
+          value={filterQuery}
+          onChange={(e) => {
+            setFilterQuery(e.target.value);
+            setActiveIndex(0);
           }}
-          title={currentPath}
-        >
-          {currentPath}
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button type="button" className="btn-action" onClick={onClose} style={{ padding: '6px 14px', fontSize: '12.5px' }}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn-new"
-            onClick={() => handleSelect(currentPath)}
-            style={{ padding: '6px 16px', fontSize: '12.5px', fontWeight: 600 }}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              focusRow(0);
+            } else if (e.key === 'Enter') {
+              e.preventDefault();
+              const first = filteredEntries[0];
+              if (first) fetchDirectory(first.path);
+            } else if (e.key === 'Backspace' && !filterQuery && parentPath && !loading) {
+              // An empty filter has nothing to delete, so Backspace goes up a level.
+              e.preventDefault();
+              fetchDirectory(parentPath);
+            }
+          }}
+          placeholder={entries.length > 0 ? `Filter ${entries.length} ${entries.length === 1 ? 'folder' : 'folders'}` : 'Filter folders'}
+          aria-label="Filter folders"
+          aria-controls="fb-list"
+        />
+        {filterQuery && (
+          <IconButton
+            icon="x"
+            label="Clear filter"
+            size="sm"
+            className="dlg-input-clear"
+            onClick={() => {
+              setFilterQuery('');
+              filterRef.current?.focus();
+            }}
+          />
+        )}
+      </div>
+
+      <div className="fb-list-wrap">
+        {error ? (
+          <div className="fb-state">
+            <EmptyState
+              compact
+              icon="alert"
+              title="This folder couldn't be opened"
+              description={error}
+              action={
+                <div className="fb-state-actions">
+                  <Button size="sm" icon="refresh" onClick={() => fetchDirectory(lastRequested.current)}>
+                    Try again
+                  </Button>
+                  <Button size="sm" variant="ghost" icon="home" onClick={() => fetchDirectory('~')}>
+                    Go to home folder
+                  </Button>
+                </div>
+              }
+            />
+          </div>
+        ) : loading ? (
+          <div className="fb-state fb-loading" role="status">
+            <Spinner size={16} />
+            <span>Loading folders…</span>
+          </div>
+        ) : filteredEntries.length === 0 ? (
+          <div className="fb-state">
+            <EmptyState
+              compact
+              icon={filterQuery ? 'search' : 'folder'}
+              title={filterQuery ? 'No folders match' : 'No subfolders here'}
+              description={
+                filterQuery
+                  ? `Nothing in ${baseName(currentPath)} matches "${filterQuery}".`
+                  : 'You can use this folder as it is, or go up a level.'
+              }
+              action={
+                filterQuery ? (
+                  <Button
+                    size="sm"
+                    icon="x"
+                    onClick={() => {
+                      setFilterQuery('');
+                      filterRef.current?.focus();
+                    }}
+                  >
+                    Clear filter
+                  </Button>
+                ) : parentPath ? (
+                  <Button size="sm" icon="arrowUp" onClick={() => fetchDirectory(parentPath)}>
+                    Up one level
+                  </Button>
+                ) : undefined
+              }
+            />
+          </div>
+        ) : (
+          <div
+            className={`fb-list${filterQuery ? ' has-query' : ''}`}
+            id="fb-list"
+            role="list"
+            aria-label={`Folders in ${baseName(currentPath)}`}
+            ref={listRef}
+            onKeyDown={onListKeyDown}
           >
-            Choose Current Folder
-          </button>
-        </div>
+            {filteredEntries.map((entry, i) => (
+              <div key={entry.path} role="listitem" className={`fb-row${i === activeIndex ? ' is-active' : ''}`}>
+                <button
+                  type="button"
+                  data-row
+                  className="fb-row-open"
+                  tabIndex={i === activeIndex ? 0 : -1}
+                  onFocus={() => setActiveIndex(i)}
+                  onClick={() => {
+                    listHadFocus.current = true;
+                    fetchDirectory(entry.path);
+                  }}
+                  title={`Open ${entry.name}`}
+                >
+                  <span className={`fb-row-icon${entry.isGit ? ' is-git' : ''}`}>
+                    <Icon name={entry.isGit ? 'branch' : 'folder'} size={15} />
+                  </span>
+                  <span className="fb-row-name">{entry.name}</span>
+                  {entry.isGit && <Badge tone="ok">git</Badge>}
+                  <Icon name="chevronRight" size={14} className="fb-row-chevron" />
+                </button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="fb-row-select"
+                  tabIndex={i === activeIndex ? 0 : -1}
+                  onClick={() => handleSelect(entry.path)}
+                  aria-label={`Use ${entry.name}`}
+                >
+                  Use
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </Modal>
   );

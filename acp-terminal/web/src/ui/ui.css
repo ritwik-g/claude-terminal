@@ -46,7 +46,7 @@
 .ui-btn-ghost { color: var(--text-2); }
 .ui-btn-ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
 
-.ui-btn-danger { background: var(--danger); color: #fff; }
+.ui-btn-danger { background: var(--danger); color: var(--text-on-accent); }
 .ui-btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
 
 .ui-btn-danger-ghost { color: var(--danger); }
@@ -225,7 +225,7 @@
   transition: transform var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .ui-switch.is-on { background: var(--accent-solid); border-color: var(--accent-solid); }
-.ui-switch.is-on .ui-switch-thumb { transform: translateX(14px); background: #fff; }
+.ui-switch.is-on .ui-switch-thumb { transform: translateX(14px); background: var(--text-on-accent); }
 
 /* ----------------------------------------------------------------- Tabs */
 .ui-tabs { display: flex; align-items: stretch; gap: var(--space-4); }

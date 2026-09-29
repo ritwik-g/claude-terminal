@@ -1,14 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import type { AcpSession, AgentDescriptor, SessionSummary } from './types';
 import { api, connectWebSocket } from './api';
 import { Sidebar } from './components/Sidebar';
 import { SessionDetail, nextPriority } from './components/SessionDetail';
 import { NewSessionModal } from './components/NewSessionModal';
 import { SwitchAgentModal } from './components/SwitchAgentModal';
-import { SearchModal } from './components/SearchModal';
+import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import { HomeDashboard } from './components/HomeDashboard';
 import { SubscriptionsUsageModal } from './components/SubscriptionsUsageModal';
 import { NetworkModal } from './components/NetworkModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { MOD_KEY, needsAttention } from './components/Sidebar';
+import { useTheme } from './design/theme';
+import { Button, Field, Icon, Input, Spinner } from './ui';
 
 /** Session ids in the order the sidebar shows them, honouring its filters and grouping. */
 function visibleSessionOrder(): string[] {
@@ -24,7 +28,9 @@ export const App: React.FC = () => {
   const [activeSession, setActiveSession] = useState<AcpSession | null>(null);
   const [showNewModal, setShowNewModal] = useState(false);
   const [showSwitchModal, setShowSwitchModal] = useState(false);
-  const [showSearchModal, setShowSearchModal] = useState(false);
+  const [showPalette, setShowPalette] = useState(false);
+  // Agent to preselect in the new-session dialog (from a home quick-start card).
+  const [newSessionAgentId, setNewSessionAgentId] = useState<string | null>(null);
   const [showSubscriptionsModal, setShowSubscriptionsModal] = useState(false);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [authError, setAuthError] = useState(false);
@@ -33,6 +39,7 @@ export const App: React.FC = () => {
   const [mobileView, setMobileView] = useState<'list' | 'session'>('list');
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
+  const { resolved: resolvedTheme, preference: themePreference, setPreference: setThemePreference } = useTheme();
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -43,8 +50,6 @@ export const App: React.FC = () => {
       if (selectedId && !res.sessions.some((s) => s.id === selectedId)) {
         // The open session was deleted (here or from another tab/device).
         setSelectedId(res.sessions[0]?.id ?? null);
-      } else if (!selectedId && res.sessions.length > 0) {
-        setSelectedId(res.sessions[0].id);
       } else if (selectedId) {
         const match = res.sessions.find((s) => s.id === selectedId);
         if (match) {
@@ -193,7 +198,38 @@ export const App: React.FC = () => {
   }, [selectedId, fetchSessionDetail, fetchSessions]);
 
   const anyModalOpen =
-    showNewModal || showSwitchModal || showSearchModal || showSubscriptionsModal || showNetworkModal;
+    showNewModal || showSwitchModal || showPalette || showSubscriptionsModal || showNetworkModal;
+
+  const openNewSession = useCallback((agentId?: string) => {
+    setNewSessionAgentId(agentId ?? null);
+    setShowNewModal(true);
+  }, []);
+
+  const goHome = useCallback(() => {
+    setSelectedId(null);
+    setMobileView('list');
+  }, []);
+
+  /** Update the open session's pin, priority or cleanup mark, then refresh. */
+  const annotate = useCallback(
+    (updates: Parameters<typeof api.updateAnnotations>[1], what: string) => {
+      if (!selectedId) return;
+      api
+        .updateAnnotations(selectedId, updates)
+        .then(() => {
+          fetchSessions();
+          fetchSessionDetail(selectedId);
+        })
+        .catch((err) => alert(`Could not update ${what}: ${err.message}`));
+    },
+    [selectedId, fetchSessions, fetchSessionDetail]
+  );
+
+  // Show how many sessions need the user in the tab title.
+  useEffect(() => {
+    const n = sessions.filter(needsAttention).length;
+    document.title = n > 0 ? `(${n}) ACP Terminal` : 'ACP Terminal';
+  }, [sessions]);
 
   const handleDeleted = useCallback(
     (deletedId: string) => {
@@ -220,7 +256,7 @@ export const App: React.FC = () => {
         // Esc must close a modal even while focus is in one of its inputs.
         setShowNewModal(false);
         setShowSwitchModal(false);
-        setShowSearchModal(false);
+        setShowPalette(false);
         setShowSubscriptionsModal(false);
         setShowNetworkModal(false);
         return;
@@ -228,7 +264,15 @@ export const App: React.FC = () => {
 
       if (e.key.toLowerCase() === 'n' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault();
-        setShowNewModal(true);
+        openNewSession();
+        return;
+      }
+
+      if (e.key.toLowerCase() === 'k' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+        // Toggles the palette from anywhere, but doesn't stack it over another dialog.
+        e.preventDefault();
+        if (showPalette) setShowPalette(false);
+        else if (!anyModalOpen) setShowPalette(true);
         return;
       }
 
@@ -243,7 +287,7 @@ export const App: React.FC = () => {
 
       if (e.key === '/') {
         e.preventDefault();
-        setShowSearchModal(true);
+        setShowPalette(true);
       } else if (['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
         // Arrows navigate only from the page or the sidebar, so they still scroll
         // the conversation when it has focus.
@@ -263,57 +307,167 @@ export const App: React.FC = () => {
       } else if (e.key === 'Enter' && selectedId) {
         setMobileView('session');
       } else if (e.key === 'p' && selectedId && activeSession) {
-        api
-          .updateAnnotations(selectedId, { priority: nextPriority(activeSession.user.priority) })
-          .then(() => {
-            fetchSessions();
-            fetchSessionDetail(selectedId);
-          })
-          .catch((err) => alert(`Could not update priority: ${err.message}`));
+        annotate({ priority: nextPriority(activeSession.user.priority) }, 'priority');
       } else if (e.key === 'c' && selectedId && activeSession) {
-        api
-          .updateAnnotations(selectedId, { cleanup: !activeSession.user.cleanup })
-          .then(() => {
-            fetchSessions();
-            fetchSessionDetail(selectedId);
-          })
-          .catch((err) => alert(`Could not update cleanup mark: ${err.message}`));
+        annotate({ cleanup: !activeSession.user.cleanup }, 'cleanup mark');
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedId, activeSession, anyModalOpen, fetchSessions, fetchSessionDetail]);
+  }, [selectedId, activeSession, anyModalOpen, showPalette, openNewSession, annotate]);
+
+  const paletteActions = useMemo<PaletteAction[]>(() => {
+    const list: PaletteAction[] = [];
+    const current = activeSession && activeSession.id === selectedId ? activeSession : null;
+    if (current) {
+      const next = nextPriority(current.user.priority);
+      list.push(
+        {
+          id: 'switch-agent',
+          label: 'Switch agent',
+          icon: 'swap',
+          group: 'Current session',
+          keywords: 'change vendor model handoff',
+          run: () => setShowSwitchModal(true),
+        },
+        {
+          id: 'pin',
+          label: current.user.pinned ? 'Unpin session' : 'Pin session',
+          icon: 'pin',
+          group: 'Current session',
+          keywords: 'pin unpin favourite',
+          run: () => annotate({ pinned: !current.user.pinned }, 'pin'),
+        },
+        {
+          id: 'priority',
+          label: next ? `Set priority to ${next.toUpperCase()}` : 'Clear priority',
+          icon: 'star',
+          group: 'Current session',
+          keywords: 'priority p0 p1 p2 importance',
+          shortcut: ['p'],
+          run: () => annotate({ priority: next }, 'priority'),
+        },
+        {
+          id: 'cleanup',
+          label: current.user.cleanup ? 'Unmark for cleanup' : 'Mark for cleanup',
+          icon: 'archive',
+          group: 'Current session',
+          keywords: 'cleanup archive done tidy',
+          shortcut: ['c'],
+          run: () => annotate({ cleanup: !current.user.cleanup }, 'cleanup mark'),
+        }
+      );
+    }
+    list.push({
+      id: 'new',
+      label: 'New session',
+      icon: 'plus',
+      group: 'Actions',
+      keywords: 'start create launch agent',
+      shortcut: [MOD_KEY, 'N'],
+      run: () => openNewSession(),
+    });
+    if (selectedId) {
+      list.push({ id: 'home', label: 'Go to home', icon: 'home', group: 'Actions', keywords: 'dashboard overview', run: goHome });
+    }
+    const other = resolvedTheme === 'dark' ? 'light' : 'dark';
+    list.push({
+      id: 'theme',
+      label: `Switch to ${other} theme`,
+      icon: other === 'light' ? 'sun' : 'moon',
+      group: 'Actions',
+      keywords: 'toggle theme appearance dark light mode',
+      run: () => setThemePreference(other),
+    });
+    if (themePreference !== 'system') {
+      list.push({
+        id: 'theme-system',
+        label: 'Use system theme',
+        icon: 'monitor',
+        group: 'Actions',
+        keywords: 'theme appearance auto os',
+        run: () => setThemePreference('system'),
+      });
+    }
+    list.push(
+      {
+        id: 'lan',
+        label: 'Open LAN access',
+        icon: 'wifi',
+        group: 'Actions',
+        keywords: 'network phone device token share url',
+        run: () => setShowNetworkModal(true),
+      },
+      {
+        id: 'subscriptions',
+        label: 'Open subscriptions and usage',
+        icon: 'card',
+        group: 'Actions',
+        keywords: 'settings billing credentials cost plan limits',
+        run: () => setShowSubscriptionsModal(true),
+      }
+    );
+    for (const a of agents) {
+      list.push({
+        id: `new-${a.id}`,
+        label: `New ${a.name} session`,
+        icon: 'plus',
+        group: 'Actions',
+        keywords: `start ${a.id} ${a.provider}`,
+        searchOnly: true,
+        run: () => openNewSession(a.id),
+      });
+    }
+    return list;
+  }, [activeSession, selectedId, agents, resolvedTheme, themePreference, annotate, openNewSession, goHome, setThemePreference]);
 
   if (authError && sessions.length === 0) {
     return (
-      <div className="auth-required-screen">
-        <div className="auth-card">
-          <div className="auth-icon">🔐</div>
-          <h2>Authentication Required</h2>
-          <p>
-            You are connecting to ACP Terminal from another device on your network (<code>{window.location.host}</code>).
+      <div className="auth-screen">
+        <form className="auth-card" onSubmit={handleManualTokenSubmit}>
+          <span className="auth-icon" aria-hidden>
+            <Icon name="lock" size={20} />
+          </span>
+          <h1 className="auth-title">Connect to ACP Terminal</h1>
+          <p className="auth-desc">
+            You're opening the workspace from another device (<code>{window.location.host}</code>). Paste the access token
+            from the host computer to continue.
           </p>
-          <p className="auth-hint">
-            Please enter the security token from your host computer:
-          </p>
-          <form onSubmit={handleManualTokenSubmit}>
-            <input
+          <Field
+            label="Access token"
+            htmlFor="auth-token"
+            hint="On the host, open LAN access in the sidebar to copy the token, or a link that signs you in."
+          >
+            <Input
+              id="auth-token"
               type="text"
-              className="auth-token-input"
-              placeholder="Paste security token here..."
+              mono
+              placeholder="Paste the token"
               value={tokenInput}
               onChange={(e) => setTokenInput(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
               autoFocus
             />
-            <button type="submit" className="btn-send" style={{ width: '100%', padding: '10px' }} disabled={!tokenInput.trim()}>
-              Connect to ACP Terminal
-            </button>
-          </form>
-        </div>
+          </Field>
+          <Button type="submit" variant="primary" size="lg" block disabled={!tokenInput.trim()}>
+            Connect
+          </Button>
+        </form>
       </div>
     );
   }
+
+  if (loading && sessions.length === 0) {
+    return <AppSkeleton />;
+  }
+
+  const newSessionAgents =
+    newSessionAgentId && agents.some((a) => a.id === newSessionAgentId)
+      ? // NewSessionModal preselects the first agent, so put the chosen one first.
+        [...agents.filter((a) => a.id === newSessionAgentId), ...agents.filter((a) => a.id !== newSessionAgentId)]
+      : agents;
 
   return (
     <div className={`app-container mobile-view-${mobileView}`}>
@@ -324,8 +478,9 @@ export const App: React.FC = () => {
           setSelectedId(id);
           setMobileView('session');
         }}
-        onOpenNewModal={() => setShowNewModal(true)}
-        onOpenSearchModal={() => setShowSearchModal(true)}
+        onGoHome={goHome}
+        onOpenNewModal={() => openNewSession()}
+        onOpenPalette={() => setShowPalette(true)}
         onOpenSubscriptionsModal={() => setShowSubscriptionsModal(true)}
         onOpenNetworkModal={() => setShowNetworkModal(true)}
         hasActiveSession={Boolean(activeSession)}
@@ -333,51 +488,51 @@ export const App: React.FC = () => {
         onReturnToActiveSession={() => setMobileView('session')}
       />
 
-      {activeSession ? (
-        <ErrorBoundary resetKey={activeSession.id}>
-        <SessionDetail
-          session={activeSession}
-          agents={agents}
-          onRefresh={() => {
-            fetchSessions();
-            if (selectedId) fetchSessionDetail(selectedId);
-          }}
-          onOpenSwitchModal={() => setShowSwitchModal(true)}
-          onOpenSubscriptionsModal={() => setShowSubscriptionsModal(true)}
-          onBackToList={() => setMobileView('list')}
-          onDeleted={handleDeleted}
-          totalSessionsCount={sessions.length}
-        />
+      {activeSession && selectedId ? (
+        <ErrorBoundary resetKey={activeSession.id} onLeave={{ label: 'Go to home', run: goHome }}>
+          <SessionDetail
+            session={activeSession}
+            agents={agents}
+            onRefresh={() => {
+              fetchSessions();
+              if (selectedId) fetchSessionDetail(selectedId);
+            }}
+            onOpenSwitchModal={() => setShowSwitchModal(true)}
+            onOpenSubscriptionsModal={() => setShowSubscriptionsModal(true)}
+            onBackToList={() => setMobileView('list')}
+            onDeleted={handleDeleted}
+            totalSessionsCount={sessions.length}
+          />
         </ErrorBoundary>
-      ) : loading ? (
-        <div className="app-loading">Loading sessions…</div>
+      ) : selectedId ? (
+        <MainSkeleton />
       ) : (
-        <div className="empty-state-view" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', flexDirection: 'column', gap: '12px' }}>
-          <div style={{ fontSize: '40px' }}>⚡</div>
-          <div style={{ fontSize: '16px', fontWeight: 600 }}>
-            {sessions.length === 0 ? 'No sessions yet' : 'No Session Selected'}
-          </div>
-          <button className="btn-new" onClick={() => setShowNewModal(true)}>
-            + Start a Session
-          </button>
-          <div className="empty-state-hints">
-            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>N</kbd> new session · <kbd>j</kbd>/<kbd>k</kbd> move between sessions ·{' '}
-            <kbd>/</kbd> search
-            <br />
-            <kbd>p</kbd> cycle priority · <kbd>c</kbd> mark for cleanup · <kbd>Esc</kbd> close dialogs
-          </div>
-        </div>
+        <ErrorBoundary resetKey="home">
+          <HomeDashboard
+            sessions={sessions}
+            agents={agents}
+            onSelectSession={(id) => {
+              setSelectedId(id);
+              setMobileView('session');
+            }}
+            onNewSession={openNewSession}
+            onOpenPalette={() => setShowPalette(true)}
+          />
+        </ErrorBoundary>
       )}
 
       {offline && (
-        <div className="connection-banner" role="status">
-          Lost connection to the ACP Terminal server. Reconnecting…
+        <div className="conn-toast" role="status">
+          <Spinner size={13} />
+          <span className="conn-toast-text">
+            <strong>Connection lost.</strong> Reconnecting to the server…
+          </span>
         </div>
       )}
 
       {showNewModal && (
         <NewSessionModal
-          agents={agents}
+          agents={newSessionAgents}
           onClose={() => setShowNewModal(false)}
           onCreated={(newId) => {
             setShowNewModal(false);
@@ -404,9 +559,12 @@ export const App: React.FC = () => {
         />
       )}
 
-      {showSearchModal && (
-        <SearchModal
-          onClose={() => setShowSearchModal(false)}
+      {showPalette && (
+        <CommandPalette
+          sessions={sessions}
+          currentSessionId={selectedId}
+          actions={paletteActions}
+          onClose={() => setShowPalette(false)}
           onSelectSession={(id) => {
             setSelectedId(id);
             setMobileView('session');
@@ -425,9 +583,65 @@ export const App: React.FC = () => {
         />
       )}
 
-      {showNetworkModal && (
-        <NetworkModal onClose={() => setShowNetworkModal(false)} />
-      )}
+      {showNetworkModal && <NetworkModal onClose={() => setShowNetworkModal(false)} />}
     </div>
   );
 };
+
+/** Placeholder for the main pane while a session loads. */
+const MainSkeleton: React.FC = () => (
+  <div className="main-skeleton" aria-busy="true" aria-label="Loading session">
+    <div className="skel-header">
+      <span className="skel skel-dot" />
+      <span className="skel skel-line w-30" />
+      <span className="skel skel-line w-10 push" />
+    </div>
+    <div className="skel-body">
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="skel-block">
+          <span className="skel skel-line w-15" />
+          <span className="skel skel-line w-70" />
+          <span className="skel skel-line w-45" />
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+/** First paint while sessions load: the shell's shape, without content. */
+const AppSkeleton: React.FC = () => (
+  <div className="app-container mobile-view-list" aria-busy="true" aria-label="Loading ACP Terminal">
+    <aside className="sidebar sidebar-skeleton" aria-hidden>
+      <div className="sb-head">
+        <span className="sb-brand">
+          <span className="sb-brand-mark">
+            <Icon name="terminal" size={13} />
+          </span>
+          <span className="sb-brand-name">ACP Terminal</span>
+        </span>
+      </div>
+      <div className="skel-side">
+        <span className="skel skel-row-lg" />
+        <span className="skel skel-row-lg" />
+        <span className="skel skel-line w-40" />
+        {[0, 1, 2, 3, 4].map((i) => (
+          <div key={i} className="skel-session">
+            <span className="skel skel-line w-70" />
+            <span className="skel skel-line w-45" />
+          </div>
+        ))}
+      </div>
+    </aside>
+    <div className="main-skeleton main-home">
+      <div className="skel-home">
+        <span className="skel skel-title" />
+        <span className="skel skel-line w-40" />
+        <div className="skel-cards">
+          <span className="skel skel-card" />
+          <span className="skel skel-card" />
+          <span className="skel skel-card" />
+        </div>
+      </div>
+    </div>
+  </div>
+);

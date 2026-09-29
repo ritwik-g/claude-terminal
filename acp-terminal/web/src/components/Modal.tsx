@@ -1,6 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { useEscapeLayer } from '../hooks';
-import './modal.css';
+import { Icon, type IconName } from './Icons';
+import { IconButton } from '../ui';
+import '../styles/dialogs.css';
 
 interface ModalProps {
   onClose: () => void;
@@ -22,6 +24,29 @@ interface ModalProps {
    * top-level dialogs leave Esc to App, which closes them all.
    */
   nested?: boolean;
+
+  /*
+   * Optional slots. With `heading`, the dialog renders the standard header
+   * (icon, heading, description, close button), wraps `children` in the padded
+   * body and names itself after the heading. Without it, `children` fill the
+   * card as they always did.
+   */
+  /** Visible dialog heading. */
+  heading?: React.ReactNode;
+  /** One line under the heading explaining what the dialog does. */
+  description?: React.ReactNode;
+  /** Icon shown before the heading: an icon name or any node (e.g. VendorIcon). */
+  icon?: IconName | React.ReactNode;
+  /** Extra controls in the header, before the close button. */
+  headerActions?: React.ReactNode;
+  /** Footer actions, right-aligned with the primary action last. */
+  footer?: React.ReactNode;
+  /** Footer content on the left, e.g. a hint or the selected path. */
+  footerStart?: React.ReactNode;
+  /** Card width: sm 480 (simple), md 640 (forms), lg 880 (dashboards). */
+  size?: 'sm' | 'md' | 'lg';
+  /** Extra classes for the body wrapper (only with `heading`). */
+  bodyClassName?: string;
 }
 
 const FOCUSABLE = [
@@ -43,6 +68,8 @@ function focusableIn(card: HTMLElement): HTMLElement[] {
   );
 }
 
+const cx = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(' ');
+
 export const Modal: React.FC<ModalProps> = ({
   onClose,
   children,
@@ -54,8 +81,18 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   initialFocusRef,
   nested = false,
+  heading,
+  description,
+  icon,
+  headerActions,
+  footer,
+  footerStart,
+  size,
+  bodyClassName,
 }) => {
   const cardRef = useRef<HTMLDivElement>(null);
+  const headingId = useId();
+  const descriptionId = useId();
   // Read during the first render, before any autoFocus child inside the card takes focus.
   const [returnFocusTo] = useState(() => document.activeElement as HTMLElement | null);
   // A drag that starts inside the card and ends on the backdrop must not close it.
@@ -72,7 +109,13 @@ export const Modal: React.FC<ModalProps> = ({
     if (initialFocusRef?.current) {
       initialFocusRef.current.focus();
     } else if (!card.contains(document.activeElement)) {
-      (focusableIn(card)[0] || card).focus();
+      // With the standard header, start in the body rather than on the close button.
+      const body = card.querySelector<HTMLElement>(':scope > .dlg-body');
+      (
+        (body && (body.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]') || focusableIn(body)[0])) ||
+        focusableIn(card)[0] ||
+        card
+      ).focus();
     }
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -110,9 +153,13 @@ export const Modal: React.FC<ModalProps> = ({
     // Focus setup and restore run once per open dialog.
   }, []);
 
+  const hasHeader = heading != null;
+  const iconNode =
+    icon == null ? null : typeof icon === 'string' ? <Icon name={icon as IconName} size={16} /> : icon;
+
   return (
     <div
-      className={overlayClassName ? `modal-overlay ${overlayClassName}` : 'modal-overlay'}
+      className={cx('modal-overlay', nested && 'is-nested', overlayClassName)}
       style={overlayStyle}
       onMouseDown={(e) => {
         pressedBackdrop.current = e.target === e.currentTarget;
@@ -126,14 +173,44 @@ export const Modal: React.FC<ModalProps> = ({
         ref={cardRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={labelledBy}
-        aria-label={labelledBy ? undefined : title}
+        aria-labelledby={labelledBy ?? (hasHeader ? headingId : undefined)}
+        aria-describedby={hasHeader && description ? descriptionId : undefined}
+        aria-label={labelledBy || hasHeader ? undefined : title}
         tabIndex={-1}
-        className={className ? `modal-card ${className}` : 'modal-card'}
+        className={cx('modal-card', size && `modal-${size}`, hasHeader && 'has-slots', className)}
         style={style}
         onClick={(e) => e.stopPropagation()}
       >
-        {children}
+        {hasHeader ? (
+          <>
+            <header className="dlg-header">
+              {iconNode && <span className="dlg-header-icon">{iconNode}</span>}
+              <div className="dlg-header-text">
+                <h2 id={headingId} className="dlg-title">
+                  {heading}
+                </h2>
+                {description && (
+                  <p id={descriptionId} className="dlg-desc">
+                    {description}
+                  </p>
+                )}
+              </div>
+              <div className="dlg-header-actions">
+                {headerActions}
+                <IconButton icon="x" label="Close" title="Close (Esc)" className="dlg-close" onClick={onClose} />
+              </div>
+            </header>
+            <div className={cx('dlg-body', bodyClassName)}>{children}</div>
+            {(footer || footerStart) && (
+              <footer className="dlg-footer">
+                <div className="dlg-footer-start">{footerStart}</div>
+                <div className="dlg-footer-actions">{footer}</div>
+              </footer>
+            )}
+          </>
+        ) : (
+          children
+        )}
       </div>
     </div>
   );

@@ -298,13 +298,9 @@ apiRouter.get('/folders', (req: Request, res: Response) => {
   const base = path.resolve(rawPath ? rawPath.replace(/^~/, os.homedir()) : os.homedir());
   try {
     if (!fs.existsSync(base)) {
-      res.json({
-        current: base,
-        parent: base === '/' ? null : path.dirname(base),
-        isGit: false,
-        recent: [],
-        entries: [],
-      });
+      // A 404 lets the folder browser say the folder doesn't exist instead of
+      // showing it as an empty folder.
+      res.status(404).json({ error: `There's no folder at ${base}.` });
       return;
     }
 

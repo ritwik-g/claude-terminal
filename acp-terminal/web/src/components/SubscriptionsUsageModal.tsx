@@ -1,8 +1,26 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { Modal } from './Modal';
 import type { VendorSubscriptionInfo, StoredCredentials, UsageReport } from '../types';
 import { VendorIcon } from './VendorLogos';
+import { RateLimitList, hasRateLimits } from './UsageTab';
+import { formatCost, formatTokens, levelTone } from '../pricing';
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Field,
+  Icon,
+  Input,
+  Progress,
+  Segmented,
+  Spinner,
+  Stat,
+  Tabs,
+  type Tone,
+} from '../ui';
+import '../styles/usage.css';
 
 interface SubscriptionsUsageModalProps {
   onClose: () => void;
@@ -10,780 +28,838 @@ interface SubscriptionsUsageModalProps {
   initialTab?: 'subscriptions' | 'usage';
 }
 
+type VendorKey = 'anthropic' | 'openai' | 'google';
+type Subscriptions = Record<VendorKey, VendorSubscriptionInfo>;
+type AuthMode = 'subscription' | 'api_key' | 'desktop';
+type TabId = 'subscriptions' | 'usage';
+
+const FORM_ID = 'acct-credentials-form';
+
+interface VendorSpec {
+  key: VendorKey;
+  agentId: string;
+  name: string;
+  maker: string;
+  /** The sign-in method that doesn't need an API key. */
+  accountMode: 'subscription' | 'desktop';
+  accountModeLabel: string;
+  /** How the hint refers to the account method, e.g. "your Claude subscription". */
+  accountModePhrase: string;
+  keyLabel: string;
+  keyPlaceholder: string;
+  envVar: string;
+  loginCommand?: string;
+  loginHint: string;
+  note?: string;
+}
+
+const VENDORS: VendorSpec[] = [
+  {
+    key: 'anthropic',
+    agentId: 'claude',
+    name: 'Claude Code',
+    maker: 'Anthropic',
+    accountMode: 'subscription',
+    accountModeLabel: 'Claude subscription',
+    accountModePhrase: 'your Claude subscription',
+    keyLabel: 'Anthropic API key',
+    keyPlaceholder: 'sk-ant-api03-…',
+    envVar: 'ANTHROPIC_API_KEY',
+    loginCommand: 'claude login',
+    loginHint: 'To switch accounts or renew credentials, run',
+  },
+  {
+    key: 'openai',
+    agentId: 'codex',
+    name: 'Codex',
+    maker: 'OpenAI',
+    accountMode: 'subscription',
+    accountModeLabel: 'ChatGPT subscription',
+    accountModePhrase: 'your ChatGPT subscription',
+    keyLabel: 'OpenAI API key',
+    keyPlaceholder: 'sk-…',
+    envVar: 'OPENAI_API_KEY',
+    loginCommand: 'codex login',
+    loginHint: 'To switch accounts or ChatGPT plans, run',
+    note: "OpenAI doesn't report how much of your plan is left. ChatGPT plans apply rolling limits when you send a prompt.",
+  },
+  {
+    key: 'google',
+    agentId: 'antigravity',
+    name: 'Antigravity and Gemini',
+    maker: 'Google',
+    accountMode: 'desktop',
+    accountModeLabel: 'Antigravity desktop',
+    accountModePhrase: 'the Antigravity desktop account',
+    keyLabel: 'Gemini API key',
+    keyPlaceholder: 'AIzaSy…',
+    envVar: 'GEMINI_API_KEY',
+    loginHint: 'To switch Google accounts, change the account in the Antigravity desktop app.',
+    note: 'Antigravity manages its 5-hour and weekly quotas itself. Its status bar shows what is left.',
+  },
+];
+
+const STATUS: Record<VendorSubscriptionInfo['status'], { label: string; tone: Tone }> = {
+  active: { label: 'Signed in', tone: 'ok' },
+  configured: { label: 'API key set', tone: 'info' },
+  unconfigured: { label: 'Not set up', tone: 'neutral' },
+  expired: { label: 'Sign-in expired', tone: 'warn' },
+};
+
+const serverMode = (spec: VendorSpec, sub?: VendorSubscriptionInfo): AuthMode =>
+  sub?.authMode === 'api_key' ? 'api_key' : spec.accountMode;
+
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err || 'Unknown error'));
+
+/* ------------------------------------------------------------ Small parts */
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy path.
+  }
+  // Plain-http LAN access has no async clipboard.
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}
+
+const CopyCommand: React.FC<{ command: string }> = ({ command }) => {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number>();
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const onCopy = async () => {
+    if (await copyText(command)) {
+      setCopied(true);
+      window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), 2000);
+    }
+  };
+  return (
+    <span className="acct-cmd">
+      <code>{command}</code>
+      <button
+        type="button"
+        className={`acct-cmd-copy${copied ? ' is-copied' : ''}`}
+        onClick={onCopy}
+        aria-label={copied ? `Copied ${command}` : `Copy login command: ${command}`}
+        title={copied ? 'Copied' : 'Copy login command'}
+      >
+        <Icon name={copied ? 'check' : 'copy'} size={13} />
+      </button>
+      <span className="sr-only" role="status">
+        {copied ? 'Copied to clipboard' : ''}
+      </span>
+    </span>
+  );
+};
+
+/** A grey placeholder block; its size comes from the `is-*` class. */
+const Skel: React.FC<{ className: string }> = ({ className }) => <span className={`acct-skel ${className}`} />;
+
+/** Announces loading once to screen readers; the skeleton itself is decorative. */
+const Loading: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div className="acct-loading" role="status" aria-busy="true">
+    <span className="sr-only">{label}</span>
+    <div className="acct-loading-body" aria-hidden="true">
+      {children}
+    </div>
+  </div>
+);
+
+const AccountsSkeleton: React.FC = () => (
+  <Loading label="Loading your accounts">
+    {[0, 1, 2].map((i) => (
+      <Card key={i} padding="none" className="acct-card">
+        <div className="acct-card-head">
+          <Skel className="is-mark" />
+          <div className="acct-skel-stack">
+            <Skel className="is-title" />
+            <Skel className="is-sub" />
+          </div>
+          <Skel className="is-pill" />
+        </div>
+        <div className="acct-card-section">
+          {[0, 1, 2].map((r) => (
+            <div key={r} className="acct-skel-row">
+              <Skel className="is-label" />
+              <Skel className={r === 1 ? 'is-value-long' : 'is-value'} />
+            </div>
+          ))}
+        </div>
+      </Card>
+    ))}
+  </Loading>
+);
+
+const UsageSkeleton: React.FC = () => (
+  <Loading label="Loading usage">
+    <div className="acct-stats">
+      {[0, 1, 2].map((i) => (
+        <Card key={i} padding="md" className="acct-skel-stack">
+          <Skel className="is-label" />
+          <Skel className="is-stat" />
+          <Skel className="is-sub" />
+        </Card>
+      ))}
+    </div>
+    <Card padding="none">
+      <div className="acct-split-wrap">
+        <Skel className="is-split" />
+      </div>
+      <div className="acct-vendor-rows">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="acct-vendor-row">
+            <div className="acct-vendor-name">
+              <Skel className="is-icon" />
+              <Skel className="is-name" />
+            </div>
+            <div className="acct-vendor-bar">
+              <Skel className="is-bar" />
+            </div>
+            <Skel className="is-num" />
+            <Skel className="is-num" />
+          </div>
+        ))}
+      </div>
+    </Card>
+  </Loading>
+);
+
+const LoadError: React.FC<{ what: string; message: string; onRetry: () => void }> = ({ what, message, onRetry }) => (
+  <Card padding="none">
+    <EmptyState
+      icon="alert"
+      title={`Couldn't load ${what}`}
+      description={`${message}. Check that ACP Terminal's server is running, then try again.`}
+      action={
+        <Button icon="refresh" onClick={onRetry}>
+          Try again
+        </Button>
+      }
+    />
+  </Card>
+);
+
+/* ----------------------------------------------------------- Vendor card */
+
+const VendorCard: React.FC<{
+  spec: VendorSpec;
+  sub?: VendorSubscriptionInfo;
+  mode: AuthMode;
+  onModeChange: (mode: AuthMode) => void;
+  apiKey: string;
+  onApiKeyChange: (value: string) => void;
+  refreshingLimits?: boolean;
+  refreshError?: string | null;
+  onRefreshLimits?: () => void;
+}> = ({ spec, sub, mode, onModeChange, apiKey, onApiKeyChange, refreshingLimits, refreshError, onRefreshLimits }) => {
+  const status = STATUS[sub?.status || 'unconfigured'];
+  const statusLabel = spec.key === 'google' && sub?.status === 'active' ? 'Desktop app connected' : status.label;
+  const keyId = `acct-key-${spec.key}`;
+  const d = sub?.details || {};
+
+  const rows: Array<[string, React.ReactNode]> = [['Plan', sub?.planName || 'Unknown']];
+  if (spec.key === 'anthropic') {
+    rows.push(['Account', sub?.accountEmail || sub?.accountName || 'CLI default profile']);
+    if (sub?.organization) rows.push(['Organization', sub.organization]);
+    rows.push([
+      'Credentials',
+      <>
+        <code className="usg-mono">{d.loginFile || '~/.claude.json'}</code>
+        {d.billingType && <span className="usg-muted"> · {String(d.billingType).replace(/_/g, ' ')}</span>}
+      </>,
+    ]);
+  } else if (spec.key === 'openai') {
+    rows.push(['Sign-in', d.authMode ? `ChatGPT OAuth (${d.authMode})` : 'ChatGPT OAuth']);
+    rows.push(['Credentials', <code className="usg-mono">{d.configPath || '~/.codex/auth.json'}</code>]);
+  } else {
+    rows.push(['Daemon', <code className="usg-mono">{d.agentApiPath || '~/.gemini/antigravity/bin/agentapi'}</code>]);
+    rows.push(['App data', <code className="usg-mono">~/.gemini/antigravity</code>]);
+  }
+
+  const showLimits = spec.key === 'anthropic' && (hasRateLimits(sub?.rateLimits) || mode !== 'api_key');
+
+  return (
+    <Card className="acct-card" padding="none">
+      <div className="acct-card-head">
+        <span className="acct-card-mark">
+          <VendorIcon agentId={spec.agentId} size={20} />
+        </span>
+        <div className="acct-card-title">
+          <div className="acct-card-name">{spec.name}</div>
+          <div className="acct-card-plan">{spec.maker}</div>
+        </div>
+        <Badge tone={status.tone} dot>
+          {statusLabel}
+        </Badge>
+      </div>
+
+      <div className="acct-card-section">
+        <dl className="usg-dl acct-dl-stack">
+          {rows.map(([label, value]) => (
+            <React.Fragment key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      </div>
+
+      {showLimits && (
+        <div className="acct-card-section">
+          <div className="acct-card-section-head">
+            <span className="acct-card-section-title">Plan limits</span>
+            {onRefreshLimits && (
+              <Button size="sm" variant="ghost" icon="refresh" onClick={onRefreshLimits} loading={refreshingLimits}>
+                {refreshingLimits ? 'Refreshing' : 'Refresh'}
+              </Button>
+            )}
+          </div>
+          {hasRateLimits(sub?.rateLimits) ? (
+            <RateLimitList limits={sub!.rateLimits!} />
+          ) : (
+            <div className="acct-note">
+              <Icon name="info" size={13} />
+              <span>No limit data yet. Refresh to read your 5-hour and weekly windows from Claude Code.</span>
+            </div>
+          )}
+          {refreshError && <div className="acct-inline-error">Couldn't refresh limits: {refreshError}</div>}
+        </div>
+      )}
+
+      <div className="acct-card-section">
+        <div className="acct-mode">
+          <span className="acct-mode-label">Sign in with</span>
+          <Segmented<AuthMode>
+            size="sm"
+            label={`Sign-in method for ${spec.name}`}
+            value={mode}
+            onChange={onModeChange}
+            options={[
+              { value: spec.accountMode, label: spec.accountModeLabel },
+              { value: 'api_key', label: 'API key' },
+            ]}
+          />
+        </div>
+        {mode === 'api_key' && (
+          <Field
+            label={spec.keyLabel}
+            htmlFor={keyId}
+            hint={
+              sub?.apiKeyMasked ? (
+                <span className="acct-key-hint">
+                  Saved key <code className="usg-mono">{sub.apiKeyMasked}</code>. Leave blank to keep it.
+                </span>
+              ) : (
+                <>
+                  Used instead of {spec.accountModePhrase}, as <code className="usg-mono">{spec.envVar}</code>.
+                </>
+              )
+            }
+          >
+            <Input
+              id={keyId}
+              type="password"
+              mono
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={sub?.apiKeyMasked ? 'Enter a new key to replace it' : spec.keyPlaceholder}
+              value={apiKey}
+              onChange={(e) => onApiKeyChange(e.target.value)}
+            />
+          </Field>
+        )}
+        {spec.note && (
+          <div className="acct-note">
+            <Icon name="info" size={13} />
+            <span>{spec.note}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="acct-card-section">
+        <div className="acct-login">
+          <span>{spec.loginHint}</span>
+          {spec.loginCommand && <CopyCommand command={sub?.reauthCommand || spec.loginCommand} />}
+        </div>
+      </div>
+    </Card>
+  );
+};
+
+/* ---------------------------------------------------------- Usage panel */
+
+const VENDOR_LABEL: Record<VendorKey, { name: string; agentId: string }> = {
+  anthropic: { name: 'Anthropic', agentId: 'claude' },
+  openai: { name: 'OpenAI', agentId: 'codex' },
+  google: { name: 'Google', agentId: 'antigravity' },
+};
+
+const VENDOR_KEYS: VendorKey[] = ['anthropic', 'openai', 'google'];
+
+const TOP_SESSIONS = 8;
+
+/**
+ * A thin decorative bar. Used where the value is already spoken elsewhere, and
+ * inside buttons, where the Progress primitive's <div> isn't allowed.
+ */
+const Bar: React.FC<{ pct: number; fill: string }> = ({ pct, fill }) => (
+  <span className="acct-bar" aria-hidden="true">
+    <span className={`acct-bar-fill ${fill}`} style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
+  </span>
+);
+
+const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+const UsagePanel: React.FC<{
+  usage: UsageReport;
+  onSelectSession?: (id: string) => void;
+  onClose: () => void;
+}> = ({ usage, onSelectSession, onClose }) => {
+  const [showAll, setShowAll] = useState(false);
+  const { overall } = usage;
+  const vendorTotal = VENDOR_KEYS.reduce((n, k) => n + (usage.vendors[k]?.totalTokens || 0), 0);
+  const share = (n: number) => (vendorTotal > 0 ? (n / vendorTotal) * 100 : 0);
+  const splitLabel =
+    vendorTotal > 0
+      ? `Token share: ${VENDOR_KEYS.map((k) => `${VENDOR_LABEL[k].name} ${Math.round(share(usage.vendors[k]?.totalTokens || 0))}%`).join(', ')}`
+      : 'No tokens used yet';
+
+  const sessions = useMemo(
+    () =>
+      [...(usage.sessionsUsage || [])].sort(
+        (a, b) => b.estimatedCost - a.estimatedCost || b.totalTokens - a.totalTokens,
+      ),
+    [usage.sessionsUsage],
+  );
+  const visible = showAll ? sessions : sessions.slice(0, TOP_SESSIONS);
+
+  return (
+    <>
+      <div className="acct-stats">
+        <Card padding="md">
+          <Stat
+            label="Estimated cost"
+            value={formatCost(overall.estimatedCost || 0)}
+            tone="ok"
+            hint="At list API prices"
+          />
+        </Card>
+        <Card padding="md">
+          <Stat
+            label="Tokens"
+            value={formatTokens(overall.totalTokens || 0)}
+            hint={`${formatTokens(overall.inputTokens || 0)} in · ${formatTokens(overall.outputTokens || 0)} out`}
+          />
+        </Card>
+        <Card padding="md">
+          <Stat
+            label="Sessions"
+            value={(overall.totalSessions || 0).toLocaleString()}
+            hint={
+              overall.cachedTokens ? `${formatTokens(overall.cachedTokens)} tokens cached` : 'Across all workspaces'
+            }
+          />
+        </Card>
+      </div>
+
+      <section className="acct-section" aria-labelledby="acct-by-vendor">
+        <div className="acct-section-head">
+          <h3 id="acct-by-vendor" className="usg-section-title">
+            By vendor
+          </h3>
+          <span className="usg-section-meta">Share of tokens</span>
+        </div>
+        <Card padding="none">
+          <div className="acct-split-wrap">
+            <div className="acct-split" role="img" aria-label={splitLabel}>
+              {VENDOR_KEYS.map((k) => {
+                const pct = share(usage.vendors[k]?.totalTokens || 0);
+                return pct > 0 ? (
+                  <span key={k} className={`acct-split-seg acct-vfill-${k}`} style={{ width: `${pct}%` }} />
+                ) : null;
+              })}
+            </div>
+          </div>
+          <ul className="acct-vendor-rows">
+            {VENDOR_KEYS.map((k) => {
+              const v = usage.vendors[k];
+              const tokens = v?.totalTokens || 0;
+              const pct = Math.round(share(tokens));
+              const count = v?.sessionCount || 0;
+              return (
+                <li key={k} className="acct-vendor-row">
+                  <div className="acct-vendor-name">
+                    <VendorIcon agentId={VENDOR_LABEL[k].agentId} size={16} />
+                    <div className="acct-vendor-text">
+                      <div className="acct-vendor-name-text">{VENDOR_LABEL[k].name}</div>
+                      <div className="acct-vendor-sub">
+                        {count === 0 ? 'No sessions' : plural(count, 'session', 'sessions')}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="acct-vendor-bar">
+                    <Bar pct={pct} fill={`acct-vfill-${k}`} />
+                    <span className="acct-num acct-num-dim acct-share">
+                      {pct}%<span className="sr-only"> of tokens</span>
+                    </span>
+                  </div>
+                  <span className="acct-num">
+                    {formatTokens(tokens)}
+                    <span className="sr-only"> tokens</span>
+                  </span>
+                  <span className="acct-num">
+                    {formatCost(v?.estimatedCost || 0)}
+                    <span className="sr-only"> estimated</span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      </section>
+
+      <section className="acct-section" aria-labelledby="acct-top-sessions">
+        <div className="acct-section-head">
+          <h3 id="acct-top-sessions" className="usg-section-title">
+            Top sessions by spend
+          </h3>
+          <span className="usg-section-meta">{plural(sessions.length, 'session', 'sessions')}</span>
+        </div>
+        {sessions.length === 0 ? (
+          <Card padding="none">
+            <EmptyState
+              compact
+              icon="chart"
+              title="No sessions yet"
+              description="Start a session and its usage shows up here."
+            />
+          </Card>
+        ) : (
+          <>
+            {/* Column labels for sighted users; each row carries its own accessible name. */}
+            <div className="acct-list-head" aria-hidden="true">
+              <span />
+              <span>Session</span>
+              <span>Context</span>
+              <span>Tokens</span>
+              <span>Cost</span>
+              <span />
+            </div>
+            <Card padding="none">
+              <ol className="acct-sessions" aria-labelledby="acct-top-sessions">
+                {visible.map((s, i) => {
+                  const pct = Math.max(0, Math.min(100, Math.round(s.percentContextUsed || 0)));
+                  const title = s.title || 'Untitled session';
+                  const model = s.model || s.agentId;
+                  const summary = `${title}, ${model}. Context ${pct}% full, ${formatTokens(s.totalTokens)} tokens, ${formatCost(s.estimatedCost)} estimated`;
+                  const content = (
+                    <>
+                      <span className="acct-session-rank" aria-hidden="true">
+                        {i + 1}
+                      </span>
+                      <span className="acct-session-main">
+                        <VendorIcon agentId={s.agentId} size={16} />
+                        <span className="acct-session-text">
+                          <span className="acct-session-title">{title}</span>
+                          <span className="acct-session-model">{model}</span>
+                        </span>
+                      </span>
+                      <span className="acct-session-ctx">
+                        <Bar pct={pct} fill={`tone-${levelTone(pct)}`} />
+                        <span className="acct-session-ctx-pct">{pct}%</span>
+                      </span>
+                      <span className="acct-num">{formatTokens(s.totalTokens)}</span>
+                      <span className="acct-num">{formatCost(s.estimatedCost)}</span>
+                      <span className="acct-session-chev">
+                        {onSelectSession && <Icon name="chevronRight" size={14} />}
+                      </span>
+                    </>
+                  );
+                  return (
+                    <li key={s.id}>
+                      {onSelectSession ? (
+                        <button
+                          type="button"
+                          className="acct-session"
+                          aria-label={`Open ${summary}`}
+                          title={title}
+                          onClick={() => {
+                            onSelectSession(s.id);
+                            onClose();
+                          }}
+                        >
+                          {content}
+                        </button>
+                      ) : (
+                        <div className="acct-session" aria-label={summary} role="group">
+                          {content}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            </Card>
+            {sessions.length > TOP_SESSIONS && (
+              <Button
+                className="acct-more"
+                size="sm"
+                variant="ghost"
+                icon={showAll ? 'chevronUp' : 'chevronDown'}
+                aria-expanded={showAll}
+                onClick={() => setShowAll((v) => !v)}
+              >
+                {showAll ? `Show top ${TOP_SESSIONS}` : `Show all ${sessions.length} sessions`}
+              </Button>
+            )}
+          </>
+        )}
+      </section>
+    </>
+  );
+};
+
+/* ----------------------------------------------------------- The dialog */
+
 export const SubscriptionsUsageModal: React.FC<SubscriptionsUsageModalProps> = ({
   onClose,
   onSelectSession,
   initialTab = 'subscriptions',
 }) => {
-  const [activeTab, setActiveTab] = useState<'subscriptions' | 'usage'>(initialTab);
-  const [loading, setLoading] = useState(true);
-  const [subscriptions, setSubscriptions] = useState<Record<'anthropic' | 'openai' | 'google', VendorSubscriptionInfo> | null>(null);
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab);
+
+  const [subscriptions, setSubscriptions] = useState<Subscriptions | null>(null);
+  const [subsLoading, setSubsLoading] = useState(true);
+  const [subsError, setSubsError] = useState<string | null>(null);
+
   const [usage, setUsage] = useState<UsageReport | null>(null);
+  const [usageLoading, setUsageLoading] = useState(true);
+  const [usageError, setUsageError] = useState<string | null>(null);
 
-  // Form states for API key overrides
-  const [anthropicMode, setAnthropicMode] = useState<'subscription' | 'api_key'>('subscription');
-  const [openaiMode, setOpenaiMode] = useState<'subscription' | 'api_key'>('subscription');
-  const [googleMode, setGoogleMode] = useState<'desktop' | 'api_key'>('desktop');
-
-  const [anthropicKey, setAnthropicKey] = useState('');
-  const [openaiKey, setOpenaiKey] = useState('');
-  const [geminiKey, setGeminiKey] = useState('');
+  const [modes, setModes] = useState<Record<VendorKey, AuthMode>>({
+    anthropic: 'subscription',
+    openai: 'subscription',
+    google: 'desktop',
+  });
+  const [keys, setKeys] = useState<Record<VendorKey, string>>({ anthropic: '', openai: '', google: '' });
 
   const [saving, setSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
-  const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<{ tone: 'ok' | 'danger'; text: string } | null>(null);
   const [refreshingLimits, setRefreshingLimits] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const savedTimer = useRef<number>();
+  useEffect(() => () => window.clearTimeout(savedTimer.current), []);
+
+  const applySubscriptions = useCallback((subs: Subscriptions) => {
+    setSubscriptions(subs);
+    setModes({
+      anthropic: serverMode(VENDORS[0], subs.anthropic),
+      openai: serverMode(VENDORS[1], subs.openai),
+      google: serverMode(VENDORS[2], subs.google),
+    });
+  }, []);
+
+  const loadSubscriptions = useCallback(async () => {
+    setSubsLoading(true);
+    setSubsError(null);
+    try {
+      const res = await api.getSubscriptions();
+      applySubscriptions(res.subscriptions);
+    } catch (err) {
+      console.error('[SubscriptionsUsageModal] Failed to load subscriptions:', err);
+      setSubsError(errorText(err));
+    } finally {
+      setSubsLoading(false);
+    }
+  }, [applySubscriptions]);
+
+  const loadUsage = useCallback(async () => {
+    setUsageLoading(true);
+    setUsageError(null);
+    try {
+      const res = await api.getUsageSummary();
+      setUsage(res.usage);
+    } catch (err) {
+      console.error('[SubscriptionsUsageModal] Failed to load usage:', err);
+      setUsageError(errorText(err));
+    } finally {
+      setUsageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSubscriptions();
+    loadUsage();
+  }, [loadSubscriptions, loadUsage]);
 
   const handleRefreshLimits = async () => {
     setRefreshingLimits(true);
+    setRefreshError(null);
     try {
       const res = await api.refreshRateLimits();
+      // Keep unsaved sign-in choices; only the limits and account facts change.
       setSubscriptions(res.subscriptions);
     } catch (err) {
       console.error('Failed to refresh rate limits:', err);
+      setRefreshError(errorText(err));
     } finally {
       setRefreshingLimits(false);
     }
   };
 
-  const fetchData = async () => {
-    setLoading(true);
-    try {
-      const [subRes, usageRes] = await Promise.all([
-        api.getSubscriptions(),
-        api.getUsageSummary(),
-      ]);
-      setSubscriptions(subRes.subscriptions);
-      setUsage(usageRes.usage);
-
-      if (subRes.subscriptions.anthropic) {
-        setAnthropicMode(subRes.subscriptions.anthropic.authMode === 'api_key' ? 'api_key' : 'subscription');
-      }
-      if (subRes.subscriptions.openai) {
-        setOpenaiMode(subRes.subscriptions.openai.authMode === 'api_key' ? 'api_key' : 'subscription');
-      }
-      if (subRes.subscriptions.google) {
-        setGoogleMode(subRes.subscriptions.google.authMode === 'api_key' ? 'api_key' : 'desktop');
-      }
-    } catch (err) {
-      console.error('[SubscriptionsUsageModal] Failed to load data:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  const handleCopy = (cmd: string) => {
-    navigator.clipboard.writeText(cmd);
-    setCopiedCmd(cmd);
-    setTimeout(() => setCopiedCmd(null), 2500);
-  };
+  const dirty = useMemo(() => {
+    if (!subscriptions) return false;
+    return VENDORS.some((v) => modes[v.key] !== serverMode(v, subscriptions[v.key]) || keys[v.key].trim() !== '');
+  }, [subscriptions, modes, keys]);
 
   const handleSaveCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    setSaveSuccess(false);
-
+    setSaveState(null);
     try {
       const payload: Partial<StoredCredentials> = {
         preferredAuthMode: {
-          anthropic: anthropicMode,
-          openai: openaiMode,
-          google: googleMode,
+          anthropic: modes.anthropic as 'subscription' | 'api_key',
+          openai: modes.openai as 'subscription' | 'api_key',
+          google: modes.google as 'desktop' | 'api_key',
         },
       };
-
-      if (anthropicKey.trim()) payload.anthropicApiKey = anthropicKey.trim();
-      if (openaiKey.trim()) payload.openaiApiKey = openaiKey.trim();
-      if (geminiKey.trim()) payload.geminiApiKey = geminiKey.trim();
+      if (keys.anthropic.trim()) payload.anthropicApiKey = keys.anthropic.trim();
+      if (keys.openai.trim()) payload.openaiApiKey = keys.openai.trim();
+      if (keys.google.trim()) payload.geminiApiKey = keys.google.trim();
 
       const res = await api.saveSubscriptionsConfig(payload);
-      setSubscriptions(res.subscriptions);
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3500);
-    } catch (err: any) {
-      alert(`Failed to save settings: ${err.message}`);
+      applySubscriptions(res.subscriptions);
+      // The server now holds the keys; show its masked copy instead of the typed value.
+      setKeys({ anthropic: '', openai: '', google: '' });
+      setSaveState({ tone: 'ok', text: 'Saved. New sessions use these settings.' });
+      window.clearTimeout(savedTimer.current);
+      savedTimer.current = window.setTimeout(() => setSaveState((s) => (s?.tone === 'ok' ? null : s)), 3500);
+    } catch (err) {
+      setSaveState({ tone: 'danger', text: `Couldn't save: ${errorText(err)}` });
     } finally {
       setSaving(false);
     }
   };
 
+  const footStatus: { tone: Tone; text: string } | null = saving
+    ? { tone: 'neutral', text: 'Saving…' }
+    : saveState
+      ? saveState
+      : dirty
+        ? { tone: 'warn', text: 'Unsaved changes' }
+        : null;
+
+  const onAccounts = activeTab === 'subscriptions';
+
   return (
     <Modal
       onClose={onClose}
-      labelledBy="subscriptions-modal-title"
-      style={{ maxWidth: '880px', width: '95%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
-    >
-      {/* Modal Header */}
-      <div className="modal-header" style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '14px' }}>
-        <div>
-          <div id="subscriptions-modal-title" className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span>💳</span> Subscriptions & Vendor Usage
-          </div>
-          <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
-            Inspect and switch active provider subscriptions, configure API keys, and monitor cross-vendor token consumption.
-          </div>
-        </div>
-        <button className="btn-close" onClick={onClose} title="Close modal (Esc)">
-          ✕
-        </button>
-      </div>
-
-      {/* Tab Switcher */}
-      <div style={{ display: 'flex', gap: '8px', padding: '12px 20px', borderBottom: '1px solid var(--border-subtle)', background: 'rgba(0,0,0,0.15)' }}>
-        <button
-          type="button"
-          className={`filter-tab ${activeTab === 'subscriptions' ? 'active' : ''}`}
-          onClick={() => setActiveTab('subscriptions')}
-          style={{ padding: '8px 16px', fontSize: '13px', fontWeight: 600 }}
-        >
-          📋 Subscriptions & Accounts
-        </button>
-        <button
-          type="button"
-          className={`filter-tab ${activeTab === 'usage' ? 'active' : ''}`}
-          onClick={() => setActiveTab('usage')}
-          style={{ padding: '8px 16px', fontSize: '13px', fontWeight: 600 }}
-        >
-          📊 Vendor Usage & Costs
-        </button>
-      </div>
-
-      {/* Modal Body */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-        {loading ? (
-          <div style={{ padding: '50px 20px', textAlign: 'center', color: 'var(--text-dim)' }}>
-            <div style={{ fontSize: '24px', marginBottom: '10px' }}>⏳</div>
-            <div>Loading subscription and usage data...</div>
-          </div>
-        ) : activeTab === 'subscriptions' ? (
-          /* TAB 1: Subscriptions & Accounts */
-          <div>
-            <form onSubmit={handleSaveCredentials}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {/* 1. Anthropic Claude Code */}
-                <div className="subscription-card claude">
-                  <div className="sub-card-header">
-                    <div className="sub-card-title">
-                      <VendorIcon agentId="claude" size={24} />
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: '15px' }}>Anthropic Claude Code</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                          Official Claude Agent SDK · Connected via ACP
-                        </div>
-                      </div>
-                    </div>
-                    <span className={`sub-status-badge ${subscriptions?.anthropic?.status || 'unconfigured'}`}>
-                      {subscriptions?.anthropic?.status === 'active' ? '● ACTIVE SUBSCRIPTION' : 'CONFIGURED'}
-                    </span>
-                  </div>
-
-                  <div className="sub-card-body">
-                    <div className="sub-meta-grid">
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Active Plan:</span>
-                        <span className="sub-meta-value highlight">{subscriptions?.anthropic?.planName}</span>
-                      </div>
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Account Email:</span>
-                        <span className="sub-meta-value">{subscriptions?.anthropic?.accountEmail || 'CLI Default Profile'}</span>
-                      </div>
-                      {subscriptions?.anthropic?.organization && (
-                        <div className="sub-meta-item">
-                          <span className="sub-meta-label">Organization:</span>
-                          <span className="sub-meta-value">{subscriptions?.anthropic?.organization}</span>
-                        </div>
-                      )}
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Auth Source:</span>
-                        <span className="sub-meta-value">~/.claude.json ({subscriptions?.anthropic?.details?.billingType || 'subscription'})</span>
-                      </div>
-                    </div>
-
-                    {/* Live Vendor Rate Limits & Rolling Resets */}
-                    {subscriptions?.anthropic?.rateLimits && (
-                      <div
-                        className="sub-rate-limits-box"
-                        style={{
-                          marginTop: '14px',
-                          padding: '12px 14px',
-                          background: 'rgba(0, 0, 0, 0.25)',
-                          borderRadius: '10px',
-                          border: '1px solid rgba(217, 119, 6, 0.25)',
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                          <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-normal)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <span>⏱️</span> Vendor Session & Weekly Limits
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handleRefreshLimits}
-                            disabled={refreshingLimits}
-                            style={{
-                              fontSize: '11px',
-                              background: 'transparent',
-                              border: '1px solid var(--border-subtle)',
-                              color: 'var(--text-muted)',
-                              padding: '3px 8px',
-                              borderRadius: '6px',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            {refreshingLimits ? '⏳ Refreshing...' : '🔄 Refresh Limits'}
-                          </button>
-                        </div>
-
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                          {subscriptions.anthropic.rateLimits.fiveHour && (
-                            <div>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
-                                <span style={{ fontWeight: 600, color: 'var(--text-normal)' }}>5-Hour Session Limit</span>
-                                <span style={{ fontWeight: 700, color: subscriptions.anthropic.rateLimits.fiveHour.utilization > 80 ? '#f59e0b' : 'var(--text-normal)' }}>
-                                  {subscriptions.anthropic.rateLimits.fiveHour.utilization}% used
-                                  {subscriptions.anthropic.rateLimits.fiveHour.resetsAt && (
-                                    <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: '6px' }}>
-                                      · resets {subscriptions.anthropic.rateLimits.fiveHour.resetsAt}
-                                    </span>
-                                  )}
-                                </span>
-                              </div>
-                              <div style={{ height: '6px', borderRadius: '3px', background: 'rgba(255, 255, 255, 0.1)', overflow: 'hidden' }}>
-                                <div
-                                  style={{
-                                    height: '100%',
-                                    width: `${Math.min(100, subscriptions.anthropic.rateLimits.fiveHour.utilization)}%`,
-                                    background: subscriptions.anthropic.rateLimits.fiveHour.utilization > 80 ? '#f59e0b' : '#d97706',
-                                    borderRadius: '3px',
-                                    transition: 'width 0.3s ease',
-                                  }}
-                                />
-                              </div>
-                            </div>
-                          )}
-
-                          {subscriptions.anthropic.rateLimits.weeklyAll && (
-                            <div>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
-                                <span style={{ fontWeight: 600, color: 'var(--text-normal)' }}>Weekly Limit (All Models)</span>
-                                <span style={{ fontWeight: 700, color: subscriptions.anthropic.rateLimits.weeklyAll.utilization > 80 ? '#f59e0b' : 'var(--text-normal)' }}>
-                                  {subscriptions.anthropic.rateLimits.weeklyAll.utilization}% used
-                                  {subscriptions.anthropic.rateLimits.weeklyAll.resetsAt && (
-                                    <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: '6px' }}>
-                                      · resets {subscriptions.anthropic.rateLimits.weeklyAll.resetsAt}
-                                    </span>
-                                  )}
-                                </span>
-                              </div>
-                              <div style={{ height: '6px', borderRadius: '3px', background: 'rgba(255, 255, 255, 0.1)', overflow: 'hidden' }}>
-                                <div
-                                  style={{
-                                    height: '100%',
-                                    width: `${Math.min(100, subscriptions.anthropic.rateLimits.weeklyAll.utilization)}%`,
-                                    background: subscriptions.anthropic.rateLimits.weeklyAll.utilization > 80 ? '#f59e0b' : '#3b82f6',
-                                    borderRadius: '3px',
-                                    transition: 'width 0.3s ease',
-                                  }}
-                                />
-                              </div>
-                            </div>
-                          )}
-
-                          {subscriptions.anthropic.rateLimits.weeklyModels?.map((wm: { name: string; utilization: number; resetsAt?: string | null }, idx: number) => (
-                            <div key={idx}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
-                                <span style={{ fontWeight: 600, color: 'var(--text-normal)' }}>Weekly Limit ({wm.name})</span>
-                                <span style={{ fontWeight: 700, color: wm.utilization > 80 ? '#f59e0b' : 'var(--text-normal)' }}>
-                                  {wm.utilization}% used
-                                  {wm.resetsAt && (
-                                    <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: '6px' }}>
-                                      · resets {wm.resetsAt}
-                                    </span>
-                                  )}
-                                </span>
-                              </div>
-                              <div style={{ height: '6px', borderRadius: '3px', background: 'rgba(255, 255, 255, 0.1)', overflow: 'hidden' }}>
-                                <div
-                                  style={{
-                                    height: '100%',
-                                    width: `${Math.min(100, wm.utilization)}%`,
-                                    background: wm.utilization > 80 ? '#f59e0b' : '#8b5cf6',
-                                    borderRadius: '3px',
-                                    transition: 'width 0.3s ease',
-                                  }}
-                                />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Mode Switcher */}
-                    <div className="auth-mode-selector">
-                      <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px' }}>
-                        Authentication Mode:
-                      </div>
-                      <div style={{ display: 'flex', gap: '12px' }}>
-                        <label className="radio-label">
-                          <input
-                            type="radio"
-                            name="anthropicMode"
-                            value="subscription"
-                            checked={anthropicMode === 'subscription'}
-                            onChange={() => setAnthropicMode('subscription')}
-                          />
-                          <span>Use Claude Max / Pro Subscription (Recommended)</span>
-                        </label>
-                        <label className="radio-label">
-                          <input
-                            type="radio"
-                            name="anthropicMode"
-                            value="api_key"
-                            checked={anthropicMode === 'api_key'}
-                            onChange={() => setAnthropicMode('api_key')}
-                          />
-                          <span>Custom ANTHROPIC_API_KEY</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* Optional Custom API Key input */}
-                    {anthropicMode === 'api_key' && (
-                      <div style={{ marginTop: '12px' }}>
-                        <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>
-                          Anthropic API Key: {subscriptions?.anthropic?.apiKeyMasked && `(Currently: ${subscriptions.anthropic.apiKeyMasked})`}
-                        </label>
-                        <input
-                          type="password"
-                          className="input-text"
-                          placeholder="sk-ant-api03-..."
-                          value={anthropicKey}
-                          onChange={(e) => setAnthropicKey(e.target.value)}
-                          style={{ width: '100%', fontSize: '13px' }}
-                        />
-                      </div>
-                    )}
-
-                    {/* Re-auth hint */}
-                    <div className="sub-card-footer">
-                      <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                        To switch Anthropic user accounts or renew CLI credentials:
-                      </span>
-                      <button
-                        type="button"
-                        className="btn-copy-cmd"
-                        onClick={() => handleCopy('claude login')}
-                      >
-                        {copiedCmd === 'claude login' ? '✓ Copied' : '📋 claude login'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. OpenAI Codex */}
-                <div className="subscription-card codex">
-                  <div className="sub-card-header">
-                    <div className="sub-card-title">
-                      <VendorIcon agentId="codex" size={24} />
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: '15px' }}>OpenAI Codex CLI</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                          Codex ACP Adapter · Connected via ACP
-                        </div>
-                      </div>
-                    </div>
-                    <span className={`sub-status-badge ${subscriptions?.openai?.status || 'unconfigured'}`}>
-                      {subscriptions?.openai?.status === 'active' ? '● ACTIVE SUBSCRIPTION' : 'CONFIGURED'}
-                    </span>
-                  </div>
-
-                  <div className="sub-card-body">
-                    <div className="sub-meta-grid">
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Active Plan:</span>
-                        <span className="sub-meta-value highlight">{subscriptions?.openai?.planName}</span>
-                      </div>
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Auth Mode:</span>
-                        <span className="sub-meta-value">ChatGPT OAuth ({subscriptions?.openai?.details?.authMode})</span>
-                      </div>
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Config Location:</span>
-                        <span className="sub-meta-value">{subscriptions?.openai?.details?.configPath || '~/.codex/auth.json'}</span>
-                      </div>
-                    </div>
-
-                    {/* Mode Switcher */}
-                    <div className="auth-mode-selector">
-                      <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px' }}>
-                        Authentication Mode:
-                      </div>
-                      <div style={{ display: 'flex', gap: '12px' }}>
-                        <label className="radio-label">
-                          <input
-                            type="radio"
-                            name="openaiMode"
-                            value="subscription"
-                            checked={openaiMode === 'subscription'}
-                            onChange={() => setOpenaiMode('subscription')}
-                          />
-                          <span>Use ChatGPT Plus / Pro Subscription (Recommended)</span>
-                        </label>
-                        <label className="radio-label">
-                          <input
-                            type="radio"
-                            name="openaiMode"
-                            value="api_key"
-                            checked={openaiMode === 'api_key'}
-                            onChange={() => setOpenaiMode('api_key')}
-                          />
-                          <span>Custom OPENAI_API_KEY</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* Optional Custom API Key input */}
-                    {openaiMode === 'api_key' && (
-                      <div style={{ marginTop: '12px' }}>
-                        <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>
-                          OpenAI API Key: {subscriptions?.openai?.apiKeyMasked && `(Currently: ${subscriptions.openai.apiKeyMasked})`}
-                        </label>
-                        <input
-                          type="password"
-                          className="input-text"
-                          placeholder="sk-..."
-                          value={openaiKey}
-                          onChange={(e) => setOpenaiKey(e.target.value)}
-                          style={{ width: '100%', fontSize: '13px' }}
-                        />
-                      </div>
-                    )}
-
-                    {/* OpenAI Rate Limits & Session Quota Information */}
-                    <div
-                      style={{
-                        marginTop: '14px',
-                        padding: '10px 14px',
-                        background: 'rgba(0, 0, 0, 0.25)',
-                        borderRadius: '8px',
-                        border: '1px solid var(--border-subtle)',
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: '10px',
-                      }}
-                    >
-                      <span style={{ fontSize: '15px', marginTop: '1px' }}>⏱️</span>
-                      <div>
-                        <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-normal)' }}>
-                          Rolling Usage Limits & Resets
-                        </div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px', lineHeight: 1.4 }}>
-                          OpenAI enforces dynamic sliding windows on ChatGPT subscription tiers (e.g. ~80 messages every 3 hours for ChatGPT Plus/Pro on flagship reasoning models like <code>o3-mini</code> / <code>gpt-4o</code>). Unlike Anthropic's <code>/usage</code>, OpenAI does not expose an on-demand API to query your remaining percentage; limits are enforced dynamically server-side when sending prompts.
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Re-auth hint */}
-                    <div className="sub-card-footer">
-                      <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                        To switch OpenAI accounts or log in to a different ChatGPT subscription:
-                      </span>
-                      <button
-                        type="button"
-                        className="btn-copy-cmd"
-                        onClick={() => handleCopy('codex login')}
-                      >
-                        {copiedCmd === 'codex login' ? '✓ Copied' : '📋 codex login'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. Google Antigravity & Gemini */}
-                <div className="subscription-card gemini">
-                  <div className="sub-card-header">
-                    <div className="sub-card-title">
-                      <VendorIcon agentId="antigravity" size={24} />
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: '15px' }}>Google Antigravity & Gemini</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                          Google Language Server Daemon · Gemini 3.8 / 3.7 / 3.1 Pro
-                        </div>
-                      </div>
-                    </div>
-                    <span className={`sub-status-badge ${subscriptions?.google?.status || 'unconfigured'}`}>
-                      {subscriptions?.google?.status === 'active' ? '● DESKTOP DAEMON CONNECTED' : 'CONFIGURED'}
-                    </span>
-                  </div>
-
-                  <div className="sub-card-body">
-                    <div className="sub-meta-grid">
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Active Engine:</span>
-                        <span className="sub-meta-value highlight">{subscriptions?.google?.planName}</span>
-                      </div>
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">Daemon Bridge:</span>
-                        <span className="sub-meta-value">{subscriptions?.google?.details?.agentApiPath}</span>
-                      </div>
-                      <div className="sub-meta-item">
-                        <span className="sub-meta-label">App Data Dir:</span>
-                        <span className="sub-meta-value">~/.gemini/antigravity</span>
-                      </div>
-                    </div>
-
-                    {/* Mode Switcher */}
-                    <div className="auth-mode-selector">
-                      <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px' }}>
-                        Authentication Mode:
-                      </div>
-                      <div style={{ display: 'flex', gap: '12px' }}>
-                        <label className="radio-label">
-                          <input
-                            type="radio"
-                            name="googleMode"
-                            value="desktop"
-                            checked={googleMode === 'desktop'}
-                            onChange={() => setGoogleMode('desktop')}
-                          />
-                          <span>Use Active Antigravity Desktop Account (No API Key Required)</span>
-                        </label>
-                        <label className="radio-label">
-                          <input
-                            type="radio"
-                            name="googleMode"
-                            value="api_key"
-                            checked={googleMode === 'api_key'}
-                            onChange={() => setGoogleMode('api_key')}
-                          />
-                          <span>Custom GEMINI_API_KEY</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* Optional Custom API Key input */}
-                    {googleMode === 'api_key' && (
-                      <div style={{ marginTop: '12px' }}>
-                        <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>
-                          Gemini API Key: {subscriptions?.google?.apiKeyMasked && `(Currently: ${subscriptions.google.apiKeyMasked})`}
-                        </label>
-                        <input
-                          type="password"
-                          className="input-text"
-                          placeholder="AIzaSy..."
-                          value={geminiKey}
-                          onChange={(e) => setGeminiKey(e.target.value)}
-                          style={{ width: '100%', fontSize: '13px' }}
-                        />
-                      </div>
-                    )}
-
-                    {/* Google Antigravity Context & Quotas */}
-                    <div
-                      style={{
-                        marginTop: '14px',
-                        padding: '10px 14px',
-                        background: 'rgba(0, 0, 0, 0.25)',
-                        borderRadius: '8px',
-                        border: '1px solid var(--border-subtle)',
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: '10px',
-                      }}
-                    >
-                      <span style={{ fontSize: '15px', marginTop: '1px' }}>⚡</span>
-                      <div>
-                        <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-normal)' }}>
-                          Context Capacity & Usage Quotas
-                        </div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px', lineHeight: 1.4 }}>
-                          • <strong>1,000,000 Token Context Window</strong>: Gemini models support massive input history per prompt.<br />
-                          • <strong>5-Hour & Weekly Rolling Limits</strong>: Antigravity Desktop manages rolling quotas (94% weekly / 97% 5h) directly via its desktop language server daemon. Check the Antigravity desktop status bar for real-time remaining quotas.
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Re-auth hint */}
-                    <div className="sub-card-footer">
-                      <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                        To switch Google accounts: switch account inside the Antigravity desktop app.
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Save button and feedback */}
-              <div style={{ marginTop: '20px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '12px' }}>
-                {saveSuccess && (
-                  <span style={{ color: '#34d399', fontSize: '13px', fontWeight: 600 }}>
-                    ✓ Settings & credentials saved successfully!
-                  </span>
+      size="lg"
+      className="acct-dialog"
+      bodyClassName="acct-shell"
+      icon="gauge"
+      heading="Accounts and usage"
+      description="Choose how each agent signs in, and see token use and estimated spend across vendors."
+      footerStart={
+        onAccounts && (
+          // Always mounted so screen readers hear each change.
+          <span className={`acct-foot-status tone-${footStatus?.tone || 'neutral'}`} role="status">
+            {footStatus && (
+              <>
+                {saving ? (
+                  <Spinner size={11} />
+                ) : footStatus.tone === 'ok' ? (
+                  <Icon name="checkCircle" size={13} />
+                ) : footStatus.tone === 'danger' ? (
+                  <Icon name="alert" size={13} />
+                ) : (
+                  <span className="acct-foot-dot" aria-hidden="true" />
                 )}
-                <button type="submit" className="btn-save" disabled={saving}>
-                  {saving ? 'Saving...' : 'Save & Apply Credentials'}
-                </button>
-              </div>
-            </form>
-          </div>
-        ) : (
-          /* TAB 2: Vendor Usage & Costs */
-          <div>
-            {/* Overall Stat Cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px', marginBottom: '20px' }}>
-              <div className="usage-metric-card">
-                <div className="metric-label">TOTAL SESSIONS</div>
-                <div className="metric-value">{usage?.overall.totalSessions || 0}</div>
-                <div className="metric-hint">Across all active workspaces</div>
-              </div>
-              <div className="usage-metric-card">
-                <div className="metric-label">TOTAL TOKENS CONSUMED</div>
-                <div className="metric-value highlight">{((usage?.overall.totalTokens || 0) / 1000).toFixed(1)}k</div>
-                <div className="metric-hint">
-                  {((usage?.overall.inputTokens || 0) / 1000).toFixed(1)}k input · {((usage?.overall.outputTokens || 0) / 1000).toFixed(1)}k output
-                </div>
-              </div>
-              <div className="usage-metric-card">
-                <div className="metric-label">ESTIMATED SPEND (EQUIVALENT)</div>
-                <div className="metric-value" style={{ color: '#34d399' }}>
-                  ${(usage?.overall.estimatedCost || 0).toFixed(4)}
-                </div>
-                <div className="metric-hint">Calculated using standard model API pricing</div>
-              </div>
-            </div>
+                {footStatus.text}
+              </>
+            )}
+          </span>
+        )
+      }
+      footer={
+        onAccounts && (
+          <>
+            <Button variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+            <Button type="submit" form={FORM_ID} variant="primary" loading={saving} disabled={!subscriptions || !dirty}>
+              Save changes
+            </Button>
+          </>
+        )
+      }
+    >
+      <Tabs<TabId>
+        className="acct-tabs"
+        label="Accounts and usage"
+        value={activeTab}
+        onChange={setActiveTab}
+        items={[
+          { id: 'subscriptions', label: 'Accounts', icon: 'user' },
+          { id: 'usage', label: 'Usage', icon: 'chart' },
+        ]}
+      />
 
-            {/* Vendor Breakdown Cards */}
-            <div style={{ marginBottom: '24px' }}>
-              <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '10px', textTransform: 'uppercase' }}>
-                Usage Breakdown By Vendor
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px' }}>
-                {/* Anthropic */}
-                <div className="vendor-usage-card claude">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-                    <VendorIcon agentId="claude" size={20} />
-                    <span style={{ fontWeight: 700, fontSize: '14px' }}>Anthropic (Claude)</span>
-                  </div>
-                  <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--agent-claude)' }}>
-                    {((usage?.vendors.anthropic.totalTokens || 0) / 1000).toFixed(1)}k <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--text-muted)' }}>tokens</span>
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                    {usage?.vendors.anthropic.sessionCount || 0} active sessions · Est. ${(usage?.vendors.anthropic.estimatedCost || 0).toFixed(4)}
-                  </div>
-                </div>
-
-                {/* OpenAI */}
-                <div className="vendor-usage-card codex">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-                    <VendorIcon agentId="codex" size={20} />
-                    <span style={{ fontWeight: 700, fontSize: '14px' }}>OpenAI (Codex)</span>
-                  </div>
-                  <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--agent-codex)' }}>
-                    {((usage?.vendors.openai.totalTokens || 0) / 1000).toFixed(1)}k <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--text-muted)' }}>tokens</span>
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                    {usage?.vendors.openai.sessionCount || 0} active sessions · Est. ${(usage?.vendors.openai.estimatedCost || 0).toFixed(4)}
-                  </div>
-                </div>
-
-                {/* Google */}
-                <div className="vendor-usage-card gemini">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-                    <VendorIcon agentId="antigravity" size={20} />
-                    <span style={{ fontWeight: 700, fontSize: '14px' }}>Google (Gemini)</span>
-                  </div>
-                  <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--agent-gemini)' }}>
-                    {((usage?.vendors.google.totalTokens || 0) / 1000).toFixed(1)}k <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--text-muted)' }}>tokens</span>
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                    {usage?.vendors.google.sessionCount || 0} active sessions · Est. ${(usage?.vendors.google.estimatedCost || 0).toFixed(4)}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Sessions Usage Table */}
-            <div>
-              <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '10px', textTransform: 'uppercase' }}>
-                Per-Session Usage & Context Gauge
-              </div>
-              {usage?.sessionsUsage && usage.sessionsUsage.length > 0 ? (
-                <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', overflow: 'hidden' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
-                    <thead>
-                      <tr style={{ background: '#181920', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-muted)', fontSize: '11px', textTransform: 'uppercase' }}>
-                        <th style={{ padding: '10px 14px' }}>Session / Title</th>
-                        <th style={{ padding: '10px 14px' }}>Engine & Model</th>
-                        <th style={{ padding: '10px 14px' }}>Tokens Used</th>
-                        <th style={{ padding: '10px 14px' }}>Context Window</th>
-                        <th style={{ padding: '10px 14px' }}>Est. Cost</th>
-                        <th style={{ padding: '10px 14px', textAlign: 'right' }}>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {usage.sessionsUsage.map((s) => {
-                        const percent = s.percentContextUsed;
-                        const barColor = percent > 80 ? '#ef4444' : percent > 50 ? '#f59e0b' : '#38bdf8';
-                        return (
-                          <tr key={s.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                            <td style={{ padding: '10px 14px', fontWeight: 600 }}>
-                              <div style={{ color: 'var(--text-main)' }}>{s.title}</div>
-                              <div style={{ fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>{s.id}</div>
-                            </td>
-                            <td style={{ padding: '10px 14px' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <VendorIcon agentId={s.agentId} size={14} />
-                                <span style={{ fontSize: '12px' }}>{s.model || s.agentId}</span>
-                              </div>
-                            </td>
-                            <td style={{ padding: '10px 14px', fontWeight: 700 }}>
-                              {s.totalTokens.toLocaleString()}
-                            </td>
-                            <td style={{ padding: '10px 14px', minWidth: '150px' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <div style={{ flex: 1, height: '6px', background: '#252630', borderRadius: '3px', overflow: 'hidden' }}>
-                                  <div style={{ width: `${percent}%`, height: '100%', background: barColor }} />
-                                </div>
-                                <span style={{ fontSize: '11px', color: 'var(--text-muted)', minWidth: '32px' }}>{percent}%</span>
-                              </div>
-                            </td>
-                            <td style={{ padding: '10px 14px', color: '#34d399', fontWeight: 600 }}>
-                              ${s.estimatedCost.toFixed(4)}
-                            </td>
-                            <td style={{ padding: '10px 14px', textAlign: 'right' }}>
-                              {onSelectSession && (
-                                <button
-                                  type="button"
-                                  className="btn-action"
-                                  onClick={() => {
-                                    onSelectSession(s.id);
-                                    onClose();
-                                  }}
-                                  style={{ fontSize: '11px', padding: '4px 10px' }}
-                                >
-                                  Open →
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div style={{ padding: '30px', textAlign: 'center', color: 'var(--text-dim)' }}>
-                  No sessions recorded yet.
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
+      {onAccounts ? (
+        <div className="acct-body" role="tabpanel" aria-label="Accounts">
+          <form id={FORM_ID} className="acct-form" onSubmit={handleSaveCredentials}>
+            {subsLoading && !subscriptions ? (
+              <AccountsSkeleton />
+            ) : subsError && !subscriptions ? (
+              <LoadError what="your accounts" message={subsError} onRetry={loadSubscriptions} />
+            ) : (
+              VENDORS.map((spec) => (
+                <VendorCard
+                  key={spec.key}
+                  spec={spec}
+                  sub={subscriptions?.[spec.key]}
+                  mode={modes[spec.key]}
+                  onModeChange={(mode) => setModes((m) => ({ ...m, [spec.key]: mode }))}
+                  apiKey={keys[spec.key]}
+                  onApiKeyChange={(value) => setKeys((k) => ({ ...k, [spec.key]: value }))}
+                  {...(spec.key === 'anthropic'
+                    ? { refreshingLimits, refreshError, onRefreshLimits: handleRefreshLimits }
+                    : {})}
+                />
+              ))
+            )}
+          </form>
+        </div>
+      ) : (
+        <div className="acct-body" role="tabpanel" aria-label="Usage">
+          {usageLoading && !usage ? (
+            <UsageSkeleton />
+          ) : usageError && !usage ? (
+            <LoadError what="usage" message={usageError} onRetry={loadUsage} />
+          ) : usage ? (
+            <UsagePanel usage={usage} onSelectSession={onSelectSession} onClose={onClose} />
+          ) : null}
+        </div>
+      )}
     </Modal>
   );
 };

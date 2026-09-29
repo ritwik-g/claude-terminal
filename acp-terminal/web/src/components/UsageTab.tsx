@@ -1,8 +1,167 @@
-import React from 'react';
-import type { AcpSession } from '../types';
+import React, { useMemo } from 'react';
+import type { AcpSession, TurnMessage, VendorRateLimits } from '../types';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
-import { usageMetrics } from '../pricing';
+import { usageMetrics, formatCost, formatTokens, formatWindow, formatRate, levelTone } from '../pricing';
+import { Badge, Button, Card, EmptyState, Icon, Progress, SectionHeader, Stat, type Tone } from '../ui';
+import '../styles/usage.css';
+
+/* ------------------------------------------------------------ Shared parts */
+
+const limitTone = (pct: number) => levelTone(pct);
+
+/** One rate-limit window: label, "42% used · Resets 3pm", and a bar. */
+export const LimitMeter: React.FC<{ label: string; utilization: number; resetsAt?: string | null }> = ({
+  label,
+  utilization,
+  resetsAt,
+}) => {
+  const pct = Math.max(0, Math.min(100, Math.round(utilization)));
+  const tone = limitTone(pct);
+  return (
+    <div className="usg-limit">
+      <div className="usg-limit-head">
+        <span className="usg-limit-label">{label}</span>
+        <span className="usg-limit-value">
+          <span className={`usg-limit-pct tone-${tone}`}>{pct}% used</span>
+          {resetsAt && <span className="usg-limit-reset">Resets {resetsAt}</span>}
+        </span>
+      </div>
+      <Progress value={pct} tone={tone} label={`${label}: ${pct}% used`} />
+    </div>
+  );
+};
+
+/** The 5-hour, weekly and per-model windows a vendor reports. */
+export const RateLimitList: React.FC<{ limits: VendorRateLimits }> = ({ limits }) => (
+  <div className="usg-limits">
+    {limits.fiveHour && <LimitMeter label="5-hour window" {...limits.fiveHour} />}
+    {limits.weeklyAll && <LimitMeter label="Weekly, all models" {...limits.weeklyAll} />}
+    {limits.weeklyModels?.map((wm) => (
+      <LimitMeter key={wm.name} label={`Weekly, ${wm.name}`} utilization={wm.utilization} resetsAt={wm.resetsAt} />
+    ))}
+  </div>
+);
+
+export const hasRateLimits = (limits?: VendorRateLimits | null): limits is VendorRateLimits =>
+  Boolean(limits && (limits.fiveHour || limits.weeklyAll || limits.weeklyModels?.length));
+
+/* --------------------------------------------------------------- Turn rows */
+
+/** Flatten markdown to one plain line for the per-turn summary. */
+export function stripMarkdown(md: string): string {
+  return md
+    .replace(/```[\s\S]*?(```|$)/g, ' ')
+    .replace(/<usage>[\s\S]*?<\/usage>/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')
+    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?=[^\w*]|$)/g, '$1$2')
+    .replace(/~~(.*?)~~/g, '$1')
+    .replace(/^\s*[-*_]{3,}\s*$/gm, ' ')
+    .replace(/\|/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function turnSummary(t: TurnMessage): { text: string; kind: 'text' | 'thinking' | 'tools' | 'empty' } {
+  const text = t.content ? stripMarkdown(t.content) : '';
+  if (text) return { text, kind: 'text' };
+  const tools = t.toolCalls || [];
+  if (tools.length > 0) {
+    const titles = tools
+      .slice(0, 3)
+      .map((tc) => tc.title)
+      .join(', ');
+    return { text: tools.length > 3 ? `${titles} and ${tools.length - 3} more` : titles, kind: 'tools' };
+  }
+  const thoughts = t.thoughts ? stripMarkdown(t.thoughts) : '';
+  if (thoughts) return { text: thoughts, kind: 'thinking' };
+  return { text: t.role === 'system' ? 'System event' : 'No text', kind: 'empty' };
+}
+
+const ROLE: Record<TurnMessage['role'], { label: string; tone: Tone }> = {
+  user: { label: 'You', tone: 'accent' },
+  agent: { label: 'Agent', tone: 'neutral' },
+  system: { label: 'System', tone: 'info' },
+};
+
+function formatTurnTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return time;
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+const TurnList: React.FC<{ turns: TurnMessage[] }> = ({ turns }) => (
+  <div className="usg-turns-wrap">
+    <table className="usg-turns">
+      <colgroup>
+        <col className="usg-col-idx" />
+        <col className="usg-col-role" />
+        <col />
+        <col className="usg-col-tools" />
+        <col className="usg-col-time" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th scope="col" className="usg-num">
+            #
+          </th>
+          <th scope="col">Role</th>
+          <th scope="col">Summary</th>
+          <th scope="col" className="usg-num">
+            Tools
+          </th>
+          <th scope="col" className="usg-num usg-col-time-cell">
+            Time
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {turns.map((t, idx) => {
+          const summary = turnSummary(t);
+          const tools = t.toolCalls?.length || 0;
+          const role = ROLE[t.role] || ROLE.system;
+          return (
+            <tr key={t.id}>
+              <td className="usg-num usg-idx">{idx + 1}</td>
+              <td>
+                <Badge tone={role.tone}>{role.label}</Badge>
+              </td>
+              <td className={`usg-summary is-${summary.kind}`} title={summary.text}>
+                {summary.kind === 'thinking' && <Icon name="brain" size={12} />}
+                {summary.kind === 'tools' && <Icon name="tool" size={12} />}
+                <span>{summary.text}</span>
+              </td>
+              <td className="usg-num">
+                {tools > 0 ? (
+                  <span className="usg-tools">{tools}</span>
+                ) : (
+                  <>
+                    <span className="usg-muted" aria-hidden="true">
+                      –
+                    </span>
+                    <span className="sr-only">None</span>
+                  </>
+                )}
+              </td>
+              <td className="usg-num usg-time usg-col-time-cell">
+                <time dateTime={new Date(t.timestamp).toISOString()}>{formatTurnTime(t.timestamp)}</time>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  </div>
+);
+
+/* ---------------------------------------------------------------- The tab */
 
 /** The session's Usage tab: context window, token counts, spend and per-turn impact. */
 export const UsageTab: React.FC<{
@@ -10,289 +169,162 @@ export const UsageTab: React.FC<{
   onOpenSubscriptionsModal?: () => void;
   onCompact: () => void;
   compacting: boolean;
-}> = ({ session, onOpenSubscriptionsModal, onCompact: handleCompactSession, compacting }) => {
-  const { pricing, inputTokens, outputTokens, cachedTokens, contextTokens, percentContext, estimatedCost } = usageMetrics(session);
-  const currentModelMeta = getModelMeta(session.model || 'sonnet');
+}> = ({ session, onOpenSubscriptionsModal, onCompact, compacting }) => {
+  const { pricing, inputTokens, outputTokens, cachedTokens, contextTokens, percentContext, estimatedCost } =
+    usageMetrics(session);
+  const modelMeta = getModelMeta(session.model || 'sonnet');
+  const isFree = pricing.inputPerMillion === 0 && pricing.outputPerMillion === 0;
+  const hasUsage = inputTokens + outputTokens + contextTokens > 0;
+  const tone = levelTone(percentContext);
+  const tokensLeft = Math.max(0, pricing.contextWindow - contextTokens);
+  const toolTotal = useMemo(() => session.turns.reduce((n, t) => n + (t.toolCalls?.length || 0), 0), [session.turns]);
 
   return (
-        <div className="session-usage-tab-content">
-          {/* Top Context Meter Banner */}
-          <div className="context-meter-card">
-            <div className="context-meter-header">
-              <div>
-                <div className="context-meter-title">Context Window Utilization</div>
-                <div className="context-meter-sub">
-                  Active buffer: <strong>{contextTokens.toLocaleString()}</strong> of <strong>{pricing.contextWindow.toLocaleString()}</strong> tokens ({pricing.contextWindow >= 1000000 ? `${pricing.contextWindow / 1000000}M` : `${pricing.contextWindow / 1000}k`} window)
+    <div className="usg-tab">
+      <div className="usg-col">
+        {hasUsage ? (
+          <>
+            <Card className={`usg-context tone-${tone}`} padding="lg">
+              <div className="usg-context-head">
+                <div>
+                  <div className="usg-eyebrow">Context window</div>
+                  <div className="usg-context-sub">
+                    <span className="usg-strong">{contextTokens.toLocaleString()}</span> of{' '}
+                    {pricing.contextWindow.toLocaleString()} tokens in use
+                  </div>
+                </div>
+                <div className={`usg-context-pct tone-${tone}`}>
+                  {percentContext}
+                  <span className="usg-context-pct-sign">%</span>
                 </div>
               </div>
-              <div
-                className="context-meter-percent"
-                style={{ color: percentContext > 80 ? '#ef4444' : percentContext > 50 ? '#f59e0b' : '#38bdf8' }}
-              >
-                {percentContext}%
+              <div className="usg-context-bar">
+                <Progress value={percentContext} tone={tone} label="Context window used" />
               </div>
-            </div>
-
-            {/* Context Gauge Bar */}
-            <div className="context-bar-track">
-              <div
-                className="context-bar-fill"
-                style={{
-                  width: `${percentContext}%`,
-                  backgroundColor: percentContext > 80 ? '#ef4444' : percentContext > 50 ? '#f59e0b' : '#38bdf8',
-                }}
-              />
-            </div>
-
-            <div className="context-meter-footer">
-              <span>{Math.max(0, pricing.contextWindow - contextTokens).toLocaleString()} tokens available</span>
-              {percentContext > 60 && (
-                <button
-                  type="button"
-                  className="btn-action"
-                  onClick={handleCompactSession}
-                  disabled={compacting || session.turns.length <= 1}
-                  style={{ color: '#fbbf24', borderColor: '#f59e0b', fontSize: '12px' }}
-                >
-                  📦 Compact conversation history now
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Token Breakdown & Cost Grid */}
-          <div className="usage-stats-grid">
-            <div className="usage-stat-box">
-              <div className="usage-stat-label">INPUT TOKENS</div>
-              <div className="usage-stat-val">{inputTokens.toLocaleString()}</div>
-              <div className="usage-stat-hint">Prompt text + tool inputs</div>
-            </div>
-            <div className="usage-stat-box">
-              <div className="usage-stat-label">OUTPUT TOKENS</div>
-              <div className="usage-stat-val">{outputTokens.toLocaleString()}</div>
-              <div className="usage-stat-hint">Agent reasoning + completions</div>
-            </div>
-            <div className="usage-stat-box">
-              <div className="usage-stat-label">CACHED TOKENS</div>
-              <div className="usage-stat-val highlight">{cachedTokens.toLocaleString()}</div>
-              <div className="usage-stat-hint">Prompt caching savings</div>
-            </div>
-            <div className="usage-stat-box">
-              <div className="usage-stat-label">ESTIMATED SPEND</div>
-              <div className="usage-stat-val" style={{ color: '#34d399' }}>
-                ${estimatedCost.toFixed(4)}
-              </div>
-              <div className="usage-stat-hint">
-                At ${pricing.inputPerMillion}/M in, ${pricing.outputPerMillion}/M out
-              </div>
-            </div>
-          </div>
-
-          {/* Model & Vendor Specs Card */}
-          <div className="model-specs-card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <VendorIcon agentId={session.agentId} size={20} />
-                <span style={{ fontWeight: 700, fontSize: '14px' }}>
-                  {session.agentName} · {currentModelMeta.label || session.model}
+              <div className="usg-context-foot">
+                <span className="usg-context-left">
+                  {tokensLeft.toLocaleString()} tokens left
+                  {tone === 'danger' && (
+                    <span className="usg-context-warning"> · the agent may start losing early turns</span>
+                  )}
                 </span>
-              </div>
-              {onOpenSubscriptionsModal && (
-                <button
-                  type="button"
-                  className="btn-action"
-                  onClick={onOpenSubscriptionsModal}
-                  style={{ fontSize: '12px', padding: '6px 12px' }}
-                >
-                  💳 Manage Subscriptions & All Vendors →
-                </button>
-              )}
-            </div>
-            <div className="model-specs-table">
-              <div className="spec-row">
-                <span>Model ID:</span>
-                <code>{session.model || 'default'}</code>
-              </div>
-              <div className="spec-row">
-                <span>Max Context Window:</span>
-                <span>{pricing.contextWindow.toLocaleString()} tokens</span>
-              </div>
-              <div className="spec-row">
-                <span>Standard Pricing:</span>
-                <span>${pricing.inputPerMillion.toFixed(2)} / 1M input · ${pricing.outputPerMillion.toFixed(2)} / 1M output</span>
-              </div>
-              <div className="spec-row">
-                <span>Workspace:</span>
-                <code title={session.cwd}>{session.cwd}</code>
-              </div>
-            </div>
-          </div>
-
-          {/* Vendor Rate Limits & Rolling Windows Card */}
-          {session.rateLimits && (session.rateLimits.fiveHour || session.rateLimits.weeklyAll) && (
-            <div
-              className="model-specs-card"
-              style={{
-                marginTop: '16px',
-                background: 'rgba(217, 119, 6, 0.08)',
-                borderColor: 'rgba(217, 119, 6, 0.28)',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ fontSize: '18px' }}>⏱️</span>
-                  <div>
-                    <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-normal)' }}>
-                      Anthropic Claude Subscription Limits
-                    </span>
-                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                      Live 5-hour rolling session limit and weekly capacity for your Claude account
-                    </div>
-                  </div>
-                </div>
-                {onOpenSubscriptionsModal && (
-                  <button
-                    type="button"
-                    className="btn-action"
-                    onClick={onOpenSubscriptionsModal}
-                    style={{ fontSize: '12px', padding: '5px 12px' }}
+                {percentContext > 50 && (
+                  <Button
+                    size="sm"
+                    variant={tone === 'danger' ? 'primary' : 'secondary'}
+                    icon="layers"
+                    onClick={onCompact}
+                    loading={compacting}
+                    disabled={session.turns.length <= 1}
+                    title="Summarise earlier turns to free up context"
                   >
-                    💳 Manage Subscriptions →
-                  </button>
+                    {compacting ? 'Compacting' : 'Compact conversation'}
+                  </Button>
                 )}
               </div>
+            </Card>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {session.rateLimits.fiveHour && (
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
-                      <span style={{ fontWeight: 600, color: 'var(--text-normal)' }}>5-Hour Session Limit</span>
-                      <span style={{ fontWeight: 700, color: session.rateLimits.fiveHour.utilization > 80 ? '#f59e0b' : 'inherit' }}>
-                        {session.rateLimits.fiveHour.utilization}% used
-                        {session.rateLimits.fiveHour.resetsAt && (
-                          <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: '6px' }}>
-                            · resets {session.rateLimits.fiveHour.resetsAt}
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <div style={{ height: '8px', borderRadius: '4px', background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
-                      <div
-                        style={{
-                          height: '100%',
-                          width: `${Math.min(100, session.rateLimits.fiveHour.utilization)}%`,
-                          background: session.rateLimits.fiveHour.utilization > 80 ? '#f59e0b' : '#d97706',
-                          borderRadius: '4px',
-                          transition: 'width 0.3s ease',
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {session.rateLimits.weeklyAll && (
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
-                      <span style={{ fontWeight: 600, color: 'var(--text-normal)' }}>Weekly Limit (All Models)</span>
-                      <span style={{ fontWeight: 700, color: session.rateLimits.weeklyAll.utilization > 80 ? '#f59e0b' : 'inherit' }}>
-                        {session.rateLimits.weeklyAll.utilization}% used
-                        {session.rateLimits.weeklyAll.resetsAt && (
-                          <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: '6px' }}>
-                            · resets {session.rateLimits.weeklyAll.resetsAt}
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <div style={{ height: '8px', borderRadius: '4px', background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
-                      <div
-                        style={{
-                          height: '100%',
-                          width: `${Math.min(100, session.rateLimits.weeklyAll.utilization)}%`,
-                          background: session.rateLimits.weeklyAll.utilization > 80 ? '#f59e0b' : '#3b82f6',
-                          borderRadius: '4px',
-                          transition: 'width 0.3s ease',
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {session.rateLimits.weeklyModels?.map((wm: { name: string; utilization: number; resetsAt?: string | null }, idx: number) => (
-                  <div key={idx}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
-                      <span style={{ fontWeight: 600, color: 'var(--text-normal)' }}>Weekly Limit ({wm.name})</span>
-                      <span style={{ fontWeight: 700, color: wm.utilization > 80 ? '#f59e0b' : 'inherit' }}>
-                        {wm.utilization}% used
-                        {wm.resetsAt && (
-                          <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: '6px' }}>
-                            · resets {wm.resetsAt}
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <div style={{ height: '8px', borderRadius: '4px', background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
-                      <div
-                        style={{
-                          height: '100%',
-                          width: `${Math.min(100, wm.utilization)}%`,
-                          background: wm.utilization > 80 ? '#f59e0b' : '#8b5cf6',
-                          borderRadius: '4px',
-                          transition: 'width 0.3s ease',
-                        }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
+            <div className="usg-stats">
+              <Card className="usg-stat" padding="md">
+                <Stat label="Input" value={formatTokens(inputTokens)} hint="Prompts and tool results" />
+              </Card>
+              <Card className="usg-stat" padding="md">
+                <Stat label="Output" value={formatTokens(outputTokens)} hint="Replies and reasoning" />
+              </Card>
+              <Card className="usg-stat" padding="md">
+                <Stat label="Cached" value={formatTokens(cachedTokens)} hint="From the prompt cache" />
+              </Card>
+              <Card className="usg-stat" padding="md">
+                <Stat
+                  label="Estimated cost"
+                  value={formatCost(estimatedCost)}
+                  tone={isFree ? undefined : 'ok'}
+                  hint={isFree ? 'Runs locally, no charge' : `${pricing.basis} list price`}
+                />
+              </Card>
             </div>
-          )}
+          </>
+        ) : (
+          <Card padding="none">
+            <EmptyState
+              icon="gauge"
+              title="No usage yet"
+              description="Context, token counts and cost appear here after the agent's first reply."
+            />
+          </Card>
+        )}
 
-          {/* Turn Activity Breakdown */}
-          <div className="turns-usage-card">
-            <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '10px', textTransform: 'uppercase' }}>
-              Conversation Turns & Tool Impact ({session.turns.length} turns)
+        <Card className="usg-model" padding="lg">
+          <div className="usg-model-head">
+            <span className="usg-model-mark">
+              <VendorIcon agentId={session.agentId} size={20} />
+            </span>
+            <div className="usg-model-title">
+              <div className="usg-model-name">{modelMeta.label || session.model || 'Default model'}</div>
+              <div className="usg-model-agent">{session.agentName}</div>
             </div>
-            <div className="turns-table-wrapper">
-              <table className="turns-usage-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Role</th>
-                    <th>Tool Calls</th>
-                    <th>Timestamp</th>
-                    <th>Summary</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {session.turns.map((t, idx) => (
-                    <tr key={t.id}>
-                      <td style={{ color: 'var(--text-dim)' }}>{idx + 1}</td>
-                      <td>
-                        <span className={`turn-role-badge ${t.role}`}>
-                          {t.role.toUpperCase()}
-                        </span>
-                      </td>
-                      <td>
-                        {t.toolCalls && t.toolCalls.length > 0 ? (
-                          <span style={{ color: '#38bdf8', fontWeight: 600 }}>
-                            {t.toolCalls.length} tool{t.toolCalls.length > 1 ? 's' : ''}
-                          </span>
-                        ) : (
-                          <span style={{ color: 'var(--text-dim)' }}>—</span>
-                        )}
-                      </td>
-                      <td style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
-                        {new Date(t.timestamp).toLocaleTimeString()}
-                      </td>
-                      <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {t.content ? t.content.slice(0, 80) : t.thoughts ? `💭 ${t.thoughts.slice(0, 80)}` : 'System event'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {onOpenSubscriptionsModal && (
+              <Button
+                className="usg-model-link"
+                size="sm"
+                variant="ghost"
+                iconRight="arrowRight"
+                onClick={onOpenSubscriptionsModal}
+              >
+                Accounts and usage
+              </Button>
+            )}
           </div>
-        </div>
+          <dl className="usg-dl">
+            <dt>Model id</dt>
+            <dd>
+              <code className="usg-mono">{session.model || 'default'}</code>
+            </dd>
+            <dt>Context window</dt>
+            <dd>{formatWindow(pricing.contextWindow)} tokens</dd>
+            <dt>Pricing</dt>
+            <dd>{isFree ? 'Free' : formatRate(pricing)}</dd>
+            <dt>Workspace</dt>
+            <dd>
+              <code className="usg-mono usg-ellipsis" title={session.cwd}>
+                {session.cwd}
+              </code>
+            </dd>
+          </dl>
+        </Card>
+
+        {hasRateLimits(session.rateLimits) && (
+          <Card className="usg-plan" padding="lg">
+            <SectionHeader
+              title="Plan limits"
+              description="Rolling usage windows on your subscription"
+              actions={
+                onOpenSubscriptionsModal && (
+                  <Button size="sm" variant="ghost" onClick={onOpenSubscriptionsModal}>
+                    Manage
+                  </Button>
+                )
+              }
+            />
+            <RateLimitList limits={session.rateLimits} />
+          </Card>
+        )}
+
+        {session.turns.length > 0 && (
+          <section className="usg-turns-section" aria-labelledby="usg-turns-title">
+            <div className="usg-turns-title-row">
+              <h3 id="usg-turns-title" className="usg-section-title">
+                Turns
+              </h3>
+              <span className="usg-section-meta">
+                {session.turns.length} {session.turns.length === 1 ? 'turn' : 'turns'} · {toolTotal}{' '}
+                {toolTotal === 1 ? 'tool call' : 'tool calls'}
+              </span>
+            </div>
+            <TurnList turns={session.turns} />
+          </section>
+        )}
+      </div>
+    </div>
   );
 };

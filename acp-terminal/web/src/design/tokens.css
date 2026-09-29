@@ -198,23 +198,3 @@
     --shadow-lg: 0 18px 48px rgba(20, 20, 40, 0.16);
   }
 }
-
-/*
- * Legacy aliases: older component CSS still reads these names. They map onto
- * the tokens above so both themes apply; remove once nothing references them.
- */
-:root {
-  --bg-app: var(--bg);
-  --bg-sidebar: var(--bg-subtle);
-  --bg-card: var(--surface);
-  --bg-card-hover: var(--surface-2);
-  --bg-card-active: var(--surface-3);
-  --bg-inset: var(--surface-inset);
-  --border-subtle: var(--border);
-  --border-focus: var(--accent);
-  --text-main: var(--text);
-  --text-muted: var(--text-2);
-  --text-dim: var(--text-3);
-  --accent-strong: var(--accent-solid);
-  --shadow-pop: var(--shadow-lg);
-}

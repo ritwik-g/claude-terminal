@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { AcpSession, ToolCallRecord } from '../types';
 import { TerminalDrawer } from './TerminalDrawer';
-import { Icon, Spinner } from './Icons';
-import { commandOf, durationLabel, isActive, isShellCall } from '../toolDisplay';
+import { CopyButton, OutputText } from './AgentTurn';
+import { Badge, Button, EmptyState, Icon, Segmented, Spinner } from '../ui';
+import { commandOf, durationLabel, isActive, isFailed, isShellCall, liveCallIds } from '../toolDisplay';
 
 // Agents such as Claude Code and Codex run shell commands inside their own
 // process, so nothing ever appears in a client-side PTY. This panel shows
@@ -11,46 +12,76 @@ import { commandOf, durationLabel, isActive, isShellCall } from '../toolDisplay'
 
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
-export const LiveTerminalPanel: React.FC<{ session: AcpSession }> = ({ session }) => {
-  const [view, setView] = useState<'commands' | 'shell'>('commands');
+type View = 'commands' | 'shell';
+type FeedItem = { call: ToolCallRecord; viaSubagent: boolean; interrupted: boolean };
 
-  const commands: Array<{ call: ToolCallRecord; viaSubagent: boolean }> = session.turns
+const cleanOutput = (s?: string) => s?.replace(ANSI, '').replace(/\r\n/g, '\n').trimEnd();
+
+export const LiveTerminalPanel: React.FC<{ session: AcpSession }> = ({ session }) => {
+  const [view, setView] = useState<View>('commands');
+  // Keep the shell attached once opened, so switching views doesn't reconnect.
+  const [shellOpened, setShellOpened] = useState(false);
+  useEffect(() => {
+    if (view === 'shell') setShellOpened(true);
+  }, [view]);
+
+  const live = liveCallIds(session);
+  const commands: FeedItem[] = session.turns
     .flatMap((t) => t.toolCalls || [])
     .filter((c) => isShellCall(c) && Boolean(commandOf(c)))
-    .map((c) => ({ call: c, viaSubagent: Boolean(c.parentToolUseId) }));
-  const running = commands.filter(({ call }) => isActive(call)).length;
+    .map((c) => ({ call: c, viaSubagent: Boolean(c.parentToolUseId), interrupted: isActive(c) && !live.has(c.id) }));
+  const running = commands.filter(({ call, interrupted }) => isActive(call) && !interrupted).length;
+  const failed = commands.filter(({ call }) => isFailed(call)).length;
+
+  const transcript = commands
+    .map(({ call }) => {
+      const out = cleanOutput(call.output);
+      return `$ ${commandOf(call)}${out ? `\n${out}` : ''}${call.exitCode != null ? `\n[exit ${call.exitCode}]` : ''}`;
+    })
+    .join('\n\n');
 
   return (
     <div className="live-terminal-panel">
-      <div className="live-terminal-toolbar" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'commands'}
-          className={`segmented-btn ${view === 'commands' ? 'active' : ''}`}
-          onClick={() => setView('commands')}
-        >
-          <Icon name="bot" size={13} /> Agent commands
-          {commands.length > 0 && <span className="segmented-count">{commands.length}</span>}
-          {running > 0 && <Spinner size={10} />}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'shell'}
-          className={`segmented-btn ${view === 'shell' ? 'active' : ''}`}
-          onClick={() => setView('shell')}
-        >
-          <Icon name="terminal" size={13} /> Your shell
-        </button>
-        <span className="live-terminal-cwd" title={session.cwd}>
-          <Icon name="folder" size={12} /> {session.cwd}
+      <div className="live-terminal-toolbar">
+        <Segmented<View>
+          label="Terminal view"
+          size="sm"
+          value={view}
+          onChange={setView}
+          options={[
+            {
+              value: 'commands',
+              icon: 'bot',
+              label: (
+                <>
+                  Agent commands
+                  {running > 0 ? <Spinner size={9} /> : commands.length > 0 && <span className="lt-seg-count">{commands.length}</span>}
+                </>
+              ),
+            },
+            { value: 'shell', icon: 'terminal', label: 'Your shell' },
+          ]}
+        />
+        {view === 'commands' && commands.length > 0 && (
+          <span className="lt-summary">
+            {commands.length} command{commands.length === 1 ? '' : 's'}
+            {running > 0 && <span className="lt-summary-running"> · {running} running</span>}
+            {failed > 0 && <span className="lt-summary-failed"> · {failed} failed</span>}
+          </span>
+        )}
+        <span className="lt-cwd" title={session.cwd}>
+          <Icon name="folder" size={12} />
+          <span className="lt-cwd-path">
+            <bdi>{session.cwd}</bdi>
+          </span>
         </span>
+        {view === 'commands' && commands.length > 0 && <CopyButton text={transcript} label="Copy all" withText />}
       </div>
-      {view === 'commands' ? (
+      {view === 'commands' && (
         <CommandFeed commands={commands} cwd={session.cwd} onOpenShell={() => setView('shell')} />
-      ) : (
-        <div className="live-terminal-shell">
+      )}
+      {shellOpened && (
+        <div className="live-terminal-shell" hidden={view !== 'shell'}>
           <TerminalDrawer sessionId={session.id} />
         </div>
       )}
@@ -59,12 +90,11 @@ export const LiveTerminalPanel: React.FC<{ session: AcpSession }> = ({ session }
 };
 
 const CommandFeed: React.FC<{
-  commands: Array<{ call: ToolCallRecord; viaSubagent: boolean }>;
+  commands: FeedItem[];
   cwd: string;
   onOpenShell: () => void;
 }> = ({ commands, cwd, onOpenShell }) => {
   const endRef = useRef<HTMLDivElement>(null);
-  const feedRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const signature = commands.map(({ call }) => `${call.id}:${call.status}:${call.output?.length || 0}`).join('|');
 
@@ -74,13 +104,17 @@ const CommandFeed: React.FC<{
 
   if (commands.length === 0) {
     return (
-      <div className="command-feed-empty">
-        <Icon name="terminal" size={28} />
-        <div className="command-feed-empty-title">No commands yet</div>
-        <div>Shell commands the agent runs will stream here with their output and exit codes.</div>
-        <button type="button" className="btn-secondary" onClick={onOpenShell}>
-          Open your shell in {cwd.split('/').filter(Boolean).pop() || cwd}
-        </button>
+      <div className="command-feed is-empty">
+        <EmptyState
+          icon="terminal"
+          title="No commands yet"
+          description="Shell commands the agent runs will stream here with their output and exit codes."
+          action={
+            <Button icon="terminal" onClick={onOpenShell}>
+              Open your shell in {cwd.split('/').filter(Boolean).pop() || cwd}
+            </Button>
+          }
+        />
       </div>
     );
   }
@@ -88,45 +122,57 @@ const CommandFeed: React.FC<{
   return (
     <div
       className="command-feed"
-      ref={feedRef}
+      role="log"
+      aria-label="Agent commands"
       onScroll={(e) => {
         const el = e.currentTarget;
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       }}
     >
-      {commands.map(({ call, viaSubagent }) => {
-        const failed = call.status === 'failed' || (call.exitCode != null && call.exitCode !== 0);
-        const output = call.output?.replace(ANSI, '').replace(/\r\n/g, '\n').trimEnd();
+      {commands.map(({ call, viaSubagent, interrupted }) => {
+        const failed = isFailed(call);
+        const active = isActive(call) && !interrupted;
+        const output = cleanOutput(call.output);
         const duration = durationLabel(call);
         return (
-          <div key={call.id} className={`feed-entry ${failed ? 'failed' : ''}`}>
+          <div key={call.id} className={`feed-entry${failed ? ' is-failed' : ''}${active ? ' is-running' : ''}`}>
             <div className="feed-prompt">
-              <span className="feed-caret">$</span>
+              <span className="feed-caret" aria-hidden>
+                $
+              </span>
               <span className="feed-command">{commandOf(call)}</span>
               <span className="feed-meta">
                 {viaSubagent && (
-                  <span className="pill" title="Run by a subagent">
-                    <Icon name="bot" size={11} /> subagent
-                  </span>
+                  <Badge tone="neutral" icon="bot" title="Run by a subagent">
+                    Subagent
+                  </Badge>
                 )}
-                {call.background && <span className="pill">background</span>}
-                {isActive(call) ? (
-                  <Spinner size={10} />
+                {call.background && <Badge tone="info">Background</Badge>}
+                {interrupted && <Badge tone="neutral">Interrupted</Badge>}
+                {active ? (
+                  <Badge tone="accent">
+                    <Spinner size={9} />
+                    Running
+                  </Badge>
                 ) : call.exitCode != null ? (
-                  <span className={`pill ${failed ? 'pill-fail' : 'pill-ok'}`}>exit {call.exitCode}</span>
+                  <Badge tone={failed ? 'danger' : 'ok'} mono>
+                    exit {call.exitCode}
+                  </Badge>
                 ) : failed ? (
-                  <span className="pill pill-fail">failed</span>
+                  <Badge tone="danger">Failed</Badge>
                 ) : null}
-                {duration && <span>{duration}</span>}
+                {duration && <span className="feed-duration">{duration}</span>}
               </span>
             </div>
             {call.description && <div className="feed-desc"># {call.description}</div>}
             {output ? (
-              <pre className="feed-output">{output}</pre>
-            ) : !isActive(call) && !call.background ? (
-              <div className="feed-desc">(no output)</div>
+              <pre className="feed-output">
+                <OutputText text={output} />
+              </pre>
+            ) : !active && !interrupted && !call.background ? (
+              <div className="feed-desc feed-empty-output">No output</div>
             ) : null}
-            {call.error && <pre className="feed-output tool-err">{String(call.error)}</pre>}
+            {call.error && <pre className="feed-output feed-error">{String(call.error)}</pre>}
           </div>
         );
       })}

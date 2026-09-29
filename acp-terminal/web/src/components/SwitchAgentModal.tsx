@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useId } from 'react';
 import type { AcpSession, AgentDescriptor } from '../types';
 import { api } from '../api';
+import { Badge, Button, ChoiceCard, Icon, Switch, Textarea, type IconName } from '../ui';
 import { Modal } from './Modal';
-import { AgentModelPicker } from './AgentModelPicker';
+import { AgentModelPicker, agentDisplayName, getModelMeta, onRadioGroupKeyDown } from './AgentModelPicker';
+import { VendorIcon } from './VendorLogos';
 
 interface SwitchAgentModalProps {
   currentSession: AcpSession;
@@ -10,6 +12,36 @@ interface SwitchAgentModalProps {
   onClose: () => void;
   onSwitched: (newSessionId: string) => void;
 }
+
+type ContextMode = 'compact' | 'full' | 'none';
+
+const CONTEXT_OPTIONS: Array<{ value: ContextMode; title: string; description: string; icon: IconName; recommended?: boolean }> = [
+  {
+    value: 'compact',
+    title: 'Summary',
+    description: 'Earlier turns, decisions and edits, condensed.',
+    icon: 'layers',
+    recommended: true,
+  },
+  {
+    value: 'full',
+    title: 'Recent messages',
+    description: 'The latest messages, word for word.',
+    icon: 'message',
+  },
+  {
+    value: 'none',
+    title: 'None',
+    description: 'Just the project files and git state.',
+    icon: 'circle',
+  },
+];
+
+const CONTEXT_LABEL: Record<ContextMode, string> = {
+  compact: 'Summary of earlier turns',
+  full: 'Recent messages, word for word',
+  none: 'No conversation, only the project',
+};
 
 export const SwitchAgentModal: React.FC<SwitchAgentModalProps> = ({
   currentSession,
@@ -35,9 +67,10 @@ export const SwitchAgentModal: React.FC<SwitchAgentModalProps> = ({
   const [customPrompt, setCustomPrompt] = useState(defaultPrompt);
   const [archivePrevious, setArchivePrevious] = useState<boolean>(true);
   const [inPlace, setInPlace] = useState<boolean>(true);
-  const [contextMode, setContextMode] = useState<'compact' | 'full' | 'none'>('compact');
+  const [contextMode, setContextMode] = useState<ContextMode>('compact');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const uid = useId();
 
   useEffect(() => {
     if (availableTargets.length > 0 && !availableTargets.some((a) => a.id === targetAgentId)) {
@@ -54,6 +87,7 @@ export const SwitchAgentModal: React.FC<SwitchAgentModalProps> = ({
   }, [targetAgentId]);
 
   const handleSwitch = async () => {
+    if (!currentTargetAgent) return;
     setLoading(true);
     setError(null);
     try {
@@ -67,192 +101,212 @@ export const SwitchAgentModal: React.FC<SwitchAgentModalProps> = ({
       });
       onSwitched(res.session.id);
     } catch (err: any) {
-      setError(err.message || 'Failed to switch agent');
+      setError(err.message || 'The switch did not go through.');
       setLoading(false);
     }
   };
 
+  const targetName = currentTargetAgent ? agentDisplayName(currentTargetAgent) : 'another agent';
+  const currentModelLabel = currentSession.model ? getModelMeta(currentSession.model).label : null;
+  const goal = currentSession.lastPrompt || currentSession.recap;
+  const git = currentSession.git;
+  const promptEmpty = sendInitialPrompt && !customPrompt.trim();
+
+  const primaryLabel = loading
+    ? inPlace ? 'Switching…' : 'Forking…'
+    : inPlace ? `Continue with ${targetName}` : `Fork to ${targetName}`;
+
   return (
-    <Modal onClose={onClose} labelledBy="switch-agent-title">
-      <div className="modal-header">
-        <span id="switch-agent-title">🔄 Failover / Switch Coding Agent</span>
+    <Modal
+      onClose={onClose}
+      size="md"
+      icon="swap"
+      heading="Switch agent"
+      description="Continue this session with another agent."
+      bodyClassName="sw-body"
+      footerStart={
+        promptEmpty ? (
+          <span className="dlg-hint tone-warn">
+            <Icon name="alert" size={13} />
+            Write a prompt, or switch it off.
+          </span>
+        ) : null
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            icon={inPlace ? 'swap' : 'branch'}
+            loading={loading}
+            disabled={!currentTargetAgent || promptEmpty}
+            onClick={handleSwitch}
+          >
+            {primaryLabel}
+          </Button>
+        </>
+      }
+    >
+      <div className="sw-from">
+        <span className="dlg-eyebrow">Now</span>
+        <span className="sw-from-agent">
+          <VendorIcon agentId={currentSession.agentId} size={14} />
+          <span>{agentDisplayName({ id: currentSession.agentId, name: currentSession.agentName })}</span>
+          {currentModelLabel && <span className="sw-from-model">{currentModelLabel}</span>}
+        </span>
+        <Icon name="arrowRight" size={13} className="sw-from-arrow" />
+        <span className="sw-from-agent is-target">
+          {currentTargetAgent && <VendorIcon agentId={currentTargetAgent.id} size={14} />}
+          <span>{targetName}</span>
+          {targetModel && <span className="sw-from-model">{getModelMeta(targetModel).label}</span>}
+        </span>
       </div>
 
-      <div className="modal-body">
-        <p style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.4' }}>
-          Seamlessly switch from <strong>{currentSession.agentName}</strong> to another ACP-compatible agent.
-          Your working repository, uncommitted git changes, and recent goal context will be automatically transferred!
-        </p>
+      {error && (
+        <div className="dlg-callout tone-danger" role="alert">
+          <Icon name="alert" size={15} />
+          <div className="dlg-callout-text">
+            <strong>The switch didn't go through.</strong>
+            <span>{error}</span>
+          </div>
+        </div>
+      )}
 
-        {error && (
-          <div style={{ color: '#ef4444', fontSize: '13px', padding: '6px 10px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '6px' }}>
-            {error}
+      <AgentModelPicker
+        agents={availableTargets}
+        selectedAgentId={targetAgentId}
+        selectedModel={targetModel}
+        onAgentChange={(id) => setTargetAgentId(id)}
+        onModelChange={(model) => setTargetModel(model)}
+        disabled={loading}
+        agentLabel="Switch to"
+      />
+
+      <section className="dlg-section">
+        <span className="dlg-label" id={`${uid}-mode`}>
+          Switch mode
+        </span>
+        <div className="dlg-choice-grid cols-2" role="radiogroup" aria-labelledby={`${uid}-mode`} onKeyDown={onRadioGroupKeyDown}>
+          <ChoiceCard
+            selected={inPlace}
+            onSelect={() => setInPlace(true)}
+            disabled={loading}
+            icon={<Icon name="swap" size={15} />}
+            title="Continue in this session"
+            badge={<Badge tone="accent">Recommended</Badge>}
+            description="Same thread and history. The new agent picks up where this one stopped."
+          />
+          <ChoiceCard
+            selected={!inPlace}
+            onSelect={() => setInPlace(false)}
+            disabled={loading}
+            icon={<Icon name="branch" size={15} />}
+            title="Fork into a new session"
+            description="Start a separate session and keep this one as it is."
+          />
+        </div>
+        {!inPlace && (
+          <div className="dlg-subpanel">
+            <Switch
+              checked={archivePrevious}
+              onChange={setArchivePrevious}
+              disabled={loading}
+              label="Archive this session"
+              description="Moves it out of the active list once the fork starts."
+            />
           </div>
         )}
+      </section>
 
-        <AgentModelPicker
-          agents={availableTargets}
-          selectedAgentId={targetAgentId}
-          selectedModel={targetModel}
-          onAgentChange={(id) => setTargetAgentId(id)}
-          onModelChange={(model) => setTargetModel(model)}
+      <section className="dlg-section">
+        <span className="dlg-label" id={`${uid}-ctx`}>
+          Context to hand over
+        </span>
+        <div className="dlg-choice-grid cols-3" role="radiogroup" aria-labelledby={`${uid}-ctx`} onKeyDown={onRadioGroupKeyDown}>
+          {CONTEXT_OPTIONS.map((opt) => (
+            <ChoiceCard
+              key={opt.value}
+              selected={contextMode === opt.value}
+              onSelect={() => setContextMode(opt.value)}
+              disabled={loading}
+              title={opt.title}
+              badge={opt.recommended ? <Badge tone="accent">Recommended</Badge> : undefined}
+              description={opt.description}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section className="dlg-section">
+        <Switch
+          checked={sendInitialPrompt}
+          onChange={setSendInitialPrompt}
           disabled={loading}
+          label="Send a continuation prompt"
+          description={`${targetName} starts working as soon as it takes over.`}
         />
+        {sendInitialPrompt && (
+          <Textarea
+            aria-label="Continuation prompt"
+            value={customPrompt}
+            onChange={(e) => setCustomPrompt(e.target.value)}
+            rows={3}
+            disabled={loading}
+            className="sw-prompt"
+          />
+        )}
+      </section>
 
-        <div style={{ margin: '8px 0', padding: '10px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
-          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
-            Switch Mode
+      <section className="sw-summary" aria-label="What carries over">
+        <div className="dlg-eyebrow">What carries over</div>
+        <dl className="sw-summary-list">
+          <div className="sw-summary-row">
+            <dt>
+              <Icon name="folder" size={13} />
+              Project
+            </dt>
+            <dd className="mono" title={currentSession.cwd}>
+              {currentSession.cwd}
+            </dd>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)' }}>
-              <input
-                type="radio"
-                name="switchMode"
-                checked={inPlace}
-                onChange={() => setInPlace(true)}
-                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-              />
-              <span>
-                <strong>Switch in-place (Same session)</strong> — Recommended, continues current thread seamlessly
-              </span>
-            </label>
-
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
-              <input
-                type="radio"
-                name="switchMode"
-                checked={!inPlace}
-                onChange={() => setInPlace(false)}
-                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-              />
-              <span>
-                Fork to a new separate session
-              </span>
-            </label>
+          <div className="sw-summary-row">
+            <dt>
+              <Icon name="branch" size={13} />
+              Branch
+            </dt>
+            <dd>
+              {git?.branch ? (
+                <>
+                  <span className="mono">{git.branch}</span>
+                  <span className="sw-summary-meta">
+                    {git.uncommittedFiles
+                      ? `${git.uncommittedFiles} uncommitted ${git.uncommittedFiles === 1 ? 'file' : 'files'}`
+                      : 'clean'}
+                  </span>
+                </>
+              ) : (
+                <span className="sw-summary-muted">Not a git repository</span>
+              )}
+            </dd>
           </div>
-
-          {!inPlace && (
-            <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border-subtle)' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px', color: 'var(--text-dim)' }}>
-                <input
-                  type="checkbox"
-                  checked={archivePrevious}
-                  onChange={(e) => setArchivePrevious(e.target.checked)}
-                  style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-                />
-                <span>Archive previous session from active queue</span>
-              </label>
-            </div>
-          )}
-
-          <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)', fontWeight: 600 }}>
-              <input
-                type="checkbox"
-                checked={sendInitialPrompt}
-                onChange={(e) => setSendInitialPrompt(e.target.checked)}
-                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-              />
-              <span>⚡ Immediately send continuation prompt to new agent</span>
-            </label>
-            {sendInitialPrompt && (
-              <div style={{ marginTop: '6px' }}>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                  Prompt sent immediately to new agent to continue where previous agent left off:
-                </div>
-                <textarea
-                  value={customPrompt}
-                  onChange={(e) => setCustomPrompt(e.target.value)}
-                  rows={3}
-                  style={{
-                    width: '100%',
-                    background: '#0e1015',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: '6px',
-                    color: 'var(--text-main)',
-                    fontSize: '12px',
-                    padding: '8px',
-                    resize: 'vertical',
-                    fontFamily: 'inherit',
-                    boxSizing: 'border-box',
-                  }}
-                />
-              </div>
-            )}
+          <div className="sw-summary-row">
+            <dt>
+              <Icon name="star" size={13} />
+              Goal
+            </dt>
+            <dd className="sw-summary-goal">{goal ? goal : <span className="sw-summary-muted">No goal recorded yet</span>}</dd>
           </div>
-        </div>
-
-        <div style={{ margin: '8px 0', padding: '10px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
-          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
-            Conversation Context Handover
+          <div className="sw-summary-row">
+            <dt>
+              <Icon name="layers" size={13} />
+              History
+            </dt>
+            <dd>{CONTEXT_LABEL[contextMode]}</dd>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-main)' }}>
-              <input
-                type="radio"
-                name="modalContextMode"
-                checked={contextMode === 'compact'}
-                onChange={() => setContextMode('compact')}
-                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-              />
-              <span>
-                <strong>📦 Compact History (Recommended)</strong> — Summarizes prior turns, decisions, & file edits to optimize token context
-              </span>
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
-              <input
-                type="radio"
-                name="modalContextMode"
-                checked={contextMode === 'full'}
-                onChange={() => setContextMode('full')}
-                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-              />
-              <span>
-                <strong>📜 Full Recent Turns</strong> — Transfers verbatim recent user and agent messages
-              </span>
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted)' }}>
-              <input
-                type="radio"
-                name="modalContextMode"
-                checked={contextMode === 'none'}
-                onChange={() => setContextMode('none')}
-                style={{ cursor: 'pointer', accentColor: '#3b82f6' }}
-              />
-              <span>
-                <strong>🚫 Clean Slate</strong> — No prior conversation transferred; agent only inspects repo files & git state
-              </span>
-            </label>
-          </div>
-        </div>
-
-        <div style={{ background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px', fontSize: '12px', border: '1px solid var(--border-subtle)' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', color: 'var(--text-main)' }}>Context Transferred:</div>
-          <div style={{ color: 'var(--text-muted)' }}>• Repository: <code>{currentSession.cwd}</code></div>
-          {currentSession.git?.branch ? (
-            <div style={{ color: 'var(--text-muted)' }}>• Git branch: <code>{currentSession.git.branch}</code> ({currentSession.git.uncommittedFiles || 0} uncommitted files)</div>
-          ) : (
-            <div style={{ color: 'var(--text-muted)' }}>• Git: not a git repository</div>
-          )}
-          <div style={{ color: 'var(--text-muted)' }}>• Active goal: "{currentSession.lastPrompt || currentSession.recap}"</div>
-          <div style={{ color: 'var(--text-muted)' }}>• History mode: <strong>{contextMode === 'compact' ? 'Compact summary of prior turns' : contextMode === 'full' ? 'Full recent turns' : 'Clean slate (None)'}</strong></div>
-        </div>
-      </div>
-
-      <div className="modal-footer">
-        <button type="button" className="btn-action" onClick={onClose}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="btn-new btn-failover"
-          disabled={loading}
-          onClick={handleSwitch}
-          style={{ padding: '8px 18px' }}
-        >
-          {loading ? 'Switching Agent...' : inPlace ? 'Switch Engine (In-Place)' : 'Fork & Launch Session'}
-        </button>
-      </div>
+        </dl>
+      </section>
     </Modal>
   );
 };

@@ -1,4 +1,0 @@
-/* The card takes focus itself only when it holds nothing focusable; no ring for that. */
-.modal-card:focus {
-  outline: none;
-}
