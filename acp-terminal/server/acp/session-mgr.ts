@@ -441,7 +441,9 @@ export class SessionManager extends EventEmitter {
       const startsNewMessage = Boolean(turn.content) && !continuesLastText(turn, meta.messageId);
       turn.content = (turn.content || '') + (startsNewMessage && !turn.content!.endsWith('\n') ? '\n\n' : '') + text;
       appendTextSegment(turn, 'text', text, meta.messageId);
-      s.recap = turn.content.slice(0, 160).replace(/\n/g, ' ') + (turn.content.length > 160 ? '...' : '');
+      // The recap previews the agent's latest message, not the start of the turn.
+      const latest = (turn.segments!.filter((seg) => seg.kind === 'text').pop() as { text: string } | undefined)?.text || turn.content;
+      s.recap = latest.trim().replace(/\s+/g, ' ').slice(0, 160) + (latest.length > 160 ? '…' : '');
       this.emit('sessionStream', { sessionId: s.id, type: 'message', text, turn });
     });
 

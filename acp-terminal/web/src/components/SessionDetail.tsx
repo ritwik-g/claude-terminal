@@ -5,11 +5,33 @@ import { useEscapeLayer } from '../hooks';
 import { LiveTerminalPanel } from './LiveTerminalPanel';
 import { AgentTurnBody } from './AgentTurn';
 import { ActivityStrip } from './ActivityStrip';
+import { Icon, Spinner } from './Icons';
+import { Menu } from './Menu';
 import { commandOf, isShellCall } from '../toolDisplay';
 import { MarkdownContent } from './MarkdownContent';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
 import { getSlashCommandsForAgent, filterSlashCommands } from '../slashCommands';
+
+const TURN_WINDOW = 120;
+
+export const STATE_LABEL: Record<string, string> = {
+  blocked: 'Needs approval',
+  needs_you: 'Your turn',
+  working: 'Working',
+  parked: 'Parked',
+  quiet: 'Idle',
+  snoozed: 'Snoozed',
+  crashed: 'Crashed',
+};
+
+export function formatTime(ts: number): string {
+  const d = new Date(ts);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 export function nextPriority(current: 'p0' | 'p1' | 'p2' | null | undefined): 'p0' | 'p1' | 'p2' | null {
   const cycle: Record<string, 'p0' | 'p1' | 'p2' | null> = { null: 'p0', p0: 'p1', p1: 'p2', p2: null };
@@ -57,6 +79,10 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   useEscapeLayer(showMobileActions, () => setShowMobileActions(false));
   useEscapeLayer(showModelPicker, () => setShowModelPicker(false));
   const chatEndRef = useRef<HTMLDivElement>(null);
+  // Very long sessions render only the newest turns until asked for more.
+  const [showAllTurns, setShowAllTurns] = useState(false);
+  const hiddenTurnCount = showAllTurns ? 0 : Math.max(0, session.turns.length - TURN_WINDOW);
+  useEffect(() => setShowAllTurns(false), [session.id]);
   const shellCommandCount = session.turns.reduce(
     (n, t) => n + (t.toolCalls || []).filter((c) => isShellCall(c) && Boolean(commandOf(c))).length,
     0
@@ -687,7 +713,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
     // Prioritize native prompt suggestion from agent (e.g. Claude Code)
     if (session.promptSuggestion) {
       chips.push({
-        label: `✨ ${session.promptSuggestion.length > 36 ? session.promptSuggestion.slice(0, 36) + '…' : session.promptSuggestion}`,
+        label: `${session.promptSuggestion.length > 36 ? session.promptSuggestion.slice(0, 36) + '…' : session.promptSuggestion}`,
         prompt: session.promptSuggestion,
         tooltip: `Agent suggested prompt: "${session.promptSuggestion}" (click to insert or press Tab)`,
       });
@@ -699,12 +725,12 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
     // Word boundaries matter: a bare includes('pr') matched "approval", "prompt", "improve"...
     if (session.git?.branch && /\b(pr|pull request)\b/.test(textLower)) {
       chips.push({
-        label: '🚀 Proceed with PR',
+        label: 'Proceed with the PR',
         prompt: 'Please proceed with creating the pull request.',
         tooltip: 'Instruct agent to proceed with opening the PR',
       });
       chips.push({
-        label: '🔍 Review git diff',
+        label: 'Show the diff',
         prompt: 'Can you show me the git diff?',
         tooltip: 'Inspect git changes before proceeding',
       });
@@ -712,7 +738,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
 
     if (/\b(tests?|validate|verify)\b/.test(textLower)) {
       chips.push({
-        label: '🧪 Run tests',
+        label: 'Run the tests',
         prompt: 'Please run the test suite and verify everything passes.',
         tooltip: 'Run the test suite to validate changes',
       });
@@ -720,19 +746,19 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
 
     if (chips.length === 0) {
       chips.push({
-        label: '👍 Proceed',
+        label: 'Continue',
         prompt: 'Looks good, please proceed with the next steps.',
         tooltip: 'Instruct agent to continue',
       });
       chips.push({
-        label: '🔍 Show status',
+        label: 'What is the status?',
         prompt: 'What is the current status and what needs to be done next?',
         tooltip: 'Ask for detailed status update',
       });
     }
 
     chips.push({
-      label: '↩️ Undo',
+      label: 'Undo last turn',
       prompt: '/undo',
       tooltip: 'Undo the last turn',
     });
@@ -963,66 +989,52 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             </button>
           )}
 
-          {/* Top Header Agent Badge */}
           <div className="header-agent-badge" title={`${session.agentName} · ${currentModelMeta.label || session.model}`}>
             <VendorIcon agentId={session.agentId} size={18} />
           </div>
-          <input
-            className="header-title-input"
-            value={editableTitle}
-            onChange={(e) => setEditableTitle(e.target.value)}
-            onBlur={handleRename}
-            onKeyDown={handleTitleKeyDown}
-          />
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            {session.git?.branch ? (
-              <span className="branch-tag" title={session.cwd}>
-                🌿 {session.git.branch}
+          <div className="header-title-block">
+            <input
+              className="header-title-input"
+              value={editableTitle}
+              onChange={(e) => setEditableTitle(e.target.value)}
+              onBlur={handleRename}
+              onKeyDown={handleTitleKeyDown}
+              aria-label="Session title"
+            />
+            <div className="header-subline">
+              <span className="header-chip" title={session.cwd}>
+                <Icon name="folder" size={12} />
+                {session.cwd.split('/').filter(Boolean).pop() || session.cwd}
               </span>
-            ) : (
-              <span className="branch-tag" title={session.cwd}>
-                📁 {session.cwd.split('/').filter(Boolean).pop() || session.cwd}
-              </span>
-            )}
-            <div style={{ position: 'relative' }}>
-              <span
-                className={`state-badge ${session.isAgentRunning === false ? 'parked' : session.state}`}
-                style={{
-                  cursor: 'pointer',
-                  borderColor: session.isAgentRunning === false ? 'rgba(239, 68, 68, 0.45)' : undefined,
-                  color: session.isAgentRunning === false ? '#f87171' : undefined,
-                  backgroundColor: session.isAgentRunning === false ? 'rgba(239, 68, 68, 0.12)' : undefined,
-                }}
-                onClick={() => setShowReasons(!showReasons)}
-                title={session.isAgentRunning === false ? 'Agent subprocess is stopped. Click to view reasons.' : 'Click to view attention reasons'}
-              >
-                {session.isAgentRunning === false ? '⏹ STOPPED' : session.state.replace('_', ' ').toUpperCase()} ({session.score}) ▾
-              </span>
-              {showReasons && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: '24px',
-                    left: 0,
-                    zIndex: 100,
-                    background: '#1f2028',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: '8px',
-                    padding: '10px 14px',
-                    width: '280px',
-                    boxShadow: '0 10px 15px -3px rgba(0,0,0,0.5)',
-                  }}
-                >
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>
-                    ATTENTION SCORE BREAKDOWN ({session.score})
-                  </div>
-                  {session.reasons.map((r, i) => (
-                    <div key={i} style={{ fontSize: '11px', color: 'var(--text-main)', marginBottom: '3px' }}>
-                      • {r}
-                    </div>
-                  ))}
-                </div>
+              {session.git?.branch && (
+                <span className="header-chip" title={`Branch ${session.git.branch}`}>
+                  <Icon name="branch" size={12} />
+                  {session.git.branch}
+                  {session.git.uncommittedFiles > 0 && (
+                    <span className="header-chip-dirty">· {session.git.uncommittedFiles} changed</span>
+                  )}
+                </span>
               )}
+              <div style={{ position: 'relative' }}>
+                <button
+                  type="button"
+                  className={`state-pill state-${session.isAgentRunning === false ? 'stopped' : session.state}`}
+                  onClick={() => setShowReasons(!showReasons)}
+                  title={`Attention score ${session.score}. Click for the breakdown.`}
+                  aria-expanded={showReasons}
+                >
+                  <span className="state-dot" />
+                  {session.isAgentRunning === false ? 'Agent stopped' : STATE_LABEL[session.state] || session.state}
+                </button>
+                {showReasons && (
+                  <div className="reasons-popover">
+                    <div className="reasons-popover-title">Why it ranks here · score {session.score}</div>
+                    {session.reasons.map((r, i) => (
+                      <div key={i} className="reasons-popover-item">{r}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1030,118 +1042,86 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         {/* Desktop Header Actions */}
         <div className="header-actions">
           <button
-            className="btn-action"
+            type="button"
+            className={`hbtn toggle ${session.user.autoApprove ? 'on' : ''}`}
             onClick={handleToggleAutoApprove}
-            title="Automatically approve all permission requests (file access, commands) without prompting"
-            style={{
-              color: session.user.autoApprove ? '#34d399' : 'inherit',
-              borderColor: session.user.autoApprove ? '#059669' : undefined,
-              backgroundColor: session.user.autoApprove ? 'rgba(16, 185, 129, 0.15)' : undefined,
-            }}
+            aria-pressed={Boolean(session.user.autoApprove)}
+            title="Approve every permission request (file edits, commands) without asking"
           >
-            ⚡ {session.user.autoApprove ? 'Auto: ON' : 'Auto: OFF'}
+            <Icon name="zap" size={14} />
+            Auto-approve
           </button>
-          <button
-            className="btn-action btn-failover"
-            onClick={onOpenSwitchModal}
-            title="Failover or switch to another agent (e.g. Codex/Claude)"
-          >
-            🔄 Switch
-          </button>
-          <button
-            className="btn-action btn-undo"
-            onClick={() => handleRollback(undefined, 'undo_last')}
-            disabled={session.turns.length === 0 || rollingBack}
-            title="Undo the last message or response in this conversation"
-          >
-            ↩ Undo
-          </button>
-          <button
-            className="btn-action"
-            onClick={handleCompactSession}
-            disabled={session.turns.length <= 1 || compacting}
-            title="Compact earlier verbose turns and tool logs into a clean checkpoint to optimize context"
-            style={{
-              color: compacting ? '#fbbf24' : 'inherit',
-            }}
-          >
-            {compacting ? '⏳ Compacting...' : '📦 Compact'}
-          </button>
-          <button
-            className="btn-action"
-            onClick={handleTogglePriority}
-            title={`Toggle priority (P0/P1/P2) - Current: ${session.user.priority ? session.user.priority.toUpperCase() : 'None'}`}
-            aria-label={`Priority: ${session.user.priority ? session.user.priority.toUpperCase() : 'none'}`}
-          >
-            ⭐{session.user.priority ? ` ${session.user.priority.toUpperCase()}` : ''}
-          </button>
-          <button
-            className="btn-action"
-            onClick={handleTogglePin}
-            title={session.user.pinned ? 'Pinned to top (Click to unpin)' : 'Pin session to top'}
-            aria-label={session.user.pinned ? 'Unpin session' : 'Pin session'}
-            style={{ color: session.user.pinned ? '#38bdf8' : 'inherit' }}
-          >
-            📌
-          </button>
-          <button
-            className="btn-action"
-            onClick={handleToggleCleanup}
-            title={session.user.cleanup ? 'Marked cleaned up (Click to unmark)' : 'Mark session cleaned up'}
-            aria-label={session.user.cleanup ? 'Unmark cleanup' : 'Mark for cleanup'}
-            style={{ color: session.user.cleanup ? '#10b981' : 'inherit' }}
-          >
-            ✓
-          </button>
-          <button
-            className="btn-action"
-            onClick={handleToggleSnooze}
-            title={
-              isSnoozed
-                ? `Snoozed until ${new Date(session.user.snoozedUntil!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (click to wake)`
-                : 'Snooze for 1 hour: move to the bottom of the list'
-            }
-            aria-label={isSnoozed ? 'Wake session' : 'Snooze session for 1 hour'}
-            style={{ color: isSnoozed ? '#a78bfa' : 'inherit' }}
-          >
-            💤
+          <button type="button" className="hbtn" onClick={onOpenSwitchModal} title="Switch or fail over to another agent or model">
+            <Icon name="swap" size={14} />
+            Switch
           </button>
           {session.isAgentRunning !== false ? (
             <button
-              className="btn-action btn-stop-agent"
+              type="button"
+              className="hbtn"
               onClick={handleStopAgent}
-              title="Stop and terminate the underlying agent subprocess & terminal to free memory and CPU. Session history is kept and auto-resumes on next message."
-              style={{
-                color: '#f87171',
-                borderColor: 'rgba(239, 68, 68, 0.35)',
-                backgroundColor: 'rgba(239, 68, 68, 0.08)',
-              }}
+              title="Stop the agent process to free memory. History is kept; it restarts on your next message."
             >
-              ⏹ Stop Agent
+              <Icon name="stop" size={13} />
+              Stop agent
             </button>
           ) : (
-            <button
-              className="btn-action btn-start-agent"
-              onClick={handleStartAgent}
-              title="Start / Resume the agent subprocess"
-              style={{
-                color: '#34d399',
-                borderColor: 'rgba(52, 211, 153, 0.35)',
-                backgroundColor: 'rgba(52, 211, 153, 0.08)',
-              }}
-            >
-              ▶ Resume Agent
+            <button type="button" className="hbtn" onClick={handleStartAgent} title="Start the agent process again">
+              <Icon name="play" size={13} />
+              Resume
             </button>
           )}
+          <span className="hbtn-sep" />
           <button
-            className="btn-action"
-            onClick={handleDelete}
-            title="Delete session"
-            aria-label="Delete session"
-            style={{ color: '#ef4444' }}
+            type="button"
+            className={`hbtn icon ${session.user.priority ? 'on' : ''}`}
+            onClick={handleTogglePriority}
+            title={`Priority: ${session.user.priority ? session.user.priority.toUpperCase() : 'none'} (click or press p to cycle)`}
+            aria-label={`Priority: ${session.user.priority ? session.user.priority.toUpperCase() : 'none'}`}
           >
-            🗑
+            <Icon name="star" size={15} />
+            {session.user.priority && <span className="hbtn-badge">{session.user.priority.toUpperCase()}</span>}
           </button>
+          <button
+            type="button"
+            className={`hbtn icon ${session.user.pinned ? 'on' : ''}`}
+            onClick={handleTogglePin}
+            aria-pressed={Boolean(session.user.pinned)}
+            title={session.user.pinned ? 'Unpin session' : 'Pin session to the top'}
+            aria-label={session.user.pinned ? 'Unpin session' : 'Pin session'}
+          >
+            <Icon name="pin" size={15} />
+          </button>
+          <Menu
+            label="More actions"
+            items={[
+              {
+                label: 'Undo last turn',
+                icon: 'undo',
+                onSelect: () => handleRollback(undefined, 'undo_last'),
+                disabled: session.turns.length === 0 || rollingBack,
+              },
+              {
+                label: compacting ? 'Compacting…' : 'Compact context',
+                icon: 'archive',
+                onSelect: handleCompactSession,
+                disabled: session.turns.length <= 1 || compacting,
+              },
+              {
+                label: isSnoozed ? 'Wake session' : 'Snooze for 1 hour',
+                icon: 'moon',
+                onSelect: handleToggleSnooze,
+              },
+              {
+                label: session.user.cleanup ? 'Unmark cleanup' : 'Mark for cleanup',
+                icon: 'check',
+                onSelect: handleToggleCleanup,
+                hint: 'c',
+              },
+              'divider',
+              { label: 'Delete session', icon: 'trash', onSelect: handleDelete, danger: true },
+            ]}
+          />
         </div>
 
         {/* Mobile Header Quick Actions */}
@@ -1153,7 +1133,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             title={session.user.autoApprove ? 'Auto-Approve: ON' : 'Auto-Approve: OFF'}
             aria-label={session.user.autoApprove ? 'Auto-approve on' : 'Auto-approve off'}
           >
-            ⚡
+            <Icon name="zap" size={15} />
           </button>
           <button
             type="button"
@@ -1162,7 +1142,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             title="More actions"
             aria-label="More actions"
           >
-            ⋯
+            <Icon name="more" size={16} />
           </button>
         </div>
       </div>
@@ -1181,44 +1161,46 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         </div>
         <div className="mobile-sub-tags">
           {session.git?.branch && (
-            <span className="branch-tag" title={session.cwd}>
-              🌿 {session.git.branch}
+            <span className="header-chip" title={session.cwd}>
+              <Icon name="branch" size={12} /> {session.git.branch}
             </span>
           )}
-          <span
-            className={`state-badge ${session.state}`}
-            onClick={() => setShowReasons(!showReasons)}
-          >
-            {session.state.replace('_', ' ').toUpperCase()} ({session.score})
+          <span className={`state-pill state-${session.isAgentRunning === false ? 'stopped' : session.state}`}>
+            <span className="state-dot" />
+            {session.isAgentRunning === false ? 'Agent stopped' : STATE_LABEL[session.state] || session.state}
           </span>
         </div>
       </div>
 
       {/* Prominent Attention Banner when Blocked on Approval */}
       {session.pendingPermission && (
-        <div className="approval-banner">
+        <div className="approval-banner" role="alert">
           <div className="approval-info">
-            <span className="approval-icon">⚠️</span>
-            <div>
+            <span className="approval-icon">
+              <Icon name="alert" size={18} />
+            </span>
+            <div style={{ minWidth: 0 }}>
+              <div className="approval-kicker">Approval needed</div>
               <div className="approval-title">{session.pendingPermission.title}</div>
-              <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                The agent is blocked waiting for your confirmation before executing this sensitive operation.
-              </div>
             </div>
           </div>
           <div className="approval-buttons">
-            {session.pendingPermission.options.map((opt) => (
-              <button
-                key={opt.optionId}
-                className={opt.optionId.includes('deny') || opt.optionId.includes('reject') ? 'btn-reject' : 'btn-approve'}
-                onClick={() => handleResolvePermission(opt.optionId)}
-              >
-                {opt.name}
-              </button>
-            ))}
+            {session.pendingPermission.options.map((opt) => {
+              const isReject = /reject|deny/i.test(`${opt.kind || ''} ${opt.optionId}`);
+              return (
+                <button
+                  key={opt.optionId}
+                  type="button"
+                  className={isReject ? 'btn-reject' : 'btn-approve'}
+                  onClick={() => handleResolvePermission(opt.optionId)}
+                >
+                  {opt.name}
+                </button>
+              );
+            })}
             <button
-              className="btn-approve"
-              style={{ backgroundColor: '#059669', borderColor: '#10b981' }}
+              type="button"
+              className="btn-reject"
               onClick={async () => {
                 await api.updateAnnotations(session.id, { autoApprove: true });
                 const allowOpt = session.pendingPermission?.options.find(
@@ -1228,7 +1210,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
               }}
               title="Approve this request and enable Auto-Approve for all future requests in this session"
             >
-              ⚡ Always Allow (Enable Auto-Approve)
+              Auto-approve this session
             </button>
           </div>
         </div>
@@ -1254,7 +1236,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className={`view-tab ${activeTab === 'usage' ? 'active' : ''}`}
             onClick={() => setActiveTab('usage')}
           >
-            📊 Usage & Context {contextTokens > 0 ? `(${contextTokens > 1000 ? `${(contextTokens / 1000).toFixed(1)}k` : contextTokens})` : ''}
+            Usage
           </button>
         </div>
 
@@ -1265,7 +1247,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             onClick={() => setActiveTab('usage')}
             title={`Context Window: ${contextTokens.toLocaleString()} / ${pricing.contextWindow.toLocaleString()} tokens (${percentContext}%). Click to inspect token breakdown.`}
           >
-            <span className="usage-pill-icon">📊</span>
+            <Icon name="gauge" size={13} />
             <span className="usage-pill-text">
               {contextTokens > 1000 ? `${(contextTokens / 1000).toFixed(1)}k` : contextTokens} / {pricing.contextWindow >= 1000000 ? `${pricing.contextWindow / 1000000}M` : `${pricing.contextWindow / 1000}k`}
             </span>
@@ -1298,7 +1280,13 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             </div>
           )}
 
+          {hiddenTurnCount > 0 && (
+            <button type="button" className="btn-secondary show-earlier" onClick={() => setShowAllTurns(true)}>
+              Show {hiddenTurnCount} earlier message{hiddenTurnCount === 1 ? '' : 's'}
+            </button>
+          )}
           {session.turns.map((turn, index) => {
+            if (index < hiddenTurnCount) return null;
             if (turn.role === 'system') {
               return (
                 <div key={turn.id} className="system-turn-bubble">
@@ -1321,23 +1309,24 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                 {turn.role === 'user' ? (
                   <div>
                     <div className="turn-top-bar">
-                      <span className="turn-role-tag">User</span>
+                      <span className="turn-role-tag">You</span>
+                      <span className="turn-time">{formatTime(turn.timestamp)}</span>
                       <div className="turn-hover-actions">
                         <button
                           type="button"
                           className="turn-action-btn"
                           onClick={() => handleRollback(turn.id, 'revert_before_this')}
-                          title="Rewind here and edit this prompt in composer"
+                          title="Remove this message and everything after it, and put it back in the composer to edit"
                         >
-                          ✏️ Edit & Resend
+                          <Icon name="edit" size={12} /> Edit
                         </button>
                         <button
                           type="button"
                           className="turn-action-btn"
                           onClick={() => handleRollback(turn.id, 'revert_to_this')}
-                          title="Rewind conversation so this is the last message"
+                          title="Rewind the conversation so this is the last message"
                         >
-                          ↩ Rewind here
+                          <Icon name="undo" size={12} /> Rewind here
                         </button>
                       </div>
                     </div>
@@ -1390,9 +1379,14 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                     const turnModel = turn.model || session.model;
                     const turnModelMeta = turnModel ? getModelMeta(turnModel) : null;
 
+                    // Back-to-back agent turns (e.g. a follow-up after an approval or a
+                    // background task finishing) read as one reply: skip the repeated header.
+                    const prev = session.turns[index - 1];
+                    const continuesReply = prev?.role === 'agent' && (prev.agentId || session.agentId) === turnAgentId;
+
                     return (
                       <div>
-                        <div className="agent-turn-header">
+                        <div className={`agent-turn-header ${continuesReply ? 'continuation' : ''}`}>
                           <div className="agent-turn-meta">
                             <VendorIcon agentId={turnAgentId} size={15} />
                             <span className="agent-turn-name">{turnAgentName}</span>
@@ -1404,23 +1398,24 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
                                 {turnModelMeta?.label || turnModel}
                               </span>
                             )}
+                            <span className="turn-time">{formatTime(turn.timestamp)}</span>
                           </div>
                       <div className="turn-hover-actions">
                         <button
                           type="button"
                           className="turn-action-btn"
                           onClick={() => handleRollback(turn.id, 'revert_to_this')}
-                          title="Rewind conversation so this response is the last turn"
+                          title="Rewind the conversation so this response is the last turn"
                         >
-                          ↩ Rewind here
+                          <Icon name="undo" size={12} /> Rewind here
                         </button>
                         <button
                           type="button"
                           className="turn-action-btn btn-delete-turn"
                           onClick={() => handleRollback(turn.id, 'revert_before_this')}
-                          title="Delete this agent turn and any subsequent messages"
+                          title="Delete this response and everything after it"
                         >
-                          🗑 Delete
+                          <Icon name="trash" size={12} /> Delete
                         </button>
                       </div>
                     </div>
@@ -1444,78 +1439,55 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
           {session.turns.length > 0 && (
             <div className="conversation-status-area">
               {session.state === 'working' && !session.pendingPermission ? (
-                <div className="turn-status-banner working">
-                  <div className="status-banner-left">
-                    <span className="pulse-indicator" />
-                    <span className="status-banner-text">
-                      {lastAgentText && !hasActiveToolCalls
-                        ? 'Agent response received · Finishing turn...'
-                        : 'Agent is working on your request...'}
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <div className="turn-status working" role="status">
+                  <Spinner size={12} />
+                  <span>{lastAgentText && !hasActiveToolCalls ? 'Wrapping up…' : 'Working…'}</span>
+                  <span className="turn-status-actions">
                     {lastAgentText && !hasActiveToolCalls && (
                       <button
                         type="button"
-                        className="btn-action"
-                        style={{ fontSize: '11px', padding: '3px 8px', color: '#10b981', borderColor: 'rgba(16,185,129,0.4)', background: 'rgba(16,185,129,0.1)' }}
+                        className="link-btn"
                         onClick={handleCancelPrompt}
-                        title="Agent response received. Click to release turn and mark ready immediately"
+                        title="The reply has arrived; end the turn now instead of waiting for the agent to close it"
                       >
-                        ✓ Mark Ready
+                        End turn
                       </button>
                     )}
-                    <button
-                      type="button"
-                      className="btn-banner-cancel"
-                      onClick={handleCancelPrompt}
-                      title="Stop active execution"
-                    >
-                      ⏹ Stop Turn
+                    <button type="button" className="btn-secondary btn-small" onClick={handleCancelPrompt} title="Stop the current turn">
+                      <Icon name="stop" size={11} /> Stop
                     </button>
-                  </div>
+                  </span>
                 </div>
               ) : session.pendingPermission ? (
-                <div className="turn-status-banner blocked">
-                  <div className="status-banner-left">
-                    <span className="status-dot">⚠️</span>
-                    <span className="status-banner-text">
-                      <strong>Waiting for your approval</strong> · {session.pendingPermission.title}
-                    </span>
-                  </div>
+                <div className="turn-status blocked" role="status">
+                  <Icon name="alert" size={14} />
+                  <span>
+                    Waiting for your approval: <strong>{session.pendingPermission.title}</strong>
+                  </span>
                 </div>
               ) : (
-                <div className="turn-status-banner ready">
-                  <div className="status-banner-left">
-                    <span className="status-dot green">🟢</span>
-                    <span className="status-banner-text">
-                      <strong>Ready for your input</strong> · Turn completed
-                    </span>
+                suggestedActions.length > 0 && (
+                  <div className="quick-action-chips" aria-label="Suggested replies">
+                    {suggestedActions.map((action, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        className="quick-action-chip"
+                        onClick={() => {
+                          if (action.prompt === '/undo') {
+                            handleRollback(undefined, 'undo_last');
+                          } else {
+                            setPromptText(action.prompt);
+                            promptInputRef.current?.focus();
+                          }
+                        }}
+                        title={action.tooltip}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
                   </div>
-                  {suggestedActions.length > 0 && (
-                    <div className="quick-action-chips">
-                      <span className="quick-action-label">Quick Action:</span>
-                      {suggestedActions.map((action, i) => (
-                        <button
-                          key={i}
-                          type="button"
-                          className="quick-action-chip"
-                          onClick={() => {
-                            if (action.prompt === '/undo') {
-                              handleRollback(undefined, 'undo_last');
-                            } else {
-                              setPromptText(action.prompt);
-                              promptInputRef.current?.focus();
-                            }
-                          }}
-                          title={action.tooltip}
-                        >
-                          {action.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                )
               )}
             </div>
           )}
@@ -1816,83 +1788,9 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         >
           {isDraggingOver && (
             <div className="composer-drop-overlay">
-              <span>📥 Drop pictures or files here to attach</span>
+              <span>Drop images or files to attach</span>
             </div>
           )}
-
-          <div className="composer-toolbar">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-              <div className="composer-engine-wrapper" ref={composerPickerRef}>
-                <button
-                  type="button"
-                  className="composer-engine-pill"
-                  onClick={() => setShowModelPicker((prev) => !prev)}
-                  title="Click to switch model or effort for upcoming prompts"
-                >
-                  <VendorIcon agentId={session.agentId} size={14} />
-                  <span className="composer-engine-name">{currentModelMeta.label || session.model || session.agentName}</span>
-                  {currentModelMeta.supportsEffort && activeEffort !== 'off' && (
-                    <span className="composer-effort-tag">({activeEffort})</span>
-                  )}
-                  <span className="composer-chevron">{showModelPicker ? '▴' : '▾'}</span>
-                </button>
-                {showModelPicker && (
-                  <>
-                    <div
-                      className="engine-switcher-mobile-backdrop"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowModelPicker(false);
-                      }}
-                    />
-                    {renderEngineSwitcherPopover()}
-                  </>
-                )}
-              </div>
-
-              {/* Attach File/Picture Button */}
-              <button
-                type="button"
-                className="composer-attach-btn"
-                onClick={() => fileInputRef.current?.click()}
-                title="Add pictures or files (or paste / drop here)"
-              >
-                <span>📎</span>
-                <span className="attach-btn-label">Attach</span>
-              </button>
-
-              {/* Slash Commands Button */}
-              <button
-                type="button"
-                className={`composer-attach-btn btn-slash-trigger ${showSlashMenu ? 'active' : ''}`}
-                onClick={() => {
-                  setShowSlashMenu(!showSlashMenu);
-                  if (!showSlashMenu && !promptText.startsWith('/')) {
-                    setPromptText('/');
-                  }
-                  promptInputRef.current?.focus();
-                }}
-                title={`Browse slash commands for ${session.agentName} (or type /)`}
-              >
-                <span className="slash-icon">/</span>
-                <span className="attach-btn-label">Commands</span>
-              </button>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  if (e.target.files) {
-                    processFiles(Array.from(e.target.files));
-                    e.target.value = '';
-                  }
-                }}
-              />
-            </div>
-            <span className="composer-hint">Type / for commands • Enter to send</span>
-          </div>
 
           {/* Pending Attachments Strip */}
           {attachments.length > 0 && (
@@ -2033,44 +1931,111 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
             className="prompt-textarea"
             placeholder={
               session.promptSuggestion
-                ? `Suggestion: ${session.promptSuggestion} (Press Tab to insert)...`
+                ? `${session.promptSuggestion}  (Tab to use)`
                 : attachments.length > 0
-                ? 'Add an instruction or press Enter to send attached files/pictures...'
-                : `Ask ${session.agentName}${session.model ? ` (${session.model})` : ''}...`
+                ? 'Add a message, or press Enter to send the attachments'
+                : session.state === 'working'
+                ? 'Type to redirect the agent (sending stops the current turn)'
+                : `Message ${session.agentName.replace(/ \(ACP\)$/, '')}…  (/ for commands)`
             }
             value={promptText}
             onChange={(e) => setPromptText(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             disabled={sending}
+            aria-label="Message"
           />
-        </div>
-        {session.state === 'working' && !promptText.trim() && attachments.length === 0 ? (
-          <button type="button" className="btn-cancel" onClick={handleCancelPrompt}>
-            ⏹ Stop Turn
-          </button>
-        ) : (
-          <div style={{ display: 'flex', gap: '8px' }}>
-            {session.state === 'working' && (
+          <div className="composer-toolbar">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <div className="composer-engine-wrapper" ref={composerPickerRef}>
+                <button
+                  type="button"
+                  className="composer-engine-pill"
+                  onClick={() => setShowModelPicker((prev) => !prev)}
+                  title="Click to switch model or effort for upcoming prompts"
+                >
+                  <VendorIcon agentId={session.agentId} size={14} />
+                  <span className="composer-engine-name">{currentModelMeta.label || session.model || session.agentName}</span>
+                  {currentModelMeta.supportsEffort && activeEffort !== 'off' && (
+                    <span className="composer-effort-tag">({activeEffort})</span>
+                  )}
+                  <Icon name={showModelPicker ? 'chevronDown' : 'chevronRight'} size={12} className="composer-chevron" />
+                </button>
+                {showModelPicker && (
+                  <>
+                    <div
+                      className="engine-switcher-mobile-backdrop"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowModelPicker(false);
+                      }}
+                    />
+                    {renderEngineSwitcherPopover()}
+                  </>
+                )}
+              </div>
+
+              {/* Attach File/Picture Button */}
               <button
                 type="button"
-                className="btn-cancel"
-                onClick={handleCancelPrompt}
-                title="Stop current generation"
+                className="composer-attach-btn"
+                onClick={() => fileInputRef.current?.click()}
+                title="Add pictures or files (or paste / drop here)"
               >
-                ⏹ Stop
+                <Icon name="paperclip" size={14} />
+                <span className="attach-btn-label">Attach</span>
               </button>
-            )}
-            <button
-              type="submit"
-              className="btn-send"
-              disabled={(!promptText.trim() && attachments.length === 0) || sending}
-              title={session.state === 'working' ? 'Stop current turn and send new prompt' : 'Send prompt'}
-            >
-              {sending ? 'Sending...' : session.state === 'working' ? '⚡ Send & Interrupt' : 'Send'}
-            </button>
+
+              {/* Slash Commands Button */}
+              <button
+                type="button"
+                className={`composer-attach-btn btn-slash-trigger ${showSlashMenu ? 'active' : ''}`}
+                onClick={() => {
+                  setShowSlashMenu(!showSlashMenu);
+                  if (!showSlashMenu && !promptText.startsWith('/')) {
+                    setPromptText('/');
+                  }
+                  promptInputRef.current?.focus();
+                }}
+                title={`Browse slash commands for ${session.agentName} (or type /)`}
+              >
+                <span className="slash-icon">/</span>
+                <span className="attach-btn-label">Commands</span>
+              </button>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  if (e.target.files) {
+                    processFiles(Array.from(e.target.files));
+                    e.target.value = '';
+                  }
+                }}
+              />
+            </div>
+            <div className="composer-right">
+              <span className="composer-hint">Enter to send · Shift+Enter for a new line</span>
+              {session.state === 'working' && (
+                <button type="button" className="btn-secondary btn-small" onClick={handleCancelPrompt} title="Stop the current turn">
+                  <Icon name="stop" size={11} /> Stop
+                </button>
+              )}
+              <button
+                type="submit"
+                className="btn-send-icon"
+                disabled={(!promptText.trim() && attachments.length === 0) || sending}
+                title={session.state === 'working' ? 'Stop the current turn and send this instead' : 'Send (Enter)'}
+                aria-label="Send"
+              >
+                {sending ? <Spinner size={12} /> : <Icon name="send" size={15} />}
+              </button>
+            </div>
           </div>
-        )}
+
+        </div>
       </form>
 
       {/* Mobile Actions Drawer / Sheet */}

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { AgentDescriptor } from '../types';
 import { api, isHostMachine } from '../api';
+import { Icon } from './Icons';
 import { AgentModelPicker } from './AgentModelPicker';
 import { FolderBrowserModal } from './FolderBrowserModal';
 import { Modal } from './Modal';
@@ -98,7 +99,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     <>
       <Modal onClose={onClose} labelledBy="new-session-title">
           <div className="modal-header">
-            <span id="new-session-title">Start New ACP Agent Session</span>
+            <span id="new-session-title">New session</span>
           </div>
 
           <form onSubmit={handleSubmit}>
@@ -150,7 +151,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                       background: 'rgba(255, 255, 255, 0.06)',
                     }}
                   >
-                    <span>📂</span>
+                    <Icon name="folder" size={14} />
                     <span>Browse...</span>
                   </button>
                   {isHostMachine() && (
@@ -170,7 +171,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                       background: 'rgba(255, 255, 255, 0.06)',
                     }}
                   >
-                    <span>🖥️</span>
+                    <Icon name="cpu" size={14} />
                     <span>{isNativeBrowsing ? '...' : 'Finder'}</span>
                   </button>
                   )}

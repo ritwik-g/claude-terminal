@@ -82,15 +82,18 @@ export function subagentStatus(call: ToolCallRecord, children: ToolCallRecord[])
   return 'done';
 }
 
-const STAT_LINE = /^(agentId|agent_id|subagent_tokens|tool_uses|duration_ms):\s*(.*)$/;
+// Trailing bookkeeping lines, possibly wrapped in <usage>…</usage>.
+const STAT_LINE = /^(?:<\/?usage>)?\s*(agentId|agent_id|subagent_tokens|tool_uses|duration_ms):\s*(.*?)\s*(?:<\/usage>)?$/;
 
 /** Usage stats Claude Code appends to a subagent's report (tool uses, duration). */
 export function subagentStats(call: ToolCallRecord): { toolUses?: number; durationMs?: number } {
   const stats: { toolUses?: number; durationMs?: number } = {};
   for (const line of (call.output || '').split('\n')) {
     const m = line.trim().match(STAT_LINE);
-    if (m?.[1] === 'tool_uses') stats.toolUses = Number(m[2]);
-    if (m?.[1] === 'duration_ms') stats.durationMs = Number(m[2]);
+    const n = m ? parseInt(m[2], 10) : NaN;
+    if (Number.isNaN(n)) continue;
+    if (m![1] === 'tool_uses') stats.toolUses = n;
+    if (m![1] === 'duration_ms') stats.durationMs = n;
   }
   return stats;
 }

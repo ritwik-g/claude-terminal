@@ -66,12 +66,20 @@ Status key: **Fixed** (on branch `acp-ux-gaps`), **Open** (not addressed yet).
 | U13 | The detail header showed no folder for non-git sessions | Fixed |
 | U14 | The demo agent was priced at Sonnet rates | Fixed |
 
+## Follow-up round (same day)
+
+| # | Change | Status |
+|---|--------|--------|
+| R1 | Agent turns were one merged blob ("…instead.I'll work…"). Turns are now ordered segments; each message is its own block, with tool calls between them as compact rows | Fixed |
+| R2 | Subagents were invisible. Claude's Agent/Task calls render as subagent cards with their steps, task and report; their calls and replies attach to the spawning call even after the turn ends | Fixed |
+| R3 | Running work was hard to see. A strip above the conversation shows the agent's plan (todo list) with progress plus running or background subagents and commands | Fixed |
+| R4 | The Live Terminal showed an empty shell: Claude Code and Codex run commands in-process. The client now asks for `terminal_output` meta, and the Terminal tab shows every agent command with output and exit code, next to your own shell | Fixed |
+| R5 | LAN access was on by default | Fixed (opt-in via `ACP_LAN=1`) |
+| R6 | Focus could leave dialogs | Fixed (shared `<Modal>` with focus trap) |
+| R7 | Long transcripts re-rendered every turn on every chunk | Fixed (memoized turn bodies; the newest 120 turns render, older ones on demand) |
+| R8 | Visual polish: emoji-heavy chrome, a crowded header, score noise, loud banners | Fixed: SVG icons, a header with an overflow menu, plain state labels, a quieter status row, redesigned sidebar cards and composer |
+
 ## Still open
 
-- Long transcripts render every turn on every streamed chunk; they need memoized rows and windowing past a few hundred turns.
-- There is no shared `<Modal>` with a focus trap; modals get dialog roles, but focus can still tab out.
-- The Live Terminal tab shows raw output without the command that produced it.
-- The server still binds `0.0.0.0` by default (LAN access is a product feature, and token auth plus the Origin/Host checks now protect it). Consider making LAN opt-in.
-- A turn silent for 10 minutes is now cancelled (was relabelled after 60s). Tune `STALE_TURN_MS` if long-silent tools are common.
-
-Also fixed along the way: an approved tool call lost its title ("Tool Execution") because `tool_call_update` defaults overwrote the original fields, and the test scripts hardcoded personal absolute paths.
+- The attention score breakdown is still a raw list of rules; a plain-language explanation would help.
+- Background shell completion isn't reported by the adapter without the AIR async-task stream, so a background command stays marked "background" until the session moves on.

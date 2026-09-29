@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { SessionSummary } from '../types';
 import { VendorIcon } from './VendorLogos';
+import { Icon } from './Icons';
 
 interface SidebarProps {
   sessions: SessionSummary[];
@@ -71,20 +72,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="sidebar">
       <div className="sidebar-header">
         <div className="brand-title">
-          <span style={{ fontSize: '18px' }}>⚡</span>
+          <span className="brand-mark">
+            <Icon name="terminal" size={14} />
+          </span>
           <span>ACP Terminal</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <button
             type="button"
-            className="btn-subscriptions-nav"
+            className="hbtn icon"
             onClick={onOpenSubscriptionsModal}
-            title="Inspect subscriptions, change auth credentials & view cross-vendor usage"
+            title="Subscriptions, credentials and usage across vendors"
+            aria-label="Subscriptions and usage"
           >
-            💳 Subscriptions
+            <Icon name="card" size={15} />
           </button>
-          <button className="btn-new" onClick={onOpenNewModal} title="Start new agent session">
-            <span>+</span> New
+          <button className="btn-new" onClick={onOpenNewModal} title="Start a new agent session (⌘N)">
+            <Icon name="plus" size={14} /> New
           </button>
         </div>
       </div>
@@ -129,7 +133,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {hasActiveSession && onReturnToActiveSession && (
         <div className="mobile-active-session-banner" onClick={onReturnToActiveSession}>
-          <span>💬 Return to: <strong>{activeSessionTitle || 'Active Chat'}</strong></span>
+          <span>Back to <strong>{activeSessionTitle || "the open session"}</strong></span>
           <span className="banner-arrow">→</span>
         </div>
       )}
@@ -251,7 +255,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           onClick={onOpenNetworkModal}
           title="View Local Network (LAN) URL & Token to connect from other devices"
         >
-          <span>📡</span> LAN Access
+          <Icon name="wifi" size={14} /> LAN access
         </button>
         <button
           type="button"
@@ -259,27 +263,53 @@ export const Sidebar: React.FC<SidebarProps> = ({
           onClick={onOpenSearchModal}
           title="Search all sessions (press /)"
         >
-          <span>🔍</span> Search (/)
+          <Icon name="search" size={14} /> Search <kbd className="kbd">/</kbd>
         </button>
       </div>
     </aside>
   );
 };
 
+const STATE_LABEL: Record<string, string> = {
+  blocked: 'Needs approval',
+  needs_you: 'Your turn',
+  working: 'Working',
+  parked: 'Parked',
+  quiet: 'Idle',
+  snoozed: 'Snoozed',
+  crashed: 'Crashed',
+};
+
+/** Card previews are one line of plain text; drop markdown markers. */
+function plainText(md: string | undefined): string {
+  return (md || '')
+    .replace(/```[\w-]*/g, ' ')
+    .replace(/[*_`#>]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function relativeTime(ts: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 45) return 'now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
 const SessionCard: React.FC<{
   session: SessionSummary;
   isSelected: boolean;
   onSelect: () => void;
 }> = ({ session, isSelected, onSelect }) => {
-  const agentClass = session.agentId.toLowerCase().includes('claude')
-    ? 'claude'
-    : session.agentId.toLowerCase().includes('codex')
-    ? 'codex'
-    : (session.agentId.toLowerCase().includes('gemini') || session.agentId.toLowerCase().includes('antigravity'))
-    ? 'gemini'
-    : 'mock';
-
   const folderName = session.cwd.split('/').filter(Boolean).pop() || session.cwd;
+  const model = session.model?.replace(/^claude-/, '').replace(/^gemini-/, '');
+  const detail =
+    session.hasPendingPermission && session.pendingPermissionTitle
+      ? session.pendingPermissionTitle
+      : plainText(session.recap || session.lastPrompt);
 
   return (
     <div
@@ -295,60 +325,31 @@ const SessionCard: React.FC<{
       tabIndex={0}
       aria-current={isSelected ? 'true' : undefined}
       data-session-id={session.id}
+      title={session.reasons?.length ? `Ranking: ${session.reasons.join(' · ')}` : undefined}
     >
-      <div className="session-card-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <VendorIcon agentId={session.agentId} size={15} />
-          <span className={`agent-badge ${agentClass}`}>{session.agentName.split(' ')[0]}</span>
-          {session.model && (
-            <span className="sidebar-model-badge" title={`Model: ${session.model}`}>
-              {session.model.replace(/^claude-/, '').replace(/^gemini-/, '')}
-            </span>
-          )}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          {session.user.pinned && <span title="Pinned">📌</span>}
-          {session.user.priority && (
-            <span
-              style={{
-                fontSize: '10px',
-                fontWeight: 700,
-                color: session.user.priority === 'p0' ? '#ef4444' : '#f59e0b',
-              }}
-            >
-              {session.user.priority.toUpperCase()}
-            </span>
-          )}
-          <span className={`state-badge ${session.state}`}>
-            {session.state === 'blocked' ? '⚠️ APPROVAL' : session.state.replace('_', ' ').toUpperCase()}
-          </span>
-        </div>
+      <div className="card-row">
+        <span className={`state-dot dot-${session.state}`} aria-label={STATE_LABEL[session.state] || session.state} />
+        <span className="session-title">{session.title}</span>
+        {session.user.pinned && <Icon name="pin" size={12} className="card-pin" title="Pinned" />}
+        {session.user.priority && <span className={`prio prio-${session.user.priority}`}>{session.user.priority.toUpperCase()}</span>}
+        <span className="card-time" title={new Date(session.updatedAt).toLocaleString()}>
+          {relativeTime(session.updatedAt)}
+        </span>
       </div>
-
-      <div className="session-title" title={session.title}>
-        {session.title}
-      </div>
-
-      <div className="session-meta">
-        <span title={session.cwd}>{folderName}</span>
-        {session.git?.branch && <span className="branch-tag">{session.git.branch}</span>}
-        {session.git && session.git.uncommittedFiles > 0 && (
-          <span className="git-dirty-tag">+{session.git.uncommittedFiles} dirty</span>
-        )}
-        {session.tokenCount > 0 && (
-          <span style={{ marginLeft: 'auto' }}>
-            {Math.round(session.tokenCount / 1000)}k
+      <div className="card-meta">
+        <VendorIcon agentId={session.agentId} size={12} />
+        <span className="card-meta-item" title={session.cwd}>{folderName}</span>
+        {session.git?.branch && (
+          <span className="card-meta-item">
+            <Icon name="branch" size={11} /> {session.git.branch}
+            {session.git.uncommittedFiles > 0 && <span className="git-dirty-tag"> +{session.git.uncommittedFiles}</span>}
           </span>
         )}
+        {model && <span className="card-meta-item card-model">{model}</span>}
       </div>
-
-      {session.hasPendingPermission && session.pendingPermissionTitle ? (
-        <div className="reasons-hint approval-hint" title={session.pendingPermissionTitle}>
-          Approve: {session.pendingPermissionTitle}
-        </div>
-      ) : session.reasons && session.reasons.length > 0 && (
-        <div className="reasons-hint" title={session.reasons.join(' | ')}>
-          {session.reasons[session.reasons.length - 1]}
+      {detail && (
+        <div className={`card-detail ${session.hasPendingPermission ? 'approval' : ''}`} title={detail}>
+          {session.hasPendingPermission ? `Approve: ${detail}` : detail}
         </div>
       )}
     </div>

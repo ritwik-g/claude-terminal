@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api, isHostMachine } from '../api';
+import { Icon } from './Icons';
 import { Modal } from './Modal';
 
 interface FolderEntry {
@@ -115,7 +116,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       {/* Header */}
       <div className="modal-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '18px' }}>📂</span>
+          <Icon name="folder" size={16} />
           <span id="folder-browser-title" style={{ fontWeight: 700 }}>Select Project Folder</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -128,7 +129,7 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
             title="Open macOS Finder to pick folder"
             style={{ padding: '4px 10px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
           >
-            <span>🖥️</span>
+            <Icon name="cpu" size={14} />
             <span>{nativeBrowsing ? 'Opening...' : 'Finder'}</span>
           </button>
           )}

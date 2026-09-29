@@ -31,7 +31,7 @@ type Block =
  * wrote is its own block, runs of tool calls and reasoning between them are
  * grouped into a compact activity list, and subagents get their own card.
  */
-export const AgentTurnBody: React.FC<AgentTurnBodyProps> = ({ turn, isActiveTurn, isAwaitingApproval }) => {
+const AgentTurnBodyImpl: React.FC<AgentTurnBodyProps> = ({ turn, isActiveTurn, isAwaitingApproval }) => {
   const calls = new Map((turn.toolCalls || []).map((c) => [c.id, c]));
   const childrenOf = (id: string) => (turn.toolCalls || []).filter((c) => c.parentToolUseId === id);
 
@@ -87,6 +87,10 @@ export const AgentTurnBody: React.FC<AgentTurnBodyProps> = ({ turn, isActiveTurn
   );
 };
 
+// Streaming replaces only the turn being updated, so memoizing on props keeps
+// every other turn from re-rendering on each chunk.
+export const AgentTurnBody = React.memo(AgentTurnBodyImpl);
+
 const COLLAPSE_AFTER = 3;
 
 const ActivityGroup: React.FC<{
@@ -132,7 +136,8 @@ function summarize(tools: ToolCallRecord[], thoughts: number): string {
     const key = d.icon === 'terminal' ? 'command' : d.icon === 'file' ? 'file read' : d.icon === 'fileEdit' ? 'edit' : d.icon === 'search' ? 'search' : 'tool call';
     counts.set(key, (counts.get(key) || 0) + 1);
   }
-  const parts = [...counts.entries()].map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`);
+  const plural = (k: string) => (k.endsWith('ch') ? `${k}es` : `${k}s`);
+  const parts = [...counts.entries()].map(([k, n]) => `${n} ${n === 1 ? k : plural(k)}`);
   if (thoughts) parts.push(`${thoughts} reasoning step${thoughts === 1 ? '' : 's'}`);
   const failed = tools.filter((t) => t.status === 'failed' || (t.exitCode != null && t.exitCode !== 0)).length;
   return `${parts.join(', ')}${failed ? ` · ${failed} failed` : ''}`;
