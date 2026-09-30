@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import { hasAgent, listAgents } from './agents/registry.js';
-import { NothingToCompactError, QueuedPromptNotFoundError, sessionManager } from './acp/session-mgr.js';
+import { AgentNotRunningError, NothingToCompactError, QueuedPromptNotFoundError, sessionManager } from './acp/session-mgr.js';
 import { parseAutoCompact } from './compaction.js';
 import { TurnInFlightError } from './acp/client-host.js';
 import { searchSessions } from './search.js';
@@ -270,10 +270,10 @@ apiRouter.post('/sessions/:id/rollback', async (req: Request, res: Response) => 
 // Compact the session's context; returns once it has started, progress streams over the socket
 apiRouter.post('/sessions/:id/compact', async (req: Request, res: Response) => {
   try {
-    const session = await sessionManager.compactSession(sid(req));
+    const session = await sessionManager.compactSession(sid(req), { force: req.body?.force === true });
     res.json({ session });
   } catch (err: any) {
-    const conflict = err instanceof TurnInFlightError || err instanceof NothingToCompactError;
+    const conflict = err instanceof TurnInFlightError || err instanceof NothingToCompactError || err instanceof AgentNotRunningError;
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }
 });

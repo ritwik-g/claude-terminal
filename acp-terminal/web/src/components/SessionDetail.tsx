@@ -102,9 +102,18 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         : undefined;
   const handleCompactSession = async () => {
     if (compacting || !canCompact) return;
+    const stopped = session.isAgentRunning === false;
+    if (
+      stopped &&
+      !confirm(
+        'The agent is stopped. Compacting starts it and resends up to 20 recent turns so it can write the summary, which costs tokens.\n\nCompact anyway?'
+      )
+    ) {
+      return;
+    }
     setRequestingCompaction(true);
     try {
-      await api.compactSession(session.id);
+      await api.compactSession(session.id, { force: stopped });
       onRefresh();
     } catch (err: any) {
       alert(`Could not compact: ${err.message}`);

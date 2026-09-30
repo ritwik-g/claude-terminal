@@ -113,6 +113,12 @@ export class NothingToCompactError extends Error {
   }
 }
 
+export class AgentNotRunningError extends Error {
+  constructor() {
+    super('The agent is stopped. Start it first, or compact anyway to resend recent turns for the summary');
+  }
+}
+
 export class SessionManager extends EventEmitter {
   private activeHosts = new Map<string, AcpClientHost>();
   // Hosts still in start(): concurrent ensureHost() calls share one spawn
@@ -365,6 +371,7 @@ export class SessionManager extends EventEmitter {
       turnCount: s.turns.length,
       model: s.model || getAgent(s.agentId)?.defaultModel,
       isAgentRunning: this.activeHosts.has(s.id),
+      compacting: this.compactionRuns.has(s.id) || s.turns.some((t) => t.compaction?.status === 'running'),
     }));
   }
 
@@ -1354,7 +1361,7 @@ export class SessionManager extends EventEmitter {
    * context the next prompt carries. Earlier turns stay in the transcript: the compaction's
    * system turn marks the boundary. Returns at once; progress streams as 'compaction' events.
    */
-  async compactSession(sessionId: string, opts: { trigger?: 'manual' | 'auto' } = {}): Promise<AcpSession> {
+  async compactSession(sessionId: string, opts: { trigger?: 'manual' | 'auto'; force?: boolean } = {}): Promise<AcpSession> {
     const session = store.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
     if (this.compactionRuns.has(sessionId)) return session;
@@ -1367,6 +1374,8 @@ export class SessionManager extends EventEmitter {
     if (!session.turns.slice(lastBoundary + 1).some((t) => t.role === 'agent')) throw new NothingToCompactError();
 
     const host = this.activeHosts.get(sessionId);
+    // A stopped agent has to be sent up to 20 recent turns to summarise, which costs tokens: only when asked to
+    if (!host && !opts.force) throw new AgentNotRunningError();
     // A pending handoff means the running agent has not been given the conversation yet
     // (e.g. restarted with Start agent), so it has nothing of its own to compact
     const hostHasContext = Boolean(host) && !session.contextHandoffPending;
@@ -1539,6 +1548,8 @@ export class SessionManager extends EventEmitter {
     turn.content = compactionLabel(c);
     store.save(s, { touch: false });
     this.emit('sessionStream', { sessionId, type: 'compaction', turn });
+    // The sidebar shows "Compacting" while one runs
+    if (u.status) this.emit('sessionsUpdated', this.listSessions());
     return added;
   }
 

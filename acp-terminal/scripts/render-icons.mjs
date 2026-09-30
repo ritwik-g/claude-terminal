@@ -6,11 +6,11 @@
  *   build/icon.icns                every macOS size, 16 to 1024 incl. @2x
  *   web/public/apple-touch-icon.png  180 px, full bleed (iOS rounds it itself)
  *
- * 16 and 32 px come from build/icon-small.svg, everything larger from
- * build/icon.svg. web/public/favicon.svg is hand-kept, not generated.
+ * Every size comes from build/icon.svg. web/public/favicon.svg is the same
+ * drawing cropped to the rounded square without its shadow, kept by hand.
  *
  * macOS only (iconutil). Needs rsvg-convert: `brew install librsvg`.
- * Run with `node scripts/render-icons.mjs` after editing either SVG.
+ * Run with `node scripts/render-icons.mjs` after editing the SVG.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,7 +18,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const FULL = 'build/icon.svg';
-const SMALL = 'build/icon-small.svg';
 
 function render(svg, size, out) {
   execFileSync('rsvg-convert', ['-w', String(size), '-h', String(size), svg, '-o', out]);
@@ -32,7 +31,7 @@ try {
     for (const scale of [1, 2]) {
       const px = base * scale;
       const name = scale === 1 ? `icon_${base}x${base}.png` : `icon_${base}x${base}@2x.png`;
-      render(px <= 32 ? SMALL : FULL, px, path.join(iconset, name));
+      render(FULL, px, path.join(iconset, name));
     }
   }
   execFileSync('iconutil', ['-c', 'icns', iconset, '-o', 'build/icon.icns']);

@@ -163,7 +163,16 @@ export function syncAgentTasks(s: AcpSession): boolean {
   const ids = new Set<string>();
   for (const turn of s.turns) for (const call of turn.toolCalls || []) ids.add(call.id);
   const kept = s.agentTasks.filter((t) => !t.toolCallId || ids.has(t.toolCallId));
-  if (kept.length === s.agentTasks.length) return false;
+  // Workflow runs recorded before they were recognised were filed as background tasks
+  let relabelled = false;
+  for (const task of kept) {
+    const call = task.kind === 'background' && task.toolCallId ? findCall(s, task.toolCallId) : undefined;
+    if (call && isWorkflowCall(call)) {
+      refreshFromCall(task, call);
+      relabelled = true;
+    }
+  }
+  if (kept.length === s.agentTasks.length && !relabelled) return false;
   s.agentTasks = kept;
   return true;
 }
@@ -193,11 +202,11 @@ export function completeAsyncSubagent(s: AcpSession, taskId: string, report: str
 function upsertFromCall(s: AcpSession, call: ToolCallRecord): AgentTask | undefined {
   let task = taskForToolCall(s, call.id);
   if (!task) {
-    // Only calls that hand work off get a task: subagents, and commands that went to the background
-    if (!call.isSubagent && !call.background) return undefined;
+    // Only calls that hand work off get a task: subagents, workflows, and commands that went to the background
+    if (!call.isSubagent && !call.background && !isWorkflowCall(call)) return undefined;
     task = {
       id: call.id,
-      kind: call.isSubagent ? 'subagent' : 'background',
+      kind: call.isSubagent ? 'subagent' : isWorkflowCall(call) ? 'workflow' : 'background',
       title: '',
       status: 'running',
       startedAt: call.startedAt || Date.now(),
@@ -211,7 +220,8 @@ function upsertFromCall(s: AcpSession, call: ToolCallRecord): AgentTask | undefi
 }
 
 function refreshFromCall(task: AgentTask, call: ToolCallRecord): void {
-  const input = (call.input && typeof call.input === 'object' ? call.input : {}) as Record<string, any>;
+  const input = callInput(call);
+  if (isWorkflowCall(call) && task.kind === 'background') task.kind = 'workflow';
   const title = [call.description, input.description, call.title].find(
     (v): v is string => typeof v === 'string' && v.trim() !== '' && !PLACEHOLDER_TITLES.has(v.trim())
   );
@@ -220,14 +230,17 @@ function refreshFromCall(task: AgentTask, call: ToolCallRecord): void {
     if (typeof input.prompt === 'string') task.prompt = input.prompt;
     task.agentType = call.subagentType || (typeof input.subagent_type === 'string' ? input.subagent_type : task.agentType);
     if (call.agentUsage) task.usage = { ...task.usage, ...call.agentUsage };
+  } else if (task.kind === 'workflow') {
+    // Its async task's name, when one is reported, beats the script's own name
+    const meta = workflowMeta(input);
+    if (meta.name && (!task.title || task.title === 'Background task' || PLACEHOLDER_TITLES.has(task.title))) task.title = meta.name;
+    if (meta.description && !task.prompt) task.prompt = meta.description;
   } else {
-    // A workflow's title comes from its async task; a shell is known by its description or command
-    if (task.kind !== 'workflow' || !task.title) {
-      const command = typeof input.command === 'string' ? input.command : undefined;
-      const best = call.description || command || title;
-      if (best) task.title = best.trim();
-    }
-    if (typeof input.command === 'string' && !task.prompt) task.prompt = input.command;
+    // A shell is known by its description or command
+    const command = typeof input.command === 'string' ? input.command : undefined;
+    const best = call.description || command || title;
+    if (best) task.title = best.trim();
+    if (command && !task.prompt) task.prompt = command;
   }
   if (!task.title) task.title = task.kind === 'subagent' ? 'Subagent' : task.kind === 'workflow' ? 'Workflow' : 'Background task';
   if (task.status !== 'running') return;
@@ -242,8 +255,8 @@ function callStatus(task: AgentTask, call: ToolCallRecord): AgentTaskStatus {
   if (call.status === 'failed') return 'failed';
   if (call.backgroundState && call.backgroundState !== 'running') return call.backgroundState;
   if (call.status === 'pending' || call.status === 'running') return 'running';
-  // A background shell or async subagent reports its end separately (async task, transcript)
-  if (call.background || task.asyncTaskId) return 'running';
+  // Background work, an async subagent or a workflow run reports its end separately (async task, transcript)
+  if (call.background || task.asyncTaskId || task.kind === 'workflow') return 'running';
   return 'completed';
 }
 
@@ -258,6 +271,31 @@ function addSegment(task: AgentTask, seg: TurnSegment): boolean {
   if (seg.kind === 'tool' && segments.some((x) => x.kind === 'tool' && x.toolCallId === seg.toolCallId)) return false;
   segments.push(seg);
   return true;
+}
+
+function isWorkflowCall(call: ToolCallRecord): boolean {
+  return call.toolName === 'Workflow';
+}
+
+/** A call's input as an object; some adapters send it as a JSON string. */
+function callInput(call: ToolCallRecord): Record<string, any> {
+  let input: unknown = call.input;
+  if (typeof input === 'string') {
+    try {
+      input = JSON.parse(input);
+    } catch {
+      return {};
+    }
+  }
+  return input && typeof input === 'object' ? (input as Record<string, any>) : {};
+}
+
+/** A workflow's name and description: a saved workflow's name, or the `meta` block of an inline script. */
+function workflowMeta(input: Record<string, any>): { name?: string; description?: string } {
+  const script = typeof input.script === 'string' ? input.script : '';
+  const field = (key: string) => script.match(new RegExp(`\\b${key}\\s*:\\s*(['"\`])((?:(?!\\1).)+)\\1`))?.[2];
+  const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : field('name');
+  return { name, description: field('description') };
 }
 
 function findCall(s: AcpSession, id: string): ToolCallRecord | undefined {

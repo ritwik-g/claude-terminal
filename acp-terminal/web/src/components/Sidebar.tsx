@@ -19,7 +19,8 @@ export interface SessionStatus {
 }
 
 /** Label and tone for a session's state, per the table in DESIGN.md. */
-export function sessionStatus(s: Pick<SessionSummary, 'state' | 'isAgentRunning'>): SessionStatus {
+export function sessionStatus(s: Pick<SessionSummary, 'state' | 'isAgentRunning' | 'compacting'>): SessionStatus {
+  if (s.compacting && s.state !== 'blocked') return { label: 'Compacting', tone: 'accent', pulse: true };
   if (s.isAgentRunning === false && s.state !== 'crashed' && s.state !== 'blocked') {
     return { label: 'Agent stopped', tone: 'neutral', pulse: false };
   }

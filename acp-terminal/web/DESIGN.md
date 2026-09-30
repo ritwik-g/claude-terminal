@@ -60,6 +60,7 @@ The tone classes `.tone-neutral|accent|ok|warn|danger|info` set `--tone`,
 | snoozed | Snoozed | info |
 | crashed | Crashed | danger |
 | agent stopped (isAgentRunning === false) | Agent stopped | neutral |
+| compacting (overrides all but blocked) | Compacting | accent (pulsing dot) |
 
 ## Type and density
 
@@ -91,9 +92,9 @@ icon, loading), `IconButton`, `Badge`, `StatusDot`, `Card`, `Field` + `Input` +
 - The name is **CodePit**, one word. Tagline: "A pit wall for your coding agents".
 - Motor racing is flavour only: the icon, a tooltip, an empty state. State labels
   and buttons stay plain ("Your turn", not "Box, box").
-- The icon is a pit board showing `>_`. Sources are `build/icon.svg` and
-  `build/icon-small.svg` (16 and 32 px); `node scripts/render-icons.mjs`
-  regenerates the PNG and `.icns`. The favicon and sidebar logo use
+- The icon is an orange rounded square with a dark visor showing `>_` (shell
+  #fd7933 to #d63911, visor #13161c, prompt #7eceff). The source is
+  `build/icon.svg`; `node scripts/render-icons.mjs` regenerates the PNG and `.icns`. The favicon and sidebar logo use
   `web/public/favicon.svg` via `components/BrandMark.tsx`.
 
 ## Seeing your work

@@ -18,18 +18,42 @@ import type {
   VendorSubscriptionInfo,
 } from './types';
 
-export const TOKEN_KEY = 'codepit_token';
+const TOKEN_KEY = 'codepit_token';
 // The key's name before the rename, still read so an open tab stays signed in
 const LEGACY_TOKEN_KEY = 'acp_token';
 
+/**
+ * Kept in localStorage, not sessionStorage: phones drop a background tab's session
+ * storage, and a home-screen launch or a bookmark without ?token= would then ask again.
+ */
+function readStoredToken(): string {
+  try {
+    return (
+      localStorage.getItem(TOKEN_KEY) ||
+      sessionStorage.getItem(TOKEN_KEY) ||
+      sessionStorage.getItem(LEGACY_TOKEN_KEY) ||
+      ''
+    );
+  } catch {
+    return '';
+  }
+}
+
+export function saveToken(token: string): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    // Storage blocked (private mode): the ?token= in the URL still signs requests in
+  }
+}
+
 export function getToken(): string {
-  const urlParams = new URLSearchParams(window.location.search);
-  const t = urlParams.get('token');
+  const t = new URLSearchParams(window.location.search).get('token');
   if (t) {
-    sessionStorage.setItem(TOKEN_KEY, t);
+    if (readStoredToken() !== t) saveToken(t);
     return t;
   }
-  return sessionStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(LEGACY_TOKEN_KEY) || '';
+  return readStoredToken();
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -151,9 +175,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(opts),
     }),
-  compactSession: (id: string) =>
+  /** force: compact a stopped agent anyway, which resends recent turns for it to summarise. */
+  compactSession: (id: string, opts: { force?: boolean } = {}) =>
     request<{ session: AcpSession }>(`/api/sessions/${id}/compact`, {
       method: 'POST',
+      body: JSON.stringify(opts),
     }),
   setAutoCompact: (id: string, setting: AutoCompactSetting) =>
     request<{ autoCompact: AutoCompactSetting }>(`/api/sessions/${id}/auto-compact`, {

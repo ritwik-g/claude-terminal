@@ -154,7 +154,7 @@ async function createWindow(): Promise<void> {
     if (external(url)) e.preventDefault();
   });
 
-  // clientUrl carries the access token; the page keeps it in sessionStorage.
+  // clientUrl carries the access token; the page keeps it in localStorage.
   await win.loadURL(server.clientUrl);
 }
 

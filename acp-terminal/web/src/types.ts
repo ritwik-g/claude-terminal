@@ -269,6 +269,8 @@ export interface SessionSummary {
   tokenCount: number;
   turnCount: number;
   isAgentRunning?: boolean;
+  /** A compaction is running (started here or by the agent). */
+  compacting?: boolean;
 }
 
 export interface VendorRateLimitWindow {

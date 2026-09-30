@@ -321,6 +321,20 @@ try {
     }
   });
 
+  await test('a stopped agent is not compacted unless asked to, and then it gets the history', async () => {
+    await sessionManager.sendPrompt(s.id, 'Remember the codeword KIWI');
+    await waitForIdle(s.id);
+    await sessionManager.stopSessionAgent(s.id);
+    const turns = sessionManager.getSession(s.id)!.turns.length;
+    await assert.rejects(() => sessionManager.compactSession(s.id), /agent is stopped/);
+    assert.equal(sessionManager.getSession(s.id)!.turns.length, turns, 'no card for a refused compaction');
+    await sessionManager.compactSession(s.id, { force: true });
+    await waitForIdle(s.id);
+    const c = sessionManager.getSession(s.id)!.turns.at(-1)!.compaction!;
+    assert.equal(c.method, 'handoff');
+    assert.equal(c.status, 'completed');
+  });
+
   await test('a compaction the agent started is closed when the agent is stopped', async () => {
     await sessionManager.sendPrompt(s.id, 'Something to talk about');
     await waitForIdle(s.id);

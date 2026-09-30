@@ -258,4 +258,28 @@ test('async_task updates carry type, description and usage', () => {
   assert.equal(spawned.usage, undefined);
 });
 
+test('a Workflow call is a workflow task, named from its script, even with no async_task update', () => {
+  const s = session([agentTurn()]);
+  const script = "export const meta = {\n  name: 'review-changes',\n  description: 'Review the diff, verify each finding',\n}\n";
+  const [task] = addCall(s, { id: 'w1', title: 'Workflow', status: 'pending', startedAt: 1000, toolName: 'Workflow', background: true, input: JSON.stringify({ script }) });
+  assert.equal(task.kind, 'workflow');
+  assert.equal(task.title, 'review-changes');
+  assert.equal(task.prompt, 'Review the diff, verify each finding');
+  update(s, 'w1', { status: 'completed', completedAt: 2000 });
+  assert.equal(s.agentTasks![0].status, 'running', 'the run outlives the launching call');
+  update(s, 'w1', { backgroundState: 'completed', backgroundEndedAt: 9000 });
+  assert.equal(s.agentTasks![0].status, 'completed');
+  assert.equal(s.agentTasks![0].endedAt, 9000);
+});
+
+test('a workflow stored as a background task is relabelled when the session loads', () => {
+  const call: ToolCallRecord = { id: 'w2', title: 'Workflow', status: 'completed', startedAt: 1000, toolName: 'Workflow', background: true, backgroundState: 'completed', input: { name: 'nightly-audit' } };
+  const s = session([agentTurn([call])]);
+  s.agentTasks = [{ id: 'w2', kind: 'background', title: 'Background task', status: 'completed', startedAt: 1000, toolCallId: 'w2' }];
+  assert.equal(syncAgentTasks(s), true);
+  assert.equal(s.agentTasks[0].kind, 'workflow');
+  assert.equal(s.agentTasks[0].title, 'nightly-audit');
+  assert.equal(syncAgentTasks(s), false, 'nothing left to change');
+});
+
 console.log(`\n${passed} passed`);
