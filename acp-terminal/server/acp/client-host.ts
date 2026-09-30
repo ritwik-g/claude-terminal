@@ -136,6 +136,11 @@ export class AcpClientHost extends EventEmitter {
   /** The agent's latest effort and model choices; null until it advertises any. */
   public options: AgentOptions | null = null;
   private holdOptions = false;
+  /**
+   * Subagents that report through their own ACP session (Codex, AIR nativeSubagentSessions),
+   * keyed by that session id: the tool call that stands for each one, and its name.
+   */
+  private subagentSessions = new Map<string, { callId: string; name: string }>();
 
   constructor(
     public readonly sessionRecordId: string,
@@ -178,6 +183,55 @@ export class AcpClientHost extends EventEmitter {
     if (this.listenerCount('error') > 0) this.emit('error', err);
   }
 
+  /**
+   * A subagent that works in a session of its own (AIR `subagent_spawned` / `subagent_state_update`,
+   * sent on its parent's session). It is shown as a subagent call, the way Claude's Agent call is,
+   * and the updates of its own session are filed under that call.
+   */
+  private handleSubagentUpdate(update: any, parentSessionId: string | undefined): void {
+    const childId = typeof update.subagentSessionId === 'string' ? update.subagentSessionId : undefined;
+    if (!childId) return;
+    if (update.sessionUpdate === 'subagent_spawned') {
+      if (this.subagentSessions.has(childId)) return;
+      const name = (typeof update.name === 'string' && update.name.trim()) || 'Subagent';
+      // Codex fills in "Delegated task for <name>" when it never saw the prompt; that says nothing
+      const task =
+        typeof update.task === 'string' && update.task.trim() && !/^Delegated task( for .*)?$/.test(update.task.trim()) ? update.task : undefined;
+      const callId = `subagent:${childId}`;
+      this.subagentSessions.set(childId, { callId, name });
+      // A subagent a subagent started goes under that one
+      const parent = parentSessionId ? this.subagentSessions.get(parentSessionId)?.callId : undefined;
+      this.emit('toolCall', {
+        id: callId,
+        title: name,
+        kind: 'other',
+        toolName: 'Subagent',
+        description: name,
+        isSubagent: true,
+        input: { description: name, ...(task ? { prompt: task } : {}) },
+        // Codex continues a finished subagent as `<thread>:generation:<n>`; the thread is its id
+        agentRef: { subagentId: childId.replace(/:generation:\d+$/, '') },
+        ...(parent ? { parentToolUseId: parent } : {}),
+        status: 'running',
+        startedAt: Date.now(),
+      } satisfies ToolCallRecord);
+      return;
+    }
+    if (update.sessionUpdate === 'subagent_state_update') {
+      const child = this.subagentSessions.get(childId);
+      const state = update.state;
+      if (!child || (state !== 'completed' && state !== 'failed' && state !== 'cancelled')) return;
+      const stopped = state === 'cancelled';
+      // Only the fields that change: the update is merged into the call
+      this.emit('toolCallUpdate', {
+        id: child.callId,
+        status: state === 'failed' ? 'failed' : 'completed',
+        ...(stopped ? { backgroundState: 'stopped', backgroundSummary: 'Stopped' } : {}),
+        completedAt: Date.now(),
+      } as ToolCallRecord);
+    }
+  }
+
   async start(): Promise<void> {
     const isWindows = process.platform === 'win32';
     const cmd = isWindows && this.agent.command === 'npx' ? 'npx.cmd' : this.agent.command;
@@ -214,12 +268,16 @@ export class AcpClientHost extends EventEmitter {
     }
 
     const input = Writable.toWeb(this.child.stdin);
-    // AIR async_task_* updates are not in the ACP schema, so the SDK would drop them
-    // (logging a validation error); take them off the wire before it parses anything.
+    // AIR async_task_* and subagent_* updates are not in the ACP schema, so the SDK would
+    // drop them (logging a validation error); take them off the wire before it parses anything.
     const output = (Readable.toWeb(this.child.stdout) as ReadableStream<Uint8Array>).pipeThrough(
-      extractAsyncTaskUpdates((update) => {
+      extractExtensionUpdates((update, sessionId) => {
         this.touch();
-        if (appEnv('DEBUG_UPDATES')) fs.appendFileSync(appEnv('DEBUG_UPDATES')!, JSON.stringify({ update }) + '\n');
+        if (appEnv('DEBUG_UPDATES')) fs.appendFileSync(appEnv('DEBUG_UPDATES')!, JSON.stringify({ sessionId, update }) + '\n');
+        if (update.sessionUpdate.startsWith('subagent_')) {
+          this.handleSubagentUpdate(update, sessionId);
+          return;
+        }
         const parsed = parseAsyncTaskUpdate(update);
         if (parsed) this.emit('asyncTask', parsed);
       })
@@ -243,10 +301,12 @@ export class AcpClientHost extends EventEmitter {
       }
 
       const permId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const subagent = this.subagentSessions.get(params.sessionId)?.name;
       const pending: PendingPermission = {
         requestId: permId,
         toolCallId: params.toolCall?.toolCallId || 'call',
         title: params.toolCall?.title || 'Permission requested',
+        ...(subagent ? { subagent } : {}),
         options: (params.options || []).map((o: any) => ({
           optionId: o.optionId,
           name: o.name,
@@ -353,15 +413,20 @@ export class AcpClientHost extends EventEmitter {
         fs.appendFileSync(appEnv('DEBUG_UPDATES')!, JSON.stringify(ctx.params) + '\n');
       }
 
+      // A subagent's own session (Codex): its work is filed under the call that stands for it,
+      // and its plan, usage and settings are its own, not the conversation's
+      const subagentCall = this.subagentSessions.get(ctx.params?.sessionId)?.callId;
+      if (subagentCall && !SUBAGENT_SESSION_UPDATES.has(update.sessionUpdate)) return;
+
       switch (update.sessionUpdate) {
         case 'agent_thought_chunk': {
           const text = update.content?.text || '';
-          if (text) this.emit('thought', text, chunkMeta(update));
+          if (text) this.emit('thought', text, { ...chunkMeta(update), ...(subagentCall ? { parentToolUseId: subagentCall } : {}) });
           break;
         }
         case 'agent_message_chunk': {
           const text = update.content?.text || '';
-          if (text) this.emit('message', text, chunkMeta(update));
+          if (text) this.emit('message', text, { ...chunkMeta(update), ...(subagentCall ? { parentToolUseId: subagentCall } : {}) });
           break;
         }
         case 'tool_call': {
@@ -372,6 +437,7 @@ export class AcpClientHost extends EventEmitter {
             status: normalizeToolStatus(update.status) || 'pending',
             startedAt: Date.now(),
           };
+          if (subagentCall) record.parentToolUseId = subagentCall;
           this.emit('toolCall', record);
           break;
         }
@@ -477,8 +543,11 @@ export class AcpClientHost extends EventEmitter {
           // report command output and exit codes when the client asks for it.
           terminal_output: true,
           // JetBrains AIR extension: report background work (background shells,
-          // workflows, monitors) as async_task_* updates.
-          jetbrains: { air: { version: 1, capabilities: ['asyncTasks'] } },
+          // workflows, monitors) as async_task_* updates, and, for agents that
+          // offer it, each subagent's work live in a session of its own.
+          jetbrains: {
+            air: { version: 1, capabilities: this.agent.nativeSubagentSessions ? ['asyncTasks', 'nativeSubagentSessions'] : ['asyncTasks'] },
+          },
         },
       },
     }));
@@ -966,21 +1035,28 @@ export function parseAsyncTaskUpdate(update: any): AsyncTaskUpdate | null {
   };
 }
 
+// JetBrains AIR session updates that are not in the ACP schema
+const EXTENSION_UPDATE = /^(async_task|subagent)_/;
+
+// What a subagent's own session contributes: its reasoning, messages and tool calls
+const SUBAGENT_SESSION_UPDATES = new Set(['agent_thought_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update']);
+
 /**
  * Pass the agent's NDJSON stream through unchanged, except session/update
- * lines carrying an async_task_* update: those go to `onUpdate` instead.
+ * lines carrying an AIR extension update (async_task_*, subagent_*): those go
+ * to `onUpdate`, with the session they were sent for, instead.
  */
-export function extractAsyncTaskUpdates(onUpdate: (update: any) => void): TransformStream<Uint8Array, Uint8Array> {
+export function extractExtensionUpdates(onUpdate: (update: any, sessionId: string | undefined) => void): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = '';
   const pass = (line: string, controller: TransformStreamDefaultController<Uint8Array>) => {
-    if (line.includes('"async_task_')) {
+    if (line.includes('"async_task_') || line.includes('"subagent_')) {
       try {
         const msg = JSON.parse(line);
         const update = msg?.method === 'session/update' ? msg.params?.update : undefined;
-        if (typeof update?.sessionUpdate === 'string' && update.sessionUpdate.startsWith('async_task_')) {
-          onUpdate(update);
+        if (typeof update?.sessionUpdate === 'string' && EXTENSION_UPDATE.test(update.sessionUpdate)) {
+          onUpdate(update, typeof msg.params?.sessionId === 'string' ? msg.params.sessionId : undefined);
           return;
         }
       } catch {
@@ -1024,9 +1100,19 @@ function normalizeToolStatus(status: unknown): ToolCallRecord['status'] | undefi
   return undefined;
 }
 
+// Codex's tools for talking to its subagents, titled by their bare names
+const CODEX_SUBAGENT_TOOLS: Record<string, string> = {
+  wait: 'Waiting for subagents',
+  sendInput: 'Message to a subagent',
+  resumeAgent: 'Continued a subagent',
+  closeAgent: 'Closed a subagent',
+  spawnAgent: 'Started a subagent',
+};
+
 function toolTitle(update: any): string | undefined {
   const title: string | undefined = update.title;
   const input = update.rawInput;
+  if (title && typeof input?.senderThreadId === 'string' && CODEX_SUBAGENT_TOOLS[title]) return CODEX_SUBAGENT_TOOLS[title];
   // "Terminal"/"Task"/"Tool Call" are placeholders sent before the input streams in.
   if (title && !['Tool Call', 'Terminal', 'Task'].includes(title)) return title;
   if (input?.command) return `$ ${input.command}`;

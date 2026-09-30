@@ -449,6 +449,7 @@ const SUBAGENT_BADGE: Record<SubagentStatus, { label: string; tone: Tone }> = {
   background: { label: 'In background', tone: 'info' },
   done: { label: 'Done', tone: 'ok' },
   failed: { label: 'Failed', tone: 'danger' },
+  stopped: { label: 'Stopped', tone: 'neutral' },
 };
 
 export const SubagentCard: React.FC<{ call: ToolCallRecord; childCalls: ToolCallRecord[] }> = ({ call, childCalls }) => {

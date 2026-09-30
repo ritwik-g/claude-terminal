@@ -225,13 +225,14 @@ function diffLines(before: string, after: string): DiffLine[] {
   ];
 }
 
-export type SubagentStatus = 'running' | 'background' | 'done' | 'failed';
+export type SubagentStatus = 'running' | 'background' | 'done' | 'failed' | 'stopped';
 
 /** A subagent launched asynchronously returns at once; its own calls show whether it is still going. */
 export function subagentStatus(call: ToolCallRecord, children: ToolCallRecord[]): SubagentStatus {
   if (call.status === 'failed') return 'failed';
   if (isActive(call) || children.some(isActive)) return 'running';
   if (call.backgroundState === 'failed') return 'failed';
+  if (call.backgroundState === 'stopped') return 'stopped';
   if (backgroundRunning(call) && !call.subagentText) return 'background';
   return 'done';
 }

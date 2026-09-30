@@ -1216,6 +1216,10 @@ export class SessionManager extends EventEmitter {
   }
 
   async cancelPrompt(sessionId: string): Promise<void> {
+    // Let go of the turn before waiting on the agent: one that still ends cleanly (the agent
+    // missed the cancel) must not start the next queued message, and once the wait is over
+    // the entry may belong to a newer message
+    this.activePrompts.delete(sessionId);
     const host = this.activeHosts.get(sessionId);
     if (host) {
       await host.cancel();
@@ -1223,7 +1227,6 @@ export class SessionManager extends EventEmitter {
     // Settle it now: its prompt may resolve after the next message has already started
     const run = this.compactionRuns.get(sessionId);
     if (run) this.finishCompaction(sessionId, run, { stopReason: 'cancelled' });
-    this.activePrompts.delete(sessionId);
     const session = store.get(sessionId);
     if (session) {
       session.state = 'needs_you';

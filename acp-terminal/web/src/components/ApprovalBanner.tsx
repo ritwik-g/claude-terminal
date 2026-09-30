@@ -40,7 +40,7 @@ export const ApprovalBanner: React.FC<{
         <Icon name="shield" size={16} />
       </span>
       <div className="ws-approval-body">
-        <div className="ws-approval-kicker">Approval needed</div>
+        <div className="ws-approval-kicker">{permission.subagent ? `Approval needed · ${permission.subagent} subagent` : 'Approval needed'}</div>
         <div className="ws-approval-title" title={permission.title}>
           {permission.title}
         </div>

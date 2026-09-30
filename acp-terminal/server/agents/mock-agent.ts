@@ -15,8 +15,12 @@ interface SessionData {
 
 class MockAcpAgent {
   private sessions = new Map<string, SessionData>();
+  /** The client takes subagent sessions (AIR nativeSubagentSessions), as Codex's adapter checks. */
+  private subagentSessions = false;
 
-  async initialize(_params: unknown) {
+  async initialize(params: any) {
+    const air = params?.clientCapabilities?._meta?.jetbrains?.air;
+    this.subagentSessions = Array.isArray(air?.capabilities) && air.capabilities.includes('nativeSubagentSessions');
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
@@ -82,6 +86,65 @@ class MockAcpAgent {
         fs.writeFileSync(outputFile, 'background work finished\n');
         void send({ sessionUpdate: 'async_task_state_update', asyncTaskId: taskId, state: 'completed', toolCallId: callId, outputFilePath: outputFile }).catch(() => {});
       }, 2000);
+      return { stopReason: 'end_turn' as const };
+    }
+
+    // "stubborn" ignores a cancel and ends the turn cleanly anyway, as an agent may when the cancel comes too late
+    if (/\bstubborn\b/.test(lower)) {
+      await new Promise((r) => setTimeout(r, 400));
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Finished regardless.' } },
+      });
+      return { stopReason: 'end_turn' as const };
+    }
+
+    // "subagent" hands work to a subagent the way Codex's adapter reports it to a client that takes
+    // subagent sessions: subagent_spawned, then the subagent's own session, then subagent_state_update.
+    // "subagent permission" also has the subagent ask for approval.
+    if (/\bsubagent\b/.test(lower)) {
+      const root = params.sessionId;
+      const send = (update: Record<string, unknown>, sessionId = root) => cx.notify(acp.methods.client.session.update, { sessionId, update });
+      const say = (text: string, sessionId = root) => send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }, sessionId);
+      if (!this.subagentSessions) {
+        await say('This client does not take subagent sessions.');
+        return { stopReason: 'end_turn' as const };
+      }
+      const tag = crypto.randomUUID().slice(0, 8);
+      const explorer = `thread-explorer-${tag}`;
+      const checker = `thread-checker-${tag}`;
+      await say('Handing this to a subagent. ');
+      await send({ sessionUpdate: 'subagent_spawned', subagentSessionId: explorer, name: 'Explorer', task: 'Find the config files', capabilities: {} });
+      await send({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Looking for config files.' } }, explorer);
+      const callId = `call-sub-${tag}`;
+      await send({ sessionUpdate: 'tool_call', toolCallId: callId, title: 'ls config', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls config' } }, explorer);
+      if (/\bpermission\b/.test(lower)) {
+        const res = await cx.request(acp.methods.client.session.requestPermission, {
+          sessionId: explorer,
+          toolCall: { toolCallId: callId, title: 'Run ls config', kind: 'execute', status: 'pending' },
+          options: [
+            { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+            { optionId: 'deny', name: 'Reject', kind: 'reject_once' },
+          ],
+        });
+        if (res?.outcome?.outcome !== 'selected' || res.outcome.optionId !== 'allow') {
+          await send({ sessionUpdate: 'tool_call_update', toolCallId: callId, status: 'failed', rawOutput: { error: 'Rejected' } }, explorer);
+          await send({ sessionUpdate: 'subagent_state_update', subagentSessionId: explorer, state: 'failed' });
+          await say('The subagent was not allowed to look.');
+          return { stopReason: 'end_turn' as const };
+        }
+      }
+      await send({ sessionUpdate: 'tool_call_update', toolCallId: callId, status: 'completed', rawOutput: { output: 'a.json\nb.json\nc.json' } }, explorer);
+      // The subagent's own plan and usage are not the conversation's
+      await send({ sessionUpdate: 'plan', entries: [{ content: 'Subagent plan step', priority: 'medium', status: 'pending' }] }, explorer);
+      await send({ sessionUpdate: 'usage_update', used: 99999, size: 400000 }, explorer);
+      // A subagent of the subagent, stopped before it finishes
+      await send({ sessionUpdate: 'subagent_spawned', subagentSessionId: checker, name: 'Checker', task: 'Double-check the list', capabilities: {} }, explorer);
+      await say('Checking the list.', checker);
+      await send({ sessionUpdate: 'subagent_state_update', subagentSessionId: checker, state: 'cancelled' }, explorer);
+      await say('Found 3 config files.', explorer);
+      await send({ sessionUpdate: 'subagent_state_update', subagentSessionId: explorer, state: 'completed' });
+      await say('The subagent found 3 config files.');
       return { stopReason: 'end_turn' as const };
     }
 

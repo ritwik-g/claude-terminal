@@ -27,6 +27,7 @@ const {
   markNewModels,
 } = await import('../server/acp/agent-options.js');
 const { normalizeClaudeModel } = await import('../server/acp/client-host.js');
+const { groupModels } = await import('../server/agents/antigravity-models.js');
 const { reconcileEffort, sessionManager } = await import('../server/acp/session-mgr.js');
 const { AGENT_REGISTRY } = await import('../server/agents/registry.js');
 const { getPricingForModel } = await import('../server/subscriptions.js');
@@ -156,6 +157,16 @@ function unitTests(): void {
   check('unknown agent options: level passed through', effortToSend('high', null).value === 'high');
   check('auto with no effort option sends nothing', effortToSend('auto', haiku).value === undefined);
 
+  console.log('2b. Antigravity (agy) models: effort levels are separate models there');
+  const agy = groupModels(
+    'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n' +
+      'claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\ngpt-oss-120b-medium\tGPT-OSS 120B (Medium)\nFetching available models...\n'
+  );
+  check('agy: one model per family, levels in order', JSON.stringify(agy[0]) === JSON.stringify({ value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', efforts: ['low', 'medium', 'high'] }));
+  check('agy: a model without levels keeps its name', agy[1].value === 'claude-sonnet-4-6' && agy[1].name === 'Claude Sonnet 4.6 (Thinking)' && agy[1].efforts.length === 0);
+  check('agy: a single level still counts as one', agy[2].value === 'gpt-oss-120b' && agy[2].efforts.join() === 'medium');
+  check('agy: progress lines are skipped', agy.length === 3);
+
   console.log('3. Validation');
   check('auto always valid', effortError('auto', []) === null);
   check('advertised level valid', effortError('xhigh', claude.efforts) === null);
@@ -182,7 +193,7 @@ function unitTests(): void {
 
   console.log('5. Options cache and fallbacks');
   check('registry fallback before any report', effortChoicesFor('claude', 'opus').length === 5);
-  check('antigravity bridge offers no effort', effortChoicesFor('antigravity', 'gemini-3.8-flash').length === 0);
+  check('antigravity offers agy\'s levels before it reports its own', effortChoicesFor('antigravity', 'gemini-3.8-flash').map((e) => e.value).join() === 'low,medium,high');
   rememberAgentOptions('claude', 'haiku', haiku);
   rememberAgentOptions('codex', '6-luna', { ...codex, currentModel: 'gpt-6-luna' });
   check('cached Haiku report wins over the registry', effortChoicesFor('claude', 'haiku').length === 0);

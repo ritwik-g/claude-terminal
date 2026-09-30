@@ -331,6 +331,65 @@ async function runTests() {
     }
     console.log('   ✅ Background work completes after the turn, shows its output, and stops with the agent\n');
 
+    // 9b2. Subagents in sessions of their own (Codex): shown as subagent calls, their work filed under them
+    console.log('9️⃣b2 Testing subagents that report through their own session...');
+    const subSession = await sessionManager.createSession({ agentId: 'mock', cwd: testDir, title: 'Subagent sessions' });
+    await waitForIdle(subSession.id);
+    const subBefore = sessionManager.getSession(subSession.id)!;
+    const planBefore = JSON.stringify(subBefore.plan ?? null);
+    const permSeen = new Promise<any>((resolve) => {
+      const handler = (evt: any) => {
+        if (evt.sessionId === subSession.id) {
+          sessionManager.off('permissionRequested', handler);
+          resolve(evt.permission);
+        }
+      };
+      sessionManager.on('permissionRequested', handler);
+    });
+    const subTurn = sessionManager.sendPrompt(subSession.id, 'Use a subagent, and it needs permission');
+    const subPerm = await permSeen;
+    if (subPerm.subagent !== 'Explorer') throw new Error(`A subagent's approval should say which subagent asks: ${JSON.stringify(subPerm)}`);
+    await sessionManager.resolvePermission(subSession.id, 'allow');
+    await subTurn;
+    await waitForIdle(subSession.id);
+    const sub = sessionManager.getSession(subSession.id)!;
+    const subCalls = sub.turns.flatMap((t) => t.toolCalls || []);
+    const explorerCall = subCalls.find((c) => c.isSubagent && c.title === 'Explorer');
+    const checkerCall = subCalls.find((c) => c.isSubagent && c.title === 'Checker');
+    const lsCall = subCalls.find((c) => c.title === 'ls config');
+    if (!explorerCall || explorerCall.status !== 'completed' || !explorerCall.subagentText?.includes('Found 3 config files')) {
+      throw new Error(`The subagent should be a completed subagent call with its reply: ${JSON.stringify(explorerCall)}`);
+    }
+    if (!lsCall || lsCall.parentToolUseId !== explorerCall.id || lsCall.status !== 'completed') {
+      throw new Error(`The subagent's own tool call should be filed under it: ${JSON.stringify(lsCall)}`);
+    }
+    if (!checkerCall || checkerCall.parentToolUseId !== explorerCall.id || checkerCall.backgroundState !== 'stopped') {
+      throw new Error(`A subagent's subagent should sit under it and show as stopped: ${JSON.stringify(checkerCall)}`);
+    }
+    const mainTurn = sub.turns.filter((t) => t.role === 'agent').at(-1)!;
+    const mainToolSegs = (mainTurn.segments || []).filter((seg) => seg.kind === 'tool').map((seg: any) => seg.toolCallId);
+    if (mainToolSegs.join(',') !== explorerCall.id) throw new Error(`Only the subagent itself belongs in the main flow: ${mainToolSegs}`);
+    if (!mainTurn.content?.includes('The subagent found 3 config files') || /Found 3 config files|Checking the list|Looking for/.test(mainTurn.content || '')) {
+      throw new Error(`The subagent's messages must stay out of the main reply: ${JSON.stringify(mainTurn.content)}`);
+    }
+    if (JSON.stringify(sub.plan ?? null) !== planBefore || sub.usage.contextTokens === 99999) {
+      throw new Error(`A subagent's plan and usage must not replace the conversation's: plan=${JSON.stringify(sub.plan)} context=${sub.usage.contextTokens}`);
+    }
+    const explorerTask = sub.agentTasks?.find((t) => t.toolCallId === explorerCall.id);
+    const checkerTask = sub.agentTasks?.find((t) => t.toolCallId === checkerCall.id);
+    if (!explorerTask || explorerTask.kind !== 'subagent' || explorerTask.status !== 'completed' || explorerTask.prompt !== 'Find the config files') {
+      throw new Error(`The subagent should get a completed task with its task text: ${JSON.stringify(explorerTask)}`);
+    }
+    const segKinds = (explorerTask.segments || []).map((seg) => seg.kind).join(',');
+    if (!segKinds.includes('thought') || !segKinds.includes('tool') || !segKinds.includes('text')) {
+      throw new Error(`The subagent's task should hold its reasoning, calls and reply: ${segKinds}`);
+    }
+    if (explorerTask.audit?.subagentId !== explorerCall.id.replace(/^subagent:/, '')) throw new Error(`The subagent's own id should be recorded: ${JSON.stringify(explorerTask.audit)}`);
+    if (!checkerTask || checkerTask.status !== 'stopped' || checkerTask.parentTaskId !== explorerTask.id) {
+      throw new Error(`The nested subagent's task should be stopped and belong to the first: ${JSON.stringify(checkerTask)}`);
+    }
+    console.log('   ✅ Subagent sessions stream into their own subagent, nested ones included, with labelled approvals\n');
+
     // 9c. Messages sent during a turn queue behind it and drain in order; a stopped turn pauses the queue
     console.log('9️⃣c Testing the prompt queue...');
     const qSession = await sessionManager.createSession({ agentId: 'mock', cwd: testDir, title: 'Queue' });
@@ -370,6 +429,16 @@ async function runTests() {
     if (JSON.stringify(userTexts().slice(-3)) !== JSON.stringify(['queue seven', 'queue nine', 'queue eight'])) {
       throw new Error(`The paused queue should resume after the new message: ${JSON.stringify(userTexts())}`);
     }
+    // Stop is final even when the agent ignores it and ends the turn cleanly: the queue stays paused
+    await drained();
+    await sessionManager.queuePrompt(qSession.id, 'stubborn turn');
+    await sessionManager.queuePrompt(qSession.id, 'after the stubborn turn');
+    await sessionManager.cancelPrompt(qSession.id);
+    await new Promise((r) => setTimeout(r, 800));
+    if (queued().length !== 1 || userTexts().includes('after the stubborn turn') || sessionManager.isTurnInFlight(qSession.id)) {
+      throw new Error(`A turn that ends cleanly after Stop must not drain the queue: queued=${queued().length} sent=${JSON.stringify(userTexts().slice(-2))}`);
+    }
+    sessionManager.removeQueuedPrompt(qSession.id, queued()[0].id);
     // Two "Send now" clicks on the same paused message send it once
     await sessionManager.queuePrompt(qSession.id, 'queue ten');
     await sessionManager.queuePrompt(qSession.id, 'queue eleven');

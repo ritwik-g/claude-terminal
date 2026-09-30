@@ -90,6 +90,8 @@ export interface PendingPermission {
   requestId: string;
   toolCallId: string;
   title: string;
+  /** The subagent asking, when it is not the main agent. */
+  subagent?: string;
   options: PermissionOption[];
   rawParams?: unknown;
   requestedAt: number;

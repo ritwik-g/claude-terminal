@@ -34,6 +34,8 @@ export interface AgentDescriptor {
   mcpSupport?: { transports: McpTransport[]; note?: string };
   /** Effort levels to offer before the agent has reported its own; empty when it has no effort setting. */
   efforts?: ConfigChoice[];
+  /** Ask the agent to run each subagent in a session of its own (AIR nativeSubagentSessions), so its work streams live. */
+  nativeSubagentSessions?: boolean;
   /** What the agent last advertised per model (from the options cache), keyed by model id. */
   advertised?: Record<string, AgentOptions>;
 }
@@ -93,6 +95,8 @@ export interface PendingPermission {
   requestId: string;
   toolCallId: string;
   title: string;
+  /** The subagent asking, when it is not the main agent. */
+  subagent?: string;
   options: PermissionOption[];
   rawParams?: unknown;
   requestedAt: number;
