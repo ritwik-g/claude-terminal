@@ -6,6 +6,7 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import * as acp from '@agentclientprotocol/sdk';
 import { ptyManager } from '../pty-manager.js';
+import { appEnv } from '../env.js';
 import type { AgentDescriptor, AgentOptions, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
 import { appliesTo, listMcpServers, resolveSessionMcpServers } from '../mcp/config.js';
 import { effortToSend, parseAgentOptions, resolveModelValue } from './agent-options.js';
@@ -191,7 +192,7 @@ export class AcpClientHost extends EventEmitter {
     const output = (Readable.toWeb(this.child.stdout) as ReadableStream<Uint8Array>).pipeThrough(
       extractAsyncTaskUpdates((update) => {
         this.touch();
-        if (process.env.ACP_DEBUG_UPDATES) fs.appendFileSync(process.env.ACP_DEBUG_UPDATES, JSON.stringify({ update }) + '\n');
+        if (appEnv('DEBUG_UPDATES')) fs.appendFileSync(appEnv('DEBUG_UPDATES')!, JSON.stringify({ update }) + '\n');
         const parsed = parseAsyncTaskUpdate(update);
         if (parsed) this.emit('asyncTask', parsed);
       })
@@ -321,8 +322,8 @@ export class AcpClientHost extends EventEmitter {
       const update = ctx.params?.update;
       if (!update) return;
       this.touch();
-      if (process.env.ACP_DEBUG_UPDATES) {
-        fs.appendFileSync(process.env.ACP_DEBUG_UPDATES, JSON.stringify(ctx.params) + '\n');
+      if (appEnv('DEBUG_UPDATES')) {
+        fs.appendFileSync(appEnv('DEBUG_UPDATES')!, JSON.stringify(ctx.params) + '\n');
       }
 
       switch (update.sessionUpdate) {

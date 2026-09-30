@@ -10,8 +10,8 @@ const __dirname = path.dirname(__filename);
 const ARTIFACTS_DIR = screenshotDir();
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 // Test 10 simulates a LAN client with x-test-remote-ip, which the server honours only when it
-// runs with NODE_ENV=test, e.g. `NODE_ENV=test PORT=7991 ACP_APP_DIR=/tmp/acp-audit npx tsx server/cli.ts`
-const BASE_URL = process.env.ACP_BASE_URL || 'http://127.0.0.1:7890';
+// runs with NODE_ENV=test, e.g. `NODE_ENV=test PORT=7991 CODEPIT_APP_DIR=/tmp/acp-audit npx tsx server/cli.ts`
+const BASE_URL = process.env.CODEPIT_BASE_URL || 'http://127.0.0.1:7890';
 
 interface TestResult {
   step: string;
@@ -329,7 +329,7 @@ async function runThoroughAudit() {
     const authRes = await fetch(`${BASE_URL}/api/sessions`, {
       headers: {
         'x-test-remote-ip': '192.168.1.50',
-        'x-acp-token': validToken,
+        'x-codepit-token': validToken,
       },
     });
 

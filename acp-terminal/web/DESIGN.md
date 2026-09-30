@@ -99,9 +99,9 @@ icon, loading), `IconButton`, `Badge`, `StatusDot`, `Card`, `Field` + `Input` +
 ## Seeing your work
 
 ```bash
-ACP_APP_DIR=/tmp/<you>/app npx tsx scripts/seed-ui-fixtures.ts
+CODEPIT_APP_DIR=/tmp/<you>/app npx tsx scripts/seed-ui-fixtures.ts
 npx vite build
-ACP_APP_DIR=/tmp/<you>/app PORT=<port> ACP_ENABLE_MOCK=1 npx tsx server/cli.ts
+CODEPIT_APP_DIR=/tmp/<you>/app PORT=<port> CODEPIT_ENABLE_MOCK=1 npx tsx server/cli.ts
 ```
 
 The seeded sessions cover every state, split messages, a subagent, a plan, a

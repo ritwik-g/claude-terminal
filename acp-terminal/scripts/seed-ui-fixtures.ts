@@ -3,8 +3,8 @@
  * every session state, several vendors, git and non-git folders, split agent
  * messages, tool calls with exit codes, a subagent, a plan and a long transcript.
  *
- *   ACP_APP_DIR=/tmp/acp-ui-demo npx tsx scripts/seed-ui-fixtures.ts
- *   ACP_APP_DIR=/tmp/acp-ui-demo PORT=7996 ACP_ENABLE_MOCK=1 npx tsx server/cli.ts
+ *   CODEPIT_APP_DIR=/tmp/acp-ui-demo npx tsx scripts/seed-ui-fixtures.ts
+ *   CODEPIT_APP_DIR=/tmp/acp-ui-demo PORT=7996 CODEPIT_ENABLE_MOCK=1 npx tsx server/cli.ts
  *
  * The server resets transient states on start (a "working" session with no
  * live agent becomes "needs you"; pending approvals are cleared). To see those
@@ -16,13 +16,13 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { AcpSession, ToolCallRecord, TurnMessage, TurnSegment } from '../server/types.js';
 
-const appDir = process.env.ACP_APP_DIR;
+const appDir = process.env.CODEPIT_APP_DIR;
 if (!appDir) {
-  console.error('Set ACP_APP_DIR to the app dir to seed (never your real ~/.acp-terminal).');
+  console.error('Set CODEPIT_APP_DIR to the app dir to seed (never your real ~/.codepit).');
   process.exit(1);
 }
-if (path.resolve(appDir) === path.join(os.homedir(), '.acp-terminal')) {
-  console.error('Refusing to seed the real ~/.acp-terminal.');
+if (['.codepit', '.acp-terminal'].some((d) => path.resolve(appDir) === path.join(os.homedir(), d))) {
+  console.error('Refusing to seed the real ~/.codepit.');
   process.exit(1);
 }
 

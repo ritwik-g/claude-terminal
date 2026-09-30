@@ -2,14 +2,86 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { appEnv } from './env.js';
 
 export const HOME = os.homedir();
+export const DEFAULT_APP_DIR = path.join(HOME, '.codepit');
+/** Where the data lived before the rename to CodePit. */
+export const LEGACY_APP_DIR = path.join(HOME, '.acp-terminal');
 
 export function getAppDir(): string {
-  if (process.env.NODE_ENV === 'test' && !process.env.ACP_APP_DIR) {
-    process.env.ACP_APP_DIR = path.join(os.tmpdir(), `acp-terminal-test-${process.pid}`);
+  if (process.env.NODE_ENV === 'test' && !appEnv('APP_DIR')) {
+    process.env.CODEPIT_APP_DIR = path.join(os.tmpdir(), `codepit-test-${process.pid}`);
   }
-  return process.env.ACP_APP_DIR || path.join(HOME, '.acp-terminal');
+  return appEnv('APP_DIR') || defaultAppDir();
+}
+
+let resolvedDefaultDir: string | null = null;
+
+/** ~/.codepit, moving the data there from ~/.acp-terminal the first time it is needed. */
+function defaultAppDir(): string {
+  if (!resolvedDefaultDir) resolvedDefaultDir = migrateLegacyAppDir(LEGACY_APP_DIR, DEFAULT_APP_DIR);
+  return resolvedDefaultDir;
+}
+
+/**
+ * Move the data folder from its pre-rename location, once, and return the folder to use.
+ * A link is left at the old path, so a CodePit (or CT) build from before the rename that is
+ * still running, and absolute paths agents were given (uploaded files), keep resolving.
+ * Paths saved in the app's own JSON files are rewritten to the new location.
+ * If the move fails, the old folder stays in use and nothing is lost.
+ */
+export function migrateLegacyAppDir(legacyDir: string, targetDir: string): string {
+  let legacy: fs.Stats;
+  try {
+    legacy = fs.lstatSync(legacyDir);
+  } catch {
+    return targetDir; // nothing to move
+  }
+  // Already moved (the old path is our link), or both exist: never merge, use the new one
+  if (!legacy.isDirectory() || fs.existsSync(targetDir)) return targetDir;
+  try {
+    fs.renameSync(legacyDir, targetDir);
+  } catch (err: any) {
+    console.warn(`[codepit] Could not move ${legacyDir} to ${targetDir}; still using the old folder: ${err.message}`);
+    return legacyDir;
+  }
+  try {
+    fs.symlinkSync(targetDir, legacyDir, 'dir');
+  } catch (err: any) {
+    console.warn(`[codepit] Moved the data to ${targetDir}, but could not leave a link at ${legacyDir}: ${err.message}`);
+  }
+  rewriteSavedPaths(targetDir, legacyDir);
+  console.log(`[codepit] Moved your data from ${legacyDir} to ${targetDir}`);
+  return targetDir;
+}
+
+/** Point absolute paths saved in the app's JSON files (sessions, settings) at the moved folder. */
+function rewriteSavedPaths(dir: string, legacyDir: string): void {
+  const files: string[] = [];
+  for (const sub of ['', 'sessions']) {
+    try {
+      for (const name of fs.readdirSync(path.join(dir, sub))) {
+        if (name.endsWith('.json')) files.push(path.join(dir, sub, name));
+      }
+    } catch {
+      // no such folder
+    }
+  }
+  const from = legacyDir + path.sep;
+  const to = dir + path.sep;
+  for (const file of files) {
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      if (!text.includes(from)) continue;
+      const tmp = `${file}.migrating`;
+      fs.writeFileSync(tmp, text.split(from).join(to), { mode: FILE_MODE });
+      fs.renameSync(tmp, file);
+    } catch (err: any) {
+      // The link at the old path still resolves this file's paths
+      console.warn(`[codepit] Could not update paths in ${file}: ${err.message}`);
+    }
+  }
 }
 
 export function getSessionsDir(): string {

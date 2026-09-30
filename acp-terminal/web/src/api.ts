@@ -18,14 +18,18 @@ import type {
   VendorSubscriptionInfo,
 } from './types';
 
+export const TOKEN_KEY = 'codepit_token';
+// The key's name before the rename, still read so an open tab stays signed in
+const LEGACY_TOKEN_KEY = 'acp_token';
+
 export function getToken(): string {
   const urlParams = new URLSearchParams(window.location.search);
   const t = urlParams.get('token');
   if (t) {
-    sessionStorage.setItem('acp_token', t);
+    sessionStorage.setItem(TOKEN_KEY, t);
     return t;
   }
-  return sessionStorage.getItem('acp_token') || '';
+  return sessionStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(LEGACY_TOKEN_KEY) || '';
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -33,7 +37,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   headers.set('Content-Type', 'application/json');
   if (token) {
-    headers.set('x-acp-token', token);
+    headers.set('x-codepit-token', token);
   }
 
   const res = await fetch(url, {
@@ -260,7 +264,7 @@ export interface NetworkInfo {
 
 /**
  * Appends the access token to a same-origin URL. Needed where a request can't
- * carry the x-acp-token header: <img src>, links and WebSocket URLs. Without it,
+ * carry the x-codepit-token header: <img src>, links and WebSocket URLs. Without it,
  * LAN clients get 401 on attachments and the live terminal.
  */
 export function withToken(url: string): string {

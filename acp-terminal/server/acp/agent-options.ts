@@ -171,7 +171,7 @@ let cacheDir: string | null = null;
 const cacheFile = () => path.join(getAppDir(), 'agent-options.json');
 
 function loadCache(): OptionsCache {
-  // Tests switch ACP_APP_DIR between runs; reload when it moves
+  // Tests switch CODEPIT_APP_DIR between runs; reload when it moves
   if (cache && cacheDir === getAppDir()) return cache;
   cacheDir = getAppDir();
   try {

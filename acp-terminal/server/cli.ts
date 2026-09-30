@@ -1,11 +1,13 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startServer } from './server.js';
+import { appEnv } from './env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// ACP_DIST_DIR lets parallel UI builds each serve their own bundle.
-const DIST_DIR = process.env.ACP_DIST_DIR ? path.resolve(process.env.ACP_DIST_DIR) : path.resolve(__dirname, '../dist');
+// CODEPIT_DIST_DIR lets parallel UI builds each serve their own bundle.
+const distOverride = appEnv('DIST_DIR');
+const DIST_DIR = distOverride ? path.resolve(distOverride) : path.resolve(__dirname, '../dist');
 
 const handle = await startServer({ staticDir: DIST_DIR });
 const { port, token, lan } = handle;
@@ -23,7 +25,7 @@ if (!lan.enabled) {
   console.log(
     lan.lockedReason
       ? `  🔒 LAN access disabled (HOST=${lan.host}).`
-      : `  🔒 LAN access off. Turn it on from the LAN access dialog, or start with ACP_LAN=1.`
+      : `  🔒 LAN access off. Turn it on from the LAN access dialog, or start with CODEPIT_LAN=1.`
   );
 }
 console.log(`  🔑 Token:   ${token}`);

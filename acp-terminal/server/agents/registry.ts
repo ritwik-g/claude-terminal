@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { AgentDescriptor, ConfigChoice } from '../types.js';
+import { appEnv } from '../env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -201,7 +202,7 @@ export function hasAgent(id: unknown): id is string {
 }
 
 export function listAgents(includeMock?: boolean): AgentDescriptor[] {
-  const shouldInclude = includeMock ?? (process.env.NODE_ENV === 'test' || process.env.ACP_ENABLE_MOCK === '1');
+  const shouldInclude = includeMock ?? (process.env.NODE_ENV === 'test' || appEnv('ENABLE_MOCK') === '1');
   const all = Object.values(AGENT_REGISTRY);
   if (shouldInclude) {
     return all;

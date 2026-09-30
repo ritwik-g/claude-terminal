@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 
 export type ThemePreference = 'system' | 'dark' | 'light';
 
-const STORAGE_KEY = 'acp_theme';
+const STORAGE_KEY = 'codepit_theme';
+// The key's name before the rename, read until the preference is next saved
+const LEGACY_STORAGE_KEY = 'acp_theme';
 
 export function readThemePreference(): ThemePreference {
-  const v = localStorage.getItem(STORAGE_KEY);
+  const v = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
   return v === 'dark' || v === 'light' ? v : 'system';
 }
 
@@ -41,17 +43,18 @@ export function useTheme(): {
   }, [preference]);
 
   const setPreference = useCallback((pref: ThemePreference) => {
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
     if (pref === 'system') localStorage.removeItem(STORAGE_KEY);
     else localStorage.setItem(STORAGE_KEY, pref);
     setPref(pref);
-    window.dispatchEvent(new CustomEvent('acp-theme-change', { detail: pref }));
+    window.dispatchEvent(new CustomEvent('codepit-theme-change', { detail: pref }));
   }, []);
 
   // Keep several hook users (e.g. the xterm theme) in sync.
   useEffect(() => {
     const onExternal = (e: Event) => setPref((e as CustomEvent<ThemePreference>).detail);
-    window.addEventListener('acp-theme-change', onExternal);
-    return () => window.removeEventListener('acp-theme-change', onExternal);
+    window.addEventListener('codepit-theme-change', onExternal);
+    return () => window.removeEventListener('codepit-theme-change', onExternal);
   }, []);
 
   return { preference, resolved, setPreference };

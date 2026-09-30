@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import type { AcpSession, AgentDescriptor, AgentTask, AgentTaskTextDelta, McpServer, SessionSummary } from './types';
-import { api, connectWebSocket } from './api';
+import { api, connectWebSocket, TOKEN_KEY } from './api';
 import { Sidebar } from './components/Sidebar';
 import { SessionDetail, nextPriority } from './components/SessionDetail';
 import { NewSessionModal } from './components/NewSessionModal';
@@ -124,7 +124,7 @@ export const App: React.FC = () => {
   const handleManualTokenSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!tokenInput.trim()) return;
-    sessionStorage.setItem('acp_token', tokenInput.trim());
+    sessionStorage.setItem(TOKEN_KEY, tokenInput.trim());
     window.location.search = `?token=${encodeURIComponent(tokenInput.trim())}`;
   };
 

@@ -5,7 +5,7 @@ import { sessionManager } from './acp/session-mgr.js';
 import { ptyManager } from './pty-manager.js';
 import { store } from './store.js';
 import { getOrCreateToken } from './paths.js';
-import { checkAccess } from './security.js';
+import { checkAccess, headerToken } from './security.js';
 
 /**
  * Sets up the WebSocket endpoints and returns `attach`, which adds them to an HTTP
@@ -27,7 +27,7 @@ export function setupWebSockets(): (server: Server) => void {
     const pathname = url.pathname;
 
     if (pathname === '/ws' || pathname.startsWith('/ws/terminal/')) {
-      const reqToken = url.searchParams.get('token') || (request.headers['x-acp-token'] as string | undefined);
+      const reqToken = url.searchParams.get('token') || headerToken(request.headers);
       const decision = checkAccess(request, reqToken || undefined, getOrCreateToken());
       if (!decision.ok) {
         socket.write(`HTTP/1.1 ${decision.status} ${decision.status === 403 ? 'Forbidden' : 'Unauthorized'}\r\n\r\n`);

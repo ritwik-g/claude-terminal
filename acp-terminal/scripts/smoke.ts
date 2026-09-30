@@ -19,7 +19,7 @@ async function wait(ms: number) {
 function httpGet(url: string, token?: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {};
-    if (token) headers['x-acp-token'] = token;
+    if (token) headers['x-codepit-token'] = token;
 
     http.get(url, { headers }, (res) => {
       let data = '';
@@ -32,12 +32,12 @@ function httpGet(url: string, token?: string): Promise<{ status: number; body: s
 async function runSmokeTest() {
   console.log('💨 [Smoke Test] Launching CodePit Server...');
 
-  // Isolate smoke test storage from the user's real ~/.acp-terminal directory
-  const testAppDir = path.join(os.tmpdir(), `acp-terminal-smoke-app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+  // Isolate smoke test storage from the user's real ~/.codepit directory
+  const testAppDir = path.join(os.tmpdir(), `codepit-smoke-app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
   console.log(`📁 Using isolated test storage: ${testAppDir}\n`);
 
-  // Verify that smoke test does not touch the user's real ~/.acp-terminal directory
-  const realUserSessionsDir = path.join(os.homedir(), '.acp-terminal', 'sessions');
+  // Verify that smoke test does not touch the user's real ~/.codepit directory
+  const realUserSessionsDir = path.join(os.homedir(), '.codepit', 'sessions');
   const initialUserFiles = fs.existsSync(realUserSessionsDir) ? fs.readdirSync(realUserSessionsDir) : [];
 
   const serverProcess = spawn(TSX_BIN, [CLI_PATH], {
@@ -45,7 +45,7 @@ async function runSmokeTest() {
       ...process.env,
       NODE_ENV: 'test',
       PORT: '7891',
-      ACP_APP_DIR: testAppDir,
+      CODEPIT_APP_DIR: testAppDir,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -160,11 +160,11 @@ async function runSmokeTest() {
   } finally {
     serverProcess.kill('SIGINT');
 
-    // Verify no files were leaked to the user's real ~/.acp-terminal/sessions
+    // Verify no files were leaked to the user's real ~/.codepit/sessions
     const finalUserFiles = fs.existsSync(realUserSessionsDir) ? fs.readdirSync(realUserSessionsDir) : [];
     if (finalUserFiles.length !== initialUserFiles.length) {
       console.error(`🚨 LEAK DETECTED: Files added to ${realUserSessionsDir}:`, finalUserFiles.filter(f => !initialUserFiles.includes(f)));
-      throw new Error(`CRITICAL: Smoke test polluted production ~/.acp-terminal/sessions directory!`);
+      throw new Error(`CRITICAL: Smoke test polluted production ~/.codepit/sessions directory!`);
     }
 
     try {

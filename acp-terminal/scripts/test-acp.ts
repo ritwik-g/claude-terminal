@@ -6,10 +6,10 @@ import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import type { IncomingMessage } from 'node:http';
 
-// Isolate test storage from the user's real ~/.acp-terminal directory BEFORE any imports
-const testAppDir = path.join(os.tmpdir(), `acp-terminal-test-app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+// Isolate test storage from the user's real ~/.codepit directory BEFORE any imports
+const testAppDir = path.join(os.tmpdir(), `codepit-test-app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
 process.env.NODE_ENV = 'test';
-process.env.ACP_APP_DIR = testAppDir;
+process.env.CODEPIT_APP_DIR = testAppDir;
 
 // Dynamic imports ensure environment variables are evaluated before any server module is imported
 const { sessionManager } = await import('../server/acp/session-mgr.js');
@@ -41,8 +41,8 @@ async function runTests() {
   console.log('🧪 [Test Suite] Starting CodePit Test Suite...\n');
   console.log(`📁 Using isolated test storage: ${testAppDir}\n`);
 
-  // Verify that test suite is NOT using the user's production ~/.acp-terminal directory
-  const realUserSessionsDir = path.join(os.homedir(), '.acp-terminal', 'sessions');
+  // Verify that test suite is NOT using the user's production ~/.codepit directory
+  const realUserSessionsDir = path.join(os.homedir(), '.codepit', 'sessions');
   const initialUserFiles = fs.existsSync(realUserSessionsDir) ? fs.readdirSync(realUserSessionsDir) : [];
 
   if (getAppDir() !== testAppDir) {
@@ -511,11 +511,11 @@ async function runTests() {
     sessionManager.shutdown();
     store.clear();
 
-    // Verify no files were leaked to the user's real ~/.acp-terminal/sessions
+    // Verify no files were leaked to the user's real ~/.codepit/sessions
     const finalUserFiles = fs.existsSync(realUserSessionsDir) ? fs.readdirSync(realUserSessionsDir) : [];
     if (finalUserFiles.length !== initialUserFiles.length) {
       console.error(`🚨 LEAK DETECTED: Files added to ${realUserSessionsDir}:`, finalUserFiles.filter(f => !initialUserFiles.includes(f)));
-      throw new Error(`CRITICAL: Test suite polluted production ~/.acp-terminal/sessions directory!`);
+      throw new Error(`CRITICAL: Test suite polluted production ~/.codepit/sessions directory!`);
     }
 
     try {

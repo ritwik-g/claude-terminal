@@ -83,6 +83,7 @@ export class PtyManager extends EventEmitter {
       ...envToRecord(opts.env),
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
+      CODEPIT_TERMINAL: '1',
       ACP_TERMINAL: '1',
     };
 
@@ -139,6 +140,7 @@ export class PtyManager extends EventEmitter {
       ...process.env,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
+      CODEPIT_TERMINAL: '1',
       ACP_TERMINAL: '1',
     };
 

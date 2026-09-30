@@ -1,5 +1,5 @@
 import os from 'node:os';
-import type { IncomingMessage } from 'node:http';
+import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
@@ -82,6 +82,12 @@ export function isLocalClient(req: IncomingMessage): boolean {
   return isLoopbackAddress(getRemoteAddress(req)) && isTrustedHost(req.headers.host);
 }
 
+/** The access token sent in a header; x-acp-token is the header's name from before the rename. */
+export function headerToken(headers: IncomingHttpHeaders): string | undefined {
+  const value = headers['x-codepit-token'] ?? headers['x-acp-token'];
+  return typeof value === 'string' ? value : undefined;
+}
+
 export type AccessDecision = { ok: true } | { ok: false; status: 401 | 403; error: string };
 
 /**
@@ -95,7 +101,7 @@ export function checkAccess(req: IncomingMessage, reqToken: string | undefined, 
   }
   if (reqToken && reqToken === token) return { ok: true };
   if (isLocalClient(req)) return { ok: true };
-  return { ok: false, status: 401, error: 'Unauthorized: missing or invalid x-acp-token' };
+  return { ok: false, status: 401, error: 'Unauthorized: missing or invalid x-codepit-token' };
 }
 
 /** True when HOST binds only the loopback interface, so LAN clients cannot connect. */

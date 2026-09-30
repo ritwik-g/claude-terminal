@@ -4,11 +4,12 @@ import os from 'node:os';
 import http from 'node:http';
 import { once } from 'node:events';
 
-// Isolate test storage from the user's real ~/.acp-terminal directory BEFORE any imports
-const testAppDir = path.join(os.tmpdir(), `acp-terminal-lan-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+// Isolate test storage from the user's real ~/.codepit directory BEFORE any imports
+const testAppDir = path.join(os.tmpdir(), `codepit-lan-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
 process.env.NODE_ENV = 'test';
-process.env.ACP_APP_DIR = testAppDir;
+process.env.CODEPIT_APP_DIR = testAppDir;
 // The runtime switch is what's under test; startup overrides would pin it
+delete process.env.CODEPIT_LAN;
 delete process.env.ACP_LAN;
 delete process.env.HOST;
 
@@ -71,19 +72,21 @@ async function runTests() {
   console.log('🧪 [Test Suite] LAN access switch\n');
   console.log(`📁 Using isolated test storage: ${testAppDir}\n`);
 
-  // 1. Startup precedence: saved setting, then ACP_LAN, and HOST pins everything
+  // 1. Startup precedence: saved setting, then CODEPIT_LAN (or the older ACP_LAN), and HOST pins everything
   console.log('1️⃣ Resolving startup network settings...');
   expect(resolveStartupNetwork(false, {}).lanEnabled === false, 'LAN must default to off');
   expect(resolveStartupNetwork(true, {}).lanEnabled === true, 'Saved setting should turn LAN on');
-  expect(resolveStartupNetwork(true, { ACP_LAN: '0' }).lanEnabled === false, 'ACP_LAN=0 should override the saved setting');
-  expect(resolveStartupNetwork(false, { ACP_LAN: '1' }).lanEnabled === true, 'ACP_LAN=1 should override the saved setting');
-  const pinned = resolveStartupNetwork(true, { HOST: '127.0.0.1', ACP_LAN: '1' });
+  expect(resolveStartupNetwork(true, { CODEPIT_LAN: '0' }).lanEnabled === false, 'CODEPIT_LAN=0 should override the saved setting');
+  expect(resolveStartupNetwork(true, { ACP_LAN: '0' }).lanEnabled === false, 'the older ACP_LAN=0 should still override the saved setting');
+  expect(resolveStartupNetwork(false, { CODEPIT_LAN: '1', ACP_LAN: '0' }).lanEnabled === true, 'CODEPIT_LAN should win over ACP_LAN');
+  expect(resolveStartupNetwork(false, { CODEPIT_LAN: '1' }).lanEnabled === true, 'CODEPIT_LAN=1 should override the saved setting');
+  const pinned = resolveStartupNetwork(true, { HOST: '127.0.0.1', CODEPIT_LAN: '1' });
   expect(pinned.host === '127.0.0.1' && !pinned.lanEnabled && pinned.lockedReason, 'Explicit HOST must win and lock the switch');
-  console.log('   ✅ Saved setting, ACP_LAN and HOST applied in order\n');
+  console.log('   ✅ Saved setting, CODEPIT_LAN and HOST applied in order\n');
 
   const handle = await startServer({ port: 0 });
   const { port, token } = handle;
-  const auth = { 'x-acp-token': token };
+  const auth = { 'x-codepit-token': token };
   const lan = { 'x-test-remote-ip': '192.168.1.50', ...auth };
   const openSockets: InstanceType<typeof WebSocket>[] = [];
 

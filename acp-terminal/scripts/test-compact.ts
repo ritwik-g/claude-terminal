@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 const testAppDir = path.join(os.tmpdir(), `acp-compact-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
 process.env.NODE_ENV = 'test';
-process.env.ACP_APP_DIR = testAppDir;
+process.env.CODEPIT_APP_DIR = testAppDir;
 
 const { formatSessionHistory, sessionManager } = await import('../server/acp/session-mgr.js');
 const { autoCompactDecision, latestCompaction, parseAutoCompact, readAutoCompactDefault, HANDOFF_SUMMARY_PROMPT } = await import('../server/compaction.js');

@@ -8,9 +8,9 @@ import type { AddressInfo } from 'node:net';
 // MCP support: config store, secret masking, presets, scoping, injection into
 // ACP session/new, the connection probe and the HTTP API.
 
-const testAppDir = path.join(os.tmpdir(), `acp-terminal-mcp-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+const testAppDir = path.join(os.tmpdir(), `codepit-mcp-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
 process.env.NODE_ENV = 'test';
-process.env.ACP_APP_DIR = testAppDir;
+process.env.CODEPIT_APP_DIR = testAppDir;
 
 const cfg = await import('../server/mcp/config.js');
 const { presetToInput, listPresets } = await import('../server/mcp/presets.js');

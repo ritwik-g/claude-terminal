@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { isLoopbackBind } from './security.js';
+import { appEnv } from './env.js';
 
 /**
  * Returns a list of local IPv4 network addresses (e.g. 192.168.x.x, 10.x.x.x).
@@ -36,7 +37,7 @@ export interface StartupNetwork {
 
 /**
  * How the server starts listening. Loopback always, plus LAN listeners when LAN
- * access is on: the saved setting decides, `ACP_LAN` overrides it for this run,
+ * access is on: the saved setting decides, `CODEPIT_LAN` (or the older `ACP_LAN`) overrides it for this run,
  * and an explicit HOST replaces the whole scheme with that one bind address.
  */
 export function resolveStartupNetwork(storedLanEnabled: boolean, env: NodeJS.ProcessEnv = process.env): StartupNetwork {
@@ -47,7 +48,7 @@ export function resolveStartupNetwork(storedLanEnabled: boolean, env: NodeJS.Pro
       lockedReason: `The server was started with HOST=${env.HOST}, which fixes the address it listens on. Start it without HOST to switch LAN access here.`,
     };
   }
-  const flag = env.ACP_LAN?.toLowerCase();
+  const flag = appEnv('LAN', env)?.toLowerCase();
   const lanEnabled = flag === '1' || flag === 'true' ? true : flag === '0' || flag === 'false' ? false : storedLanEnabled;
   return { host: '127.0.0.1', lanEnabled };
 }

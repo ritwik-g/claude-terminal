@@ -9,10 +9,10 @@ import { fileURLToPath } from 'node:url';
  * model changes that keep the agent process and its conversation.
  */
 
-// Isolate test storage from the user's real ~/.acp-terminal directory BEFORE any imports
-const testAppDir = path.join(os.tmpdir(), `acp-terminal-effort-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+// Isolate test storage from the user's real ~/.codepit directory BEFORE any imports
+const testAppDir = path.join(os.tmpdir(), `codepit-effort-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
 process.env.NODE_ENV = 'test';
-process.env.ACP_APP_DIR = testAppDir;
+process.env.CODEPIT_APP_DIR = testAppDir;
 
 const {
   parseAgentOptions,

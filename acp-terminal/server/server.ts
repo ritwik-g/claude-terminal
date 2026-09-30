@@ -8,7 +8,7 @@ import { setupWebSockets } from './ws.js';
 import { sessionManager } from './acp/session-mgr.js';
 import { getOrCreateToken, initStorage } from './paths.js';
 import { loadStoredCredentials } from './subscriptions.js';
-import { checkAccess } from './security.js';
+import { checkAccess, headerToken } from './security.js';
 import { resolveStartupNetwork } from './network.js';
 import { lanAccess, readStoredLanEnabled, type LanStatus } from './lan.js';
 
@@ -61,8 +61,7 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
     if (!req.path.startsWith('/api')) {
       return next();
     }
-    const headerToken = req.headers['x-acp-token'];
-    const reqToken = typeof headerToken === 'string' ? headerToken : typeof req.query.token === 'string' ? req.query.token : undefined;
+    const reqToken = headerToken(req.headers) ?? (typeof req.query.token === 'string' ? req.query.token : undefined);
     const decision = checkAccess(req, reqToken, token);
     if (decision.ok) {
       return next();

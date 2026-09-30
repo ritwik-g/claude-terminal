@@ -81,7 +81,7 @@ CodePit grew out of Claude Terminal, which pioneered **attention ranking**—sor
 ## Supported Agents
 
 ### 1. Built-in Demo Agent (`mock`)
-- Ships pre-installed and needs no configuration or API keys. It is hidden from the agent picker unless you start the server with `ACP_ENABLE_MOCK=1` (it is always listed under `NODE_ENV=test`).
+- Ships pre-installed and needs no configuration or API keys. It is hidden from the agent picker unless you start the server with `CODEPIT_ENABLE_MOCK=1` (it is always listed under `NODE_ENV=test`).
 - Fully exercises the ACP spec: streaming thoughts, generating text, requesting permissions, and running terminal commands.
 
 ### 2. OpenAI Codex ACP (`codex`)
@@ -107,7 +107,7 @@ Any agent exposing an ACP JSON-RPC interface via `stdio` can be registered in `s
 
 Open **MCP and plugins** in the sidebar (or type `/mcp` in the composer) to give your agents extra tools.
 
-- **Configure once, use everywhere.** Servers are stored in `<ACP_APP_DIR>/mcp.json` (owner-only permissions) and passed to the agent in ACP `session/new` every time an agent starts. Changes apply the next time an agent starts; stop and start a running agent to pick them up.
+- **Configure once, use everywhere.** Servers are stored in `<CODEPIT_APP_DIR>/mcp.json` (owner-only permissions) and passed to the agent in ACP `session/new` every time an agent starts. Changes apply the next time an agent starts; stop and start a running agent to pick them up.
 - **Transports.** `stdio` (a local command), streamable `http`, and legacy `sse`. Each agent only gets the transports it advertises in `mcpCapabilities`: Claude Code takes all three, Codex takes stdio and HTTP. The session header shows how many servers an agent got, and why any were skipped.
 - **Scope.** A server goes to all agents or to one agent. Turn it off with the switch to keep its settings without using it.
 - **Secrets.** Environment variables with secret-looking names and all HTTP header values are masked in the API and the UI after saving. Leave a masked value alone when editing to keep it.
@@ -159,22 +159,23 @@ npm run dev:web
 Open **http://127.0.0.1:5280**.
 
 ### 5. Access from Other Devices (LAN)
-By default the server listens on `127.0.0.1` only, so nothing else on your network can reach it. To use it from a phone, tablet, or another laptop, open the **LAN access** dialog from the sidebar and turn on **Allow devices on your network**. It takes effect immediately (no restart) and is remembered in `~/.acp-terminal/settings.json`; turning it off disconnects every LAN device at once. The switch only works on the computer running the server; other devices see it read-only.
+By default the server listens on `127.0.0.1` only, so nothing else on your network can reach it. To use it from a phone, tablet, or another laptop, open the **LAN access** dialog from the sidebar and turn on **Allow devices on your network**. It takes effect immediately (no restart) and is remembered in `~/.codepit/settings.json`; turning it off disconnects every LAN device at once. The switch only works on the computer running the server; other devices see it read-only.
 
-When LAN access is on, the server keeps its loopback listener and adds one per network interface, and the dialog shows a pre-authenticated URL for each plus the access token. Requests from other machines must carry the token (`?token=` in the URL or the `x-acp-token` header), and cross-origin requests are rejected. Enable it only on networks you trust.
+When LAN access is on, the server keeps its loopback listener and adds one per network interface, and the dialog shows a pre-authenticated URL for each plus the access token. Requests from other machines must carry the token (`?token=` in the URL or the `x-codepit-token` header), and cross-origin requests are rejected. Enable it only on networks you trust.
 
-To decide at startup instead, `ACP_LAN=1 npm start` (or `ACP_LAN=0`) overrides the saved setting for that run.
+To decide at startup instead, `CODEPIT_LAN=1 npm start` (or `CODEPIT_LAN=0`) overrides the saved setting for that run.
 
 ### Environment Variables
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `PORT` | `7890` | HTTP and WebSocket port |
-| `ACP_LAN` | unset | `1` / `0` turns LAN access on or off for this run, overriding the saved setting |
-| `HOST` | `127.0.0.1` | Explicit bind address; overrides `ACP_LAN` and locks the LAN switch in the UI |
-| `ACP_APP_DIR` | `~/.acp-terminal` | Where sessions, credentials and the access token are stored |
+| `CODEPIT_LAN` | unset | `1` / `0` turns LAN access on or off for this run, overriding the saved setting |
+| `HOST` | `127.0.0.1` | Explicit bind address; overrides `CODEPIT_LAN` and locks the LAN switch in the UI |
+| `CODEPIT_APP_DIR` | `~/.codepit` | Where sessions, credentials and the access token are stored |
+| `CODEPIT_ENABLE_MOCK` | unset | `1` lists the built-in demo agent in the agent picker |
 
-The data directory and the `ACP_*` variables keep their pre-CodePit names, so existing sessions carry over unchanged.
+**Upgrading from before the rename:** the first time CodePit starts, it moves `~/.acp-terminal` to `~/.codepit`, leaves a link at the old path, and updates the file paths saved in your sessions, so everything carries over. It never merges folders: if `~/.codepit` already exists, it is used as is. Quit any older build still running before the first start. The old `ACP_*` variable names and the `x-acp-token` header are still accepted; the `CODEPIT_*` names win when both are set.
 
 ---
 

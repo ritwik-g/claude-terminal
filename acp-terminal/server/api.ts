@@ -33,7 +33,7 @@ export const apiRouter = Router();
 // @types/express v5 types route params as string | string[]; express v4 always gives a string
 const sid = (req: Request): string => String(req.params.id);
 
-// Static directory for uploaded files and pictures (under the app dir, so ACP_APP_DIR isolates it)
+// Static directory for uploaded files and pictures (under the app dir, so CODEPIT_APP_DIR isolates it)
 apiRouter.use('/attachments', express.static(getUploadsDir()));
 
 // App-level MCP servers, presets and the agents' own plugins and skills
@@ -41,7 +41,7 @@ apiRouter.use('/mcp', mcpRouter);
 
 // 1. List registered agents
 apiRouter.get('/agents', (req: Request, res: Response) => {
-  // Absent param -> undefined so the registry's env default (test mode / ACP_ENABLE_MOCK) applies
+  // Absent param -> undefined so the registry's env default (test mode / CODEPIT_ENABLE_MOCK) applies
   const includeMock = req.query.includeMock === undefined ? undefined : req.query.includeMock === 'true';
   // With the effort and model choices each agent last advertised, so pickers show them before a session starts
   res.json({ agents: listAgents(includeMock).map((a) => ({ ...a, advertised: advertisedOptions(a.id) })) });
