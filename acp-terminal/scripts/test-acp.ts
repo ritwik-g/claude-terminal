@@ -38,7 +38,7 @@ function fakeRequest(opts: { remote: string; headers?: Record<string, string> })
 }
 
 async function runTests() {
-  console.log('🧪 [Test Suite] Starting ACP Terminal Test Suite...\n');
+  console.log('🧪 [Test Suite] Starting CodePit Test Suite...\n');
   console.log(`📁 Using isolated test storage: ${testAppDir}\n`);
 
   // Verify that test suite is NOT using the user's production ~/.acp-terminal directory
@@ -274,16 +274,20 @@ async function runTests() {
     }
     console.log('   Context handoff lifecycle verified (pending -> injected & cleared)');
 
-    // Test compactSession
-    const compacted = await sessionManager.compactSession(codexSession.id);
-    if (compacted.turns.length !== 1) {
-      throw new Error(`Expected exactly 1 compacted turn, got ${compacted.turns.length}`);
+    // Test compactSession: the mock agent has no compact command, so it writes a handoff summary
+    const turnsBeforeCompact = sessionManager.getSession(codexSession.id)!.turns.length;
+    await sessionManager.compactSession(codexSession.id);
+    await waitForIdle(codexSession.id);
+    const compacted = sessionManager.getSession(codexSession.id)!;
+    const card = compacted.turns[compacted.turns.length - 1];
+    if (compacted.turns.length !== turnsBeforeCompact + 1) {
+      throw new Error(`Compaction must keep the transcript and add one card (had ${turnsBeforeCompact}, now ${compacted.turns.length})`);
     }
-    if (!compacted.turns[0].content?.includes('Session Context Compacted')) {
-      throw new Error('Compacted turn missing "Session Context Compacted" header');
+    if (card.compaction?.status !== 'completed' || card.compaction.method !== 'handoff' || !card.compaction.summary) {
+      throw new Error(`Expected a completed handoff compaction with a summary, got ${JSON.stringify(card.compaction)}`);
     }
-    console.log(`   Compacted session turns from multi-turn history into 1 checkpoint turn`);
-    console.log(`   Compacted checkpoint preview: "${compacted.turns[0].content?.slice(0, 80)}..."`);
+    if (!compacted.contextHandoffPending) throw new Error('A handoff compaction must seed the next prompt with its summary');
+    console.log(`   Compaction card: "${card.content}"`);
     console.log('   ✅ Context history transfer & session compaction verified\n');
 
     // 9. Test Full-Text Search
@@ -324,6 +328,54 @@ async function runTests() {
       throw new Error(`Stopping the agent should stop its background work: ${JSON.stringify(bgCall())}`);
     }
     console.log('   ✅ Background work completes after the turn, shows its output, and stops with the agent\n');
+
+    // 9c. Messages sent during a turn queue behind it and drain in order; a stopped turn pauses the queue
+    console.log('9️⃣c Testing the prompt queue...');
+    const qSession = await sessionManager.createSession({ agentId: 'mock', cwd: testDir, title: 'Queue' });
+    const userTexts = () => sessionManager.getSession(qSession.id)!.turns.filter((t) => t.role === 'user').map((t) => t.content);
+    const queued = () => sessionManager.getSession(qSession.id)!.queuedPrompts || [];
+    const drained = async () => {
+      for (let i = 0; i < 200 && (queued().length > 0 || sessionManager.isTurnInFlight(qSession.id)); i++) await new Promise((r) => setTimeout(r, 100));
+    };
+    if ((await sessionManager.queuePrompt(qSession.id, 'queue one')).queued) throw new Error('An idle session should send at once');
+    if (!(await sessionManager.queuePrompt(qSession.id, 'queue two')).queued) throw new Error('A busy session should queue');
+    await sessionManager.queuePrompt(qSession.id, 'queue three');
+    sessionManager.updateQueuedPrompt(qSession.id, queued()[1].id, 'queue three, edited');
+    await drained();
+    if (JSON.stringify(userTexts()) !== JSON.stringify(['queue one', 'queue two', 'queue three, edited'])) {
+      throw new Error(`Queue should drain in order: ${JSON.stringify(userTexts())}`);
+    }
+    await sessionManager.queuePrompt(qSession.id, 'queue four');
+    await sessionManager.queuePrompt(qSession.id, 'queue five');
+    await sessionManager.queuePrompt(qSession.id, 'queue six');
+    await sessionManager.cancelPrompt(qSession.id);
+    await new Promise((r) => setTimeout(r, 800));
+    if (queued().length !== 2 || sessionManager.isTurnInFlight(qSession.id)) throw new Error('A stopped turn must pause the queue');
+    sessionManager.removeQueuedPrompt(qSession.id, queued()[0].id);
+    await sessionManager.sendQueuedNow(qSession.id, queued()[0].id);
+    await drained();
+    if (userTexts().at(-1) !== 'queue six' || userTexts().includes('queue five')) {
+      throw new Error(`Send-now and remove should act on the right items: ${JSON.stringify(userTexts())}`);
+    }
+    console.log('   ✅ Queue drains in order, pauses on stop, and supports edit, remove and send-now\n');
+
+    // 9d. Codex account rate limits (app-server `account/rateLimits/read`) map onto plan windows
+    const { parseCodexRateLimits } = await import('../server/codex-limits.js');
+    const codexLimits = parseCodexRateLimits({
+      rateLimits: {
+        limitId: 'codex',
+        primary: { usedPercent: 20, windowDurationMins: 43200, resetsAt: 1793282029 },
+        secondary: { usedPercent: 3, windowDurationMins: 10080, resetsAt: null },
+        credits: { hasCredits: false, unlimited: false, balance: null },
+        planType: 'go',
+      },
+    });
+    const names = codexLimits.windows?.map((w) => `${w.name}:${w.utilization}`).join(',');
+    if (names !== '30-day window:20,Weekly window:3' || codexLimits.credits !== 'None' || codexLimits.planType !== 'go') {
+      throw new Error(`Codex rate limits parsed wrong: ${JSON.stringify(codexLimits)}`);
+    }
+    if (codexLimits.windows![0].resetsAtMs !== 1793282029000) throw new Error('Codex reset time should be epoch milliseconds');
+    console.log('   ✅ Codex rate limits map onto plan windows and credits\n');
 
     // 10. Regression checks
     console.log('🔟 Regression checks...');

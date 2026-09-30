@@ -12,6 +12,12 @@ import './styles/conversation.css';
 // Apply the saved theme before the first paint so the page doesn't flash.
 applyTheme(readThemePreference());
 
+// The desktop app draws the macOS window buttons over the page (hidden title bar); the
+// sidebar header makes room for them and doubles as the window's drag handle.
+if (/\bElectron\//.test(navigator.userAgent) && /Mac/.test(navigator.platform)) {
+  document.documentElement.dataset.shell = 'desktop-mac';
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />

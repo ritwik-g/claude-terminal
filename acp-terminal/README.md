@@ -1,16 +1,20 @@
-# ACP Terminal
+<p align="center"><img src="build/icon.png" width="112" alt="CodePit icon: a pit board showing a terminal prompt"></p>
 
-**A vendor-agnostic, attention-ranked workspace for AI coding agents powered by the Agent Client Protocol (ACP).**
+# CodePit
+
+**A pit wall for your coding agents.**
+
+CodePit is a vendor-agnostic, attention-ranked workspace for AI coding agents, powered by the Agent Client Protocol (ACP). Like a race team's pit wall, it watches every car on track and calls in the one that needs you.
 
 Work seamlessly across **Claude Code**, **OpenAI Codex**, **Google Gemini**, and custom agents from a single unified interface. When you hit a quota or rate limit on one provider, failover to another with a single click while preserving your repository context, git state, and active goal.
 
 ---
 
-## Why ACP Terminal?
+## Why CodePit?
 
-Claude Terminal pioneered **attention ranking**—sorting AI coding sessions by *who needs you right now* rather than recency. But it was bound to Claude Code's internal disk formats (`~/.claude/projects/` and `~/.claude/sessions/`).
+CodePit grew out of Claude Terminal, which pioneered **attention ranking**—sorting AI coding sessions by *who needs you right now* rather than recency. But Claude Terminal was bound to Claude Code's internal disk formats (`~/.claude/projects/` and `~/.claude/sessions/`).
 
-**ACP Terminal** re-architects that concept on top of the open **Agent Client Protocol (ACP)** (standardized by Zed Industries and JetBrains):
+**CodePit** (called ACP Terminal while it was being built) rebuilds that concept on top of the open **Agent Client Protocol (ACP)** (standardized by Zed Industries and JetBrains):
 
 1. **Vendor Agnostic**: Switch between Anthropic Claude Code, OpenAI Codex, and Google Gemini based on task complexity, pricing, or rate-limit exhaustion.
 2. **First-Class Attention Ranking**: Sessions transition cleanly through *Blocked*, *Needs you*, *Working*, *Parked*, and *Quiet* based on real JSON-RPC protocol events rather than transcript heuristics.
@@ -22,7 +26,7 @@ Claude Terminal pioneered **attention ranking**—sorting AI coding sessions by 
 
 ## Feature Comparison
 
-| Feature | Original Claude Terminal | ACP Terminal |
+| Feature | Claude Terminal (where it started) | CodePit |
 | :--- | :--- | :--- |
 | **Agent Support** | Claude Code only | **Claude Code, OpenAI Codex, Gemini CLI, & Custom ACP Agents** |
 | **Attention Ranking** | *Needs you / Working / Parked / Quiet / Snoozed* | **Identical 5-tier attention ranking + inspectable score reasons** |
@@ -39,7 +43,7 @@ Claude Terminal pioneered **attention ranking**—sorting AI coding sessions by 
 
 ```
                       ┌────────────────────────────────────────┐
-                      │   ACP Terminal Web UI (React + Vite)   │
+                      │     CodePit Web UI (React + Vite)      │
                       │   • Attention-Ranked Sidebar           │
                       │   • Embedded @xterm/xterm Pane         │
                       │   • Approval / Permission Banners      │
@@ -155,20 +159,22 @@ npm run dev:web
 Open **http://127.0.0.1:5280**.
 
 ### 5. Access from Other Devices (LAN)
-The server listens on `127.0.0.1` only, so nothing else on your network can reach it. To use it from a phone, tablet, or another laptop, opt in:
-```bash
-ACP_LAN=1 npm start
-```
-This binds `0.0.0.0` and prints a pre-authenticated `Network:` URL for each interface; the **📡 LAN Access** button in the sidebar shows the same URLs and the access token. Requests from other machines must carry the token (`?token=` in the URL or the `x-acp-token` header), and cross-origin requests are rejected. Enable it only on networks you trust.
+By default the server listens on `127.0.0.1` only, so nothing else on your network can reach it. To use it from a phone, tablet, or another laptop, open the **LAN access** dialog from the sidebar and turn on **Allow devices on your network**. It takes effect immediately (no restart) and is remembered in `~/.acp-terminal/settings.json`; turning it off disconnects every LAN device at once. The switch only works on the computer running the server; other devices see it read-only.
+
+When LAN access is on, the server keeps its loopback listener and adds one per network interface, and the dialog shows a pre-authenticated URL for each plus the access token. Requests from other machines must carry the token (`?token=` in the URL or the `x-acp-token` header), and cross-origin requests are rejected. Enable it only on networks you trust.
+
+To decide at startup instead, `ACP_LAN=1 npm start` (or `ACP_LAN=0`) overrides the saved setting for that run.
 
 ### Environment Variables
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `PORT` | `7890` | HTTP and WebSocket port |
-| `ACP_LAN` | unset | `1` binds `0.0.0.0` so devices on your local network can connect |
-| `HOST` | `127.0.0.1` | Explicit bind address; overrides `ACP_LAN` |
+| `ACP_LAN` | unset | `1` / `0` turns LAN access on or off for this run, overriding the saved setting |
+| `HOST` | `127.0.0.1` | Explicit bind address; overrides `ACP_LAN` and locks the LAN switch in the UI |
 | `ACP_APP_DIR` | `~/.acp-terminal` | Where sessions, credentials and the access token are stored |
+
+The data directory and the `ACP_*` variables keep their pre-CodePit names, so existing sessions carry over unchanged.
 
 ---
 

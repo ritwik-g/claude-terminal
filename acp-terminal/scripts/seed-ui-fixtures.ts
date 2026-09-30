@@ -243,7 +243,107 @@ const s6 = session({
   usage: { inputTokens: 171_000, outputTokens: 22_000, cachedTokens: 120_000, contextTokens: 171_000 },
 });
 
-for (const s of [s1, s2, s3, s4, s5, s6]) {
+// 7. Agent tasks: subagents (one nested), background commands and a workflow, for the Agents tab.
+const t7 = now - 40 * min;
+const reviewer = tool(
+  {
+    title: 'Review the payment retry logic', kind: 'think', toolName: 'Agent', isSubagent: true, subagentType: 'code-reviewer',
+    description: 'Review the payment retry logic',
+    input: { description: 'Review the payment retry logic', subagent_type: 'code-reviewer', prompt: 'Read src/payments/retry.ts and its tests. Report any path where a charge can be retried twice, with file:line.' },
+    output: 'One double-charge path: `retry.ts:88` retries after a timeout without checking the idempotency key.\nagentId: r1\n<usage>subagent_tokens: 24190\ntool_uses: 5\nduration_ms: 41200</usage>',
+    agentUsage: { totalTokens: 24190, toolUses: 5, durationMs: 41200 },
+  },
+  t7 + 10_000
+);
+reviewer.completedAt = t7 + 51_200;
+const inner = tool(
+  {
+    title: 'Find callers of chargeCard', kind: 'think', toolName: 'Agent', isSubagent: true, subagentType: 'Explore', parentToolUseId: reviewer.id,
+    description: 'Find callers of chargeCard', input: { description: 'Find callers of chargeCard', prompt: 'List every caller of chargeCard() under src/.' },
+    output: '3 callers: checkout.ts:40, retry.ts:88, admin/refund.ts:12', agentUsage: { totalTokens: 6400, toolUses: 2, durationMs: 9000 },
+  },
+  t7 + 20_000
+);
+inner.completedAt = t7 + 29_000;
+const reviewerCalls = [
+  tool({ title: 'Read: src/payments/retry.ts', kind: 'read', toolName: 'Read', input: { file_path: '/repo/src/payments/retry.ts' }, output: '88  if (err.timeout) return chargeCard(order);', parentToolUseId: reviewer.id }, t7 + 12_000),
+  tool({ title: '$ npm test -- retry', kind: 'execute', toolName: 'Bash', input: { command: 'npm test -- retry' }, output: 'PASS src/payments/retry.test.ts (4 tests)', exitCode: 0, parentToolUseId: reviewer.id }, t7 + 15_000),
+  inner,
+  tool({ title: 'Grep', kind: 'search', toolName: 'Grep', input: { pattern: 'chargeCard\\(' }, output: 'src/checkout.ts\nsrc/payments/retry.ts\nsrc/admin/refund.ts', parentToolUseId: inner.id }, t7 + 22_000),
+  tool({ title: 'Read: src/admin/refund.ts', kind: 'read', toolName: 'Read', input: { file_path: '/repo/src/admin/refund.ts' }, output: '12  await chargeCard(order, { negate: true });', parentToolUseId: inner.id }, t7 + 25_000),
+];
+const devServer = tool({ title: '$ npm run dev', kind: 'execute', toolName: 'Bash', description: 'Start the dev server', input: { command: 'npm run dev', run_in_background: true }, output: 'ready on http://localhost:3000\nGET /checkout 200 in 41ms', background: true, backgroundState: 'stopped', backgroundSummary: 'Stopped when the agent was stopped', backgroundEndedAt: t7 + 30 * min }, t7 + 5_000);
+const e2e = tool({ title: '$ npm run e2e', kind: 'execute', toolName: 'Bash', description: 'Run the checkout end-to-end tests', input: { command: 'npm run e2e -- checkout', run_in_background: true }, output: '2 failed: checkout › retries a declined card once', background: true, backgroundState: 'failed', backgroundSummary: 'Exited with code 1', backgroundEndedAt: t7 + 4 * min }, t7 + 60_000);
+const wf = tool({ title: 'Workflow', kind: 'other', toolName: 'Workflow', input: { name: 'pr-review' }, output: 'Workflow started' }, t7 + 5 * min);
+const failedAgent = tool({ title: 'Update the retry docs', kind: 'think', toolName: 'Agent', isSubagent: true, subagentType: 'general-purpose', status: 'failed', description: 'Update the retry docs', input: { description: 'Update the retry docs', prompt: 'Update docs/payments.md to describe the idempotency check.' }, error: 'Permission denied: Edit docs/payments.md' }, t7 + 7 * min);
+const s7 = session({
+  title: 'Stop double charges on retry',
+  agentId: 'claude',
+  agentName: 'Claude Code (ACP)',
+  model: 'sonnet',
+  cwd: repo('payments', true),
+  git: { branch: 'fix/double-charge', uncommittedFiles: 2, unpushedCommits: 0 } as AcpSession['git'],
+  turns: [
+    userTurn('Customers are being charged twice when the card processor times out. Find out why and fix it.', t7),
+    agentTurn(
+      [
+        'Starting the dev server in the background and asking a reviewer to trace the retry path.',
+        devServer,
+        reviewer,
+        ...reviewerCalls,
+        'The reviewer found it: `retry.ts:88` retries on timeout without the idempotency key. Running the end-to-end suite and a review workflow next.',
+        e2e,
+        wf,
+        failedAgent,
+        'Fixed the retry to reuse the idempotency key. The docs update was denied; tell me if you want me to retry it.',
+      ],
+      t7 + 2_000
+    ),
+  ],
+  agentTasks: [
+    {
+      id: devServer.id, kind: 'background', title: 'Start the dev server', prompt: 'npm run dev', agentType: 'shell', status: 'stopped',
+      startedAt: t7 + 5_000, endedAt: t7 + 30 * min, toolCallId: devServer.id, asyncTaskId: 'b-dev', summary: 'Stopped when the agent was stopped',
+    },
+    {
+      id: reviewer.id, kind: 'subagent', title: 'Review the payment retry logic', prompt: (reviewer.input as any).prompt, agentType: 'code-reviewer',
+      status: 'completed', startedAt: t7 + 10_000, endedAt: t7 + 51_200, toolCallId: reviewer.id, usage: { totalTokens: 24190, toolUses: 5, durationMs: 41200 },
+      segments: [
+        { kind: 'thought', id: id('seg'), text: 'Start with the retry module itself, then check who calls chargeCard.' },
+        { kind: 'tool', id: id('seg'), toolCallId: reviewerCalls[0].id },
+        { kind: 'text', id: id('seg'), text: 'Line 88 retries on timeout. Checking whether the tests cover a timeout after a successful charge.' },
+        { kind: 'tool', id: id('seg'), toolCallId: reviewerCalls[1].id },
+        { kind: 'tool', id: id('seg'), toolCallId: inner.id },
+        { kind: 'text', id: id('seg'), text: 'One double-charge path: `retry.ts:88` retries after a timeout without checking the idempotency key. The tests only cover declines, never a timeout after the processor accepted the charge.' },
+      ],
+    },
+    {
+      id: inner.id, kind: 'subagent', title: 'Find callers of chargeCard', prompt: 'List every caller of chargeCard() under src/.', agentType: 'Explore',
+      status: 'completed', startedAt: t7 + 20_000, endedAt: t7 + 29_000, toolCallId: inner.id, parentTaskId: reviewer.id, usage: { totalTokens: 6400, toolUses: 2, durationMs: 9000 },
+      segments: [
+        { kind: 'tool', id: id('seg'), toolCallId: reviewerCalls[3].id },
+        { kind: 'tool', id: id('seg'), toolCallId: reviewerCalls[4].id },
+        { kind: 'text', id: id('seg'), text: '3 callers: `checkout.ts:40`, `retry.ts:88`, `admin/refund.ts:12`.' },
+      ],
+    },
+    {
+      id: e2e.id, kind: 'background', title: 'Run the checkout end-to-end tests', prompt: 'npm run e2e -- checkout', agentType: 'shell', status: 'failed',
+      startedAt: t7 + 60_000, endedAt: t7 + 4 * min, toolCallId: e2e.id, asyncTaskId: 'b-e2e', summary: 'Exited with code 1',
+    },
+    {
+      id: wf.id, kind: 'workflow', title: 'pr-review', prompt: 'Review the retry fix before it ships', agentType: 'workflow', status: 'completed',
+      startedAt: t7 + 5 * min, endedAt: t7 + 11 * min, toolCallId: wf.id, asyncTaskId: 'w-1', usage: { totalTokens: 88_000, toolUses: 31, durationMs: 6 * min },
+      summary: 'Three reviewers agreed: ship it after adding a timeout test.',
+    },
+    {
+      id: failedAgent.id, kind: 'subagent', title: 'Update the retry docs', prompt: 'Update docs/payments.md to describe the idempotency check.', agentType: 'general-purpose',
+      status: 'failed', startedAt: t7 + 7 * min, endedAt: t7 + 7 * min + 4_000, toolCallId: failedAgent.id,
+    },
+  ],
+});
+for (const c of reviewerCalls) c.agentTaskId = c.parentToolUseId;
+
+for (const s of [s1, s2, s3, s4, s5, s6, s7]) {
   fs.writeFileSync(path.join(sessionsDir, `${s.id}.json`), JSON.stringify(s, null, 2), { mode: 0o600 });
 }
-console.log(`Seeded 6 sessions into ${sessionsDir} (repos under ${workRoot}).`);
+console.log(`Seeded 7 sessions into ${sessionsDir} (repos under ${workRoot}).`);

@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { AcpSession, AgentDescriptor } from '../types';
+import type { AcpSession, AgentDescriptor, ThinkingEffort } from '../types';
 import { api } from '../api';
 import { Badge, Button, Icon, IconButton, Input, Kbd, Segmented, Switch } from '../ui';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
 import { cx } from './sessionMeta';
+import { AUTO_EFFORT, effortChoices, effortLabel, modelChoices, sameModel, sessionEffortChoices } from '../effort';
 
-type Effort = 'off' | 'low' | 'medium' | 'high';
+type Effort = ThinkingEffort;
 type ContextMode = 'compact' | 'full' | 'none';
 
 const CONTEXT_MODE_HELP: Record<ContextMode, string> = {
@@ -34,8 +35,15 @@ export const ModelSwitcher: React.FC<{
   const [showAdvanced, setShowAdvanced] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const currentModelMeta = getModelMeta(session.model || 'sonnet');
-  const activeEffort: Effort = (session.effort as Effort) || 'medium';
+  // Levels come from the agent for this exact model (Claude Haiku has none, some Codex models add Ultra)
+  const efforts = sessionEffortChoices(session, agents);
+  const activeEffort: Effort = session.effort || AUTO_EFFORT;
+  // What the agent reports it is running; with Auto that is its own choice
+  const agentDefault = session.agentOptions?.currentEffort;
+  const autoHint =
+    activeEffort === AUTO_EFFORT && agentDefault && efforts.some((e) => e.value === agentDefault)
+      ? `Auto lets the agent choose. It is using ${effortLabel(agentDefault, efforts)} now.`
+      : null;
 
   // Focus the active model so arrow keys start from there.
   useEffect(() => {
@@ -62,7 +70,7 @@ export const ModelSwitcher: React.FC<{
   };
 
   const handleInPlaceSwitch = async (targetAgentId: string, targetModel?: string) => {
-    if (targetAgentId === session.agentId && (targetModel === session.model || !targetModel)) {
+    if (targetAgentId === session.agentId && (!targetModel || sameModel(targetModel, session.model))) {
       onClose();
       return;
     }
@@ -103,8 +111,10 @@ export const ModelSwitcher: React.FC<{
     setCustomModelInput('');
   };
 
+  // What each agent advertised (new models, 1M-context variants), else the registry list;
+  // the session's own agent has just reported its list, which beats the one loaded with the page
   const groups = agents
-    .map((agent) => ({ agent, models: agent.availableModels || [] }))
+    .map((agent) => ({ agent, models: modelChoices(agent, agent.id === session.agentId ? session.agentOptions : undefined) }))
     .filter((g) => g.models.length > 0);
 
   return (
@@ -118,24 +128,31 @@ export const ModelSwitcher: React.FC<{
         <IconButton icon="x" size="sm" label="Close" onClick={onClose} />
       </div>
 
-      {currentModelMeta.supportsEffort && (
-        <div className="ws-model-effort">
+      {efforts.length > 0 ? (
+        <div className={cx('ws-model-effort', efforts.length > 3 && 'is-stacked')}>
           <span className="ws-model-effort-label">
             <Icon name="brain" size={13} />
             Thinking effort
           </span>
           <Segmented<Effort>
             size="sm"
+            block={efforts.length > 3}
             label="Thinking effort"
             value={activeEffort}
             onChange={handleSetEffort}
             options={[
-              { value: 'off', label: 'Off' },
-              { value: 'low', label: 'Low' },
-              { value: 'medium', label: 'Medium' },
-              { value: 'high', label: 'High' },
+              { value: AUTO_EFFORT, label: 'Auto', title: "Use the agent's own default for this model" },
+              ...efforts.map((e) => ({ value: e.value, label: effortLabel(e.value, efforts), title: e.description })),
             ]}
           />
+          {autoHint && <div className="ws-model-effort-hint">{autoHint}</div>}
+        </div>
+      ) : (
+        <div className="ws-model-effort">
+          <span className="ws-model-effort-label">
+            <Icon name="brain" size={13} />
+            This model has no effort setting
+          </span>
         </div>
       )}
 
@@ -146,10 +163,19 @@ export const ModelSwitcher: React.FC<{
               <VendorIcon agentId={agent.id} size={12} />
               {agent.name.replace(/ \(ACP\)$/, '')}
             </div>
-            {models.map((mId) => {
+            {models.map((choice) => {
+              const mId = choice.value;
               const meta = getModelMeta(mId);
+              // Advertised models carry the agent's own name and description
+              const advertised = choice.label !== choice.value;
+              const label = advertised ? choice.label : meta.label;
+              const description = advertised ? choice.description || '' : meta.description;
               const isSelected =
-                agent.id === session.agentId && (session.model === mId || (!session.model && mId === agent.defaultModel));
+                agent.id === session.agentId &&
+                (sameModel(session.model, mId) ||
+                  session.agentOptions?.currentModel === mId ||
+                  (!session.model && mId === agent.defaultModel));
+              const hasEffort = effortChoices(agent, mId, isSelected ? session.agentOptions : undefined).length > 0;
               const key = `${agent.id}:${mId}`;
               return (
                 <button
@@ -166,14 +192,14 @@ export const ModelSwitcher: React.FC<{
                   </span>
                   <span className="ws-model-text">
                     <span className="ws-model-name">
-                      {meta.label}
-                      {meta.supportsEffort && (
+                      {label}
+                      {hasEffort && (
                         <span className="ws-model-thinking" title="Supports thinking effort">
                           <Icon name="brain" size={11} />
                         </span>
                       )}
                     </span>
-                    <span className="ws-model-desc">{meta.description}</span>
+                    <span className="ws-model-desc">{description}</span>
                   </span>
                   <span className="ws-model-end">
                     {switchingTo === key ? (
@@ -181,7 +207,7 @@ export const ModelSwitcher: React.FC<{
                     ) : isSelected ? (
                       <Icon name="check" size={15} className="ws-model-check" />
                     ) : (
-                      meta.badge && <Badge className="ws-model-badge">{meta.badge.split(' · ')[0]}</Badge>
+                      !advertised && meta.badge && <Badge className="ws-model-badge">{meta.badge.split(' · ')[0]}</Badge>
                     )}
                   </span>
                 </button>

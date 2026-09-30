@@ -31,6 +31,31 @@ export interface AgentDescriptor {
   slashCommands?: SlashCommandItem[];
   /** MCP transports the agent takes in `session/new`; empty when it can't take any. */
   mcpSupport?: { transports: McpTransport[]; note?: string };
+  /** Effort levels to offer before the agent has reported its own; empty when it has no effort setting. */
+  efforts?: ConfigChoice[];
+  /** What the agent last advertised per model, keyed by model id. */
+  advertised?: Record<string, AgentOptions>;
+}
+
+/** One value of an agent's select-style config option. */
+export interface ConfigChoice {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+/** The effort and model choices a running agent advertised (ACP config options). */
+export interface AgentOptions {
+  effortConfigId?: string;
+  /** Effort levels the current model accepts, without the agent's own "default" row. */
+  efforts: ConfigChoice[];
+  effortDefaultValue?: string;
+  recommendedEffort?: string;
+  currentEffort?: string;
+  modelConfigId?: string;
+  models: ConfigChoice[];
+  currentModel?: string;
+  updatedAt: number;
 }
 
 export interface PermissionOption {
@@ -72,6 +97,8 @@ export interface ToolCallRecord {
   /** How the background work ended, e.g. the agent's summary or why it was cut off. */
   backgroundSummary?: string;
   backgroundEndedAt?: number;
+  /** Set on calls made inside a subagent or workflow: the id of that AgentTask. */
+  agentTaskId?: string;
 }
 
 /** Chronological parts of an agent turn (see server/types.ts). */
@@ -109,6 +136,28 @@ export interface TurnMessage {
   agentId?: string;
   agentName?: string;
   model?: string;
+  /** Set on the system turn that marks a context compaction (see server/types.ts). */
+  compaction?: CompactionRecord;
+}
+
+export interface CompactionRecord {
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  method: 'native' | 'handoff';
+  trigger: 'manual' | 'auto' | 'agent';
+  startedAt: number;
+  endedAt?: number;
+  preTokens?: number;
+  postTokens?: number;
+  /** postTokens is a rough count of the handoff summary, not a figure the agent reported. */
+  postTokensEstimated?: boolean;
+  summary?: string;
+  error?: string;
+}
+
+/** "Compact when finished": compact after a clean turn once context use passes the threshold. */
+export interface AutoCompactSetting {
+  enabled: boolean;
+  thresholdPercent: number;
 }
 
 export interface GitInfo {
@@ -136,8 +185,16 @@ export interface UserAnnotations {
   autoApprove?: boolean;
 }
 
-export type ThinkingEffort = 'off' | 'low' | 'medium' | 'high';
+/** 'auto' (the agent's own default) or a level the agent advertised, e.g. 'xhigh'. */
+export type ThinkingEffort = string;
 export type ContextTransferMode = 'compact' | 'full' | 'none';
+
+export interface QueuedPrompt {
+  id: string;
+  text: string;
+  attachments?: FileAttachment[];
+  queuedAt: number;
+}
 
 export interface AcpSession {
   id: string;
@@ -175,6 +232,16 @@ export interface AcpSession {
   plan?: PlanEntry[];
   /** App-level MCP servers handed to the agent when it last started. */
   mcp?: SessionMcpInfo;
+  /** Messages sent while a turn was running; the next one goes out when a turn ends cleanly. */
+  queuedPrompts?: QueuedPrompt[];
+  /** Subagents, background tasks and workflows the agent launched, oldest first. */
+  agentTasks?: AgentTask[];
+  /** Effort and model choices the agent advertised when it last ran. */
+  agentOptions?: AgentOptions;
+  /** Context window the agent reported; the model table is only a fallback. */
+  contextWindow?: number;
+  /** "Compact when finished" for this session. */
+  autoCompact?: AutoCompactSetting;
 }
 
 export interface SessionSummary {
@@ -213,6 +280,11 @@ export interface VendorRateLimits {
   fiveHour?: VendorRateLimitWindow | null;
   weeklyAll?: VendorRateLimitWindow | null;
   weeklyModels?: Array<{ name: string; utilization: number; resetsAt?: string | null }>;
+  /** Windows of any length (Codex reports e.g. a 30-day window); resetsAtMs is an epoch time. */
+  windows?: Array<{ name: string; utilization: number; resetsAtMs?: number }>;
+  /** Codex credit balance: 'None', 'Unlimited' or the balance. */
+  credits?: string;
+  planType?: string;
   updatedAt?: number;
 }
 
@@ -359,4 +431,50 @@ export interface EcosystemReport {
   mcpServers: Array<{ name: string; transport?: string; enabled?: boolean }>;
   manageHint: string;
   warnings: string[];
+}
+
+// ------------------------------------------------------------ Agent tasks
+
+export type AgentTaskKind = 'subagent' | 'background' | 'workflow';
+export type AgentTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
+
+/**
+ * Work the session's agent handed off: a subagent (Claude's Agent/Task tool),
+ * a background shell or monitor, or a workflow run. The tool calls and
+ * messages it produced are tagged with its id so it can be viewed on its own.
+ */
+export interface AgentTask {
+  /** The spawning tool call's id, or `task:<asyncTaskId>` when there is none. */
+  id: string;
+  kind: AgentTaskKind;
+  title: string;
+  /** The task given to it: a subagent's prompt, a command, a workflow description. */
+  prompt?: string;
+  /** Subagent type (e.g. Explore), or the background task type (shell, monitor, workflow). */
+  agentType?: string;
+  status: AgentTaskStatus;
+  startedAt: number;
+  endedAt?: number;
+  /** The tool call that launched it. */
+  toolCallId?: string;
+  /** The AIR async task id, for background work and workflows. */
+  asyncTaskId?: string;
+  /** The task it was launched from, when a subagent launches another. */
+  parentTaskId?: string;
+  /** How it ended, or why it was cut off. */
+  summary?: string;
+  usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
+  /** Its own messages, reasoning and tool calls in the order they happened. */
+  segments?: TurnSegment[];
+}
+
+/** One streamed chunk of a task's text or reasoning; the client appends it to the named segment. */
+export interface AgentTaskTextDelta {
+  taskId: string;
+  segmentId: string;
+  kind: 'text' | 'thought';
+  messageId?: string;
+  text: string;
+  /** For a reply chunk: the spawning call, whose `subagentText` gets it too. */
+  toolCallId?: string;
 }

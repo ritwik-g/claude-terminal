@@ -36,6 +36,11 @@ export function getCredentialsFile(): string {
   return path.join(getAppDir(), 'credentials.json');
 }
 
+/** App-level preferences changed from the UI at runtime (e.g. LAN access). */
+export function getSettingsFile(): string {
+  return path.join(getAppDir(), 'settings.json');
+}
+
 // Dynamic backwards-compatibility getters (evaluated on property access, never frozen at module load)
 export const paths = {
   get APP_DIR(): string { return getAppDir(); },
@@ -45,6 +50,7 @@ export const paths = {
   get TOKEN_FILE(): string { return getTokenFile(); },
   get CREDENTIALS_FILE(): string { return getCredentialsFile(); },
   get UPLOADS_DIR(): string { return getUploadsDir(); },
+  get SETTINGS_FILE(): string { return getSettingsFile(); },
 };
 
 export const DIR_MODE = 0o700;

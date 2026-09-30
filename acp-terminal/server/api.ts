@@ -7,7 +7,8 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import { hasAgent, listAgents } from './agents/registry.js';
-import { sessionManager } from './acp/session-mgr.js';
+import { NothingToCompactError, QueuedPromptNotFoundError, sessionManager } from './acp/session-mgr.js';
+import { parseAutoCompact } from './compaction.js';
 import { TurnInFlightError } from './acp/client-host.js';
 import { searchSessions } from './search.js';
 import { getGitInfo } from './git.js';
@@ -19,10 +20,13 @@ import {
   calculateSessionCost,
   refreshClaudeRateLimitsAsync,
 } from './subscriptions.js';
-import { getLocalNetworkIps, resolveBindHost } from './network.js';
+import { lanAccess } from './lan.js';
+import { describeLanAddresses } from './network.js';
 import { getOrCreateToken, getUploadsDir } from './paths.js';
-import { isLoopbackBind } from './security.js';
+import { isLocalClient } from './security.js';
 import { mcpRouter } from './mcp/routes.js';
+import { advertisedOptions, effortChoicesFor, effortError, isEffortValue } from './acp/agent-options.js';
+import { refreshCodexRateLimitsAsync } from './codex-limits.js';
 
 export const apiRouter = Router();
 
@@ -39,7 +43,8 @@ apiRouter.use('/mcp', mcpRouter);
 apiRouter.get('/agents', (req: Request, res: Response) => {
   // Absent param -> undefined so the registry's env default (test mode / ACP_ENABLE_MOCK) applies
   const includeMock = req.query.includeMock === undefined ? undefined : req.query.includeMock === 'true';
-  res.json({ agents: listAgents(includeMock) });
+  // With the effort and model choices each agent last advertised, so pickers show them before a session starts
+  res.json({ agents: listAgents(includeMock).map((a) => ({ ...a, advertised: advertisedOptions(a.id) })) });
 });
 
 // 2. List attention-ranked sessions
@@ -121,6 +126,59 @@ apiRouter.post('/sessions/:id/prompt', async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// 5b. Queue a prompt behind the running turn (sent at once when the session is free)
+apiRouter.post('/sessions/:id/queue', async (req: Request, res: Response) => {
+  try {
+    const { prompt, attachments } = req.body;
+    if (!prompt && (!attachments || attachments.length === 0)) {
+      res.status(400).json({ error: 'prompt or attachment is required' });
+      return;
+    }
+    if (!store.get(sid(req))) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    res.json(await sessionManager.queuePrompt(sid(req), prompt || '', attachments));
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const queueError = (res: Response, err: any) =>
+  res.status(err instanceof QueuedPromptNotFoundError ? 404 : 500).json({ error: err.message });
+
+apiRouter.patch('/sessions/:id/queue/:queueId', (req: Request, res: Response) => {
+  const { prompt } = req.body;
+  if (typeof prompt !== 'string' || !prompt.trim()) {
+    res.status(400).json({ error: 'prompt is required' });
+    return;
+  }
+  try {
+    const session = sessionManager.updateQueuedPrompt(sid(req), String(req.params.queueId), prompt);
+    res.json({ queuedPrompts: session.queuedPrompts });
+  } catch (err: any) {
+    queueError(res, err);
+  }
+});
+
+apiRouter.delete('/sessions/:id/queue/:queueId', (req: Request, res: Response) => {
+  try {
+    const session = sessionManager.removeQueuedPrompt(sid(req), String(req.params.queueId));
+    res.json({ queuedPrompts: session.queuedPrompts });
+  } catch (err: any) {
+    queueError(res, err);
+  }
+});
+
+apiRouter.post('/sessions/:id/queue/:queueId/send', async (req: Request, res: Response) => {
+  try {
+    await sessionManager.sendQueuedNow(sid(req), String(req.params.queueId));
+    res.json({ ok: true });
+  } catch (err: any) {
+    queueError(res, err);
   }
 });
 
@@ -209,13 +267,29 @@ apiRouter.post('/sessions/:id/rollback', async (req: Request, res: Response) => 
   }
 });
 
-// Compact conversation context in current session
+// Compact the session's context; returns once it has started, progress streams over the socket
 apiRouter.post('/sessions/:id/compact', async (req: Request, res: Response) => {
   try {
     const session = await sessionManager.compactSession(sid(req));
     res.json({ session });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const conflict = err instanceof TurnInFlightError || err instanceof NothingToCompactError;
+    res.status(conflict ? 409 : 500).json({ error: err.message });
+  }
+});
+
+// "Compact when finished": { enabled, thresholdPercent }
+apiRouter.put('/sessions/:id/auto-compact', (req: Request, res: Response) => {
+  const setting = parseAutoCompact(req.body);
+  if (!setting) {
+    res.status(400).json({ error: 'Expected { enabled: boolean, thresholdPercent: number between 5 and 95 }' });
+    return;
+  }
+  try {
+    const session = sessionManager.setAutoCompact(sid(req), setting);
+    res.json({ autoCompact: session.autoCompact });
+  } catch (err: any) {
+    res.status(404).json({ error: err.message });
   }
 });
 
@@ -231,6 +305,11 @@ apiRouter.patch('/sessions/:id/agent', async (req: Request, res: Response) => {
       res.status(400).json({ error: `Unknown agent: ${agentId}` });
       return;
     }
+    // Only the shape is checked here: a level the new model lacks falls back to Auto with a note
+    if (effort !== undefined && !isEffortValue(effort)) {
+      res.status(400).json({ error: 'effort must be a short level name such as auto, low or high' });
+      return;
+    }
     const session = await sessionManager.setSessionAgent(sid(req), agentId, model, effort, contextMode);
     res.json({ session });
   } catch (err: any) {
@@ -242,8 +321,15 @@ apiRouter.patch('/sessions/:id/agent', async (req: Request, res: Response) => {
 apiRouter.patch('/sessions/:id/effort', async (req: Request, res: Response) => {
   try {
     const { effort } = req.body;
-    if (!effort) {
-      res.status(400).json({ error: 'effort is required' });
+    const current = sessionManager.getSession(sid(req));
+    if (!current) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    // Checked against what this agent and model offer, e.g. Claude Opus: low..max, Claude Haiku: none
+    const invalid = effortError(effort, effortChoicesFor(current.agentId, current.model, current.agentOptions));
+    if (invalid) {
+      res.status(400).json({ error: invalid });
       return;
     }
     const session = await sessionManager.setSessionEffort(sid(req), effort);
@@ -410,7 +496,7 @@ apiRouter.post('/subscriptions/config', (req: Request, res: Response) => {
 // 16b. Refresh Provider Rate Limits on Demand
 apiRouter.post('/subscriptions/refresh-limits', async (_req: Request, res: Response) => {
   try {
-    await refreshClaudeRateLimitsAsync();
+    await Promise.all([refreshClaudeRateLimitsAsync(), refreshCodexRateLimitsAsync()]);
     res.json({ success: true, subscriptions: getVendorSubscriptions() });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to refresh limits' });
@@ -447,22 +533,55 @@ apiRouter.get('/sessions/:id/usage', (req: Request, res: Response) => {
 });
 
 // 19. Local Network (LAN) Access Info
-apiRouter.get('/network', (_req: Request, res: Response) => {
+async function networkInfo(req: Request) {
+  const local = isLocalClient(req);
+  // Re-reading interfaces rebinds LAN listeners, so only the host machine triggers it
+  const lan = local ? await lanAccess.refresh() : lanAccess.status();
   const token = getOrCreateToken();
-  const port = Number(process.env.PORT || 7890);
-  const host = resolveBindHost();
-  // A loopback-bound server is unreachable from the LAN, so advertise no network URLs
-  const lanEnabled = !isLoopbackBind(host);
-  const ips = lanEnabled ? getLocalNetworkIps() : [];
-  res.json({
-    port,
-    host,
-    lanEnabled,
+  return {
+    port: lan.port,
+    host: lan.host,
+    lanEnabled: lan.enabled,
     token,
-    ips,
-    localUrl: `http://127.0.0.1:${port}`,
-    networkUrls: ips.map((ip) => `http://${ip}:${port}?token=${token}`),
-  });
+    ips: lan.addresses,
+    localUrl: `http://127.0.0.1:${lan.port}`,
+    networkUrls: lan.addresses.map((ip) => `http://${ip}:${lan.port}?token=${token}`),
+    // Same addresses, labelled (Wi-Fi, VM bridge...) and best first, for the QR code picker
+    lanInterfaces: (await describeLanAddresses(lan.addresses)).map((iface) => ({
+      ...iface,
+      url: `http://${iface.address}:${lan.port}?token=${token}`,
+    })),
+    lanErrors: lan.errors,
+    // Only the machine running the server may change who else can reach it
+    canToggle: local && !lan.lockedReason,
+    lockedReason: lan.lockedReason,
+  };
+}
+
+apiRouter.get('/network', async (req: Request, res: Response) => {
+  res.json(await networkInfo(req));
+});
+
+apiRouter.post('/network/lan', async (req: Request, res: Response) => {
+  if (!isLocalClient(req)) {
+    res.status(403).json({ error: 'LAN access can only be changed on the computer running CodePit' });
+    return;
+  }
+  const { enabled } = req.body ?? {};
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be true or false' });
+    return;
+  }
+  if (lanAccess.status().lockedReason) {
+    res.status(409).json({ error: lanAccess.status().lockedReason });
+    return;
+  }
+  try {
+    await lanAccess.setEnabled(enabled);
+    res.json(await networkInfo(req));
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to change LAN access' });
+  }
 });
 
 function maskSecret(value: unknown): unknown {

@@ -73,6 +73,15 @@ export function isAllowedOrigin(origin: string | undefined, hostHeader: string |
   return Boolean(hostHeader) && parsed.host.toLowerCase() === hostHeader!.toLowerCase();
 }
 
+/**
+ * A client on this machine addressing the server by a local name: the only kind of
+ * client trusted without a token, and the only one allowed to change who else may
+ * connect. The Host check keeps a DNS-rebinding page out even though it is loopback.
+ */
+export function isLocalClient(req: IncomingMessage): boolean {
+  return isLoopbackAddress(getRemoteAddress(req)) && isTrustedHost(req.headers.host);
+}
+
 export type AccessDecision = { ok: true } | { ok: false; status: 401 | 403; error: string };
 
 /**
@@ -85,7 +94,7 @@ export function checkAccess(req: IncomingMessage, reqToken: string | undefined, 
     return { ok: false, status: 403, error: 'Forbidden: cross-origin request rejected' };
   }
   if (reqToken && reqToken === token) return { ok: true };
-  if (isLoopbackAddress(getRemoteAddress(req)) && isTrustedHost(req.headers.host)) return { ok: true };
+  if (isLocalClient(req)) return { ok: true };
   return { ok: false, status: 401, error: 'Unauthorized: missing or invalid x-acp-token' };
 }
 

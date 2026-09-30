@@ -1,0 +1,57 @@
+<!--
+  CodePit app icon. A pit board, the sign a crew holds out over the pit wall,
+  with a ">_" prompt where the position number would go and a chequered footer.
+  Colours follow the dark theme in web/src/design/tokens.css (background,
+  surface, accent and text). Content sits on the macOS 824px grid inside the
+  1024 canvas. (No double hyphens in this comment: XML forbids them.)
+
+  build/icon-small.svg is the same mark without the pole, tilt and chequer, for
+  16 and 32 px where those details turn to noise. Regenerate the PNGs and
+  icon.icns with `node scripts/render-icons.mjs`.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22242c"/>
+      <stop offset="1" stop-color="#0b0c0f"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8a97ff"/>
+      <stop offset="1" stop-color="#5563ee"/>
+    </linearGradient>
+    <linearGradient id="pole" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4a4c57"/>
+      <stop offset="0.5" stop-color="#6b6e7b"/>
+      <stop offset="1" stop-color="#3a3c45"/>
+    </linearGradient>
+    <pattern id="check" x="0" y="0" width="56" height="56" patternUnits="userSpaceOnUse">
+      <rect width="56" height="56" fill="#0b0c10"/>
+      <rect width="28" height="28" fill="#ececef"/>
+      <rect x="28" y="28" width="28" height="28" fill="#ececef"/>
+    </pattern>
+    <clipPath id="panel"><rect x="230" y="284" width="564" height="342" rx="20"/></clipPath>
+    <clipPath id="squircle"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <g clip-path="url(#squircle)">
+    <!-- Tilted a little, as a board held out to a passing car would be -->
+    <g transform="rotate(-6 512 470)">
+      <!-- Pole: runs off the bottom edge, held from outside the frame -->
+      <rect x="490" y="600" width="44" height="420" fill="url(#pole)"/>
+      <g filter="url(#shadow)">
+        <rect x="196" y="250" width="632" height="410" rx="48" fill="url(#frame)"/>
+      </g>
+      <rect x="230" y="284" width="564" height="342" rx="20" fill="#0b0c10"/>
+      <!-- Chequered footer: two rows of 28px squares -->
+      <g clip-path="url(#panel)">
+        <g transform="translate(230 570)"><rect width="564" height="56" fill="url(#check)"/></g>
+      </g>
+      <path d="M338 336 L434 414 L338 492" fill="none" stroke="#ffffff" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M496 492 H676" fill="none" stroke="#ffffff" stroke-width="56" stroke-linecap="round"/>
+    </g>
+  </g>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#ffffff" stroke-opacity="0.09"/>
+</svg>

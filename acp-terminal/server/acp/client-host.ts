@@ -6,12 +6,20 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import * as acp from '@agentclientprotocol/sdk';
 import { ptyManager } from '../pty-manager.js';
-import type { AgentDescriptor, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
+import type { AgentDescriptor, AgentOptions, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
 import { appliesTo, listMcpServers, resolveSessionMcpServers } from '../mcp/config.js';
+import { effortToSend, parseAgentOptions, resolveModelValue } from './agent-options.js';
 
 export function normalizeClaudeModel(model?: string): string {
   if (!model) return 'sonnet';
   const m = model.toLowerCase().trim();
+  // Keep a context variant ("opus[1m]", "claude-sonnet-5-1m"): it picks the 1M window
+  const hint = m.match(/^(.+?)(?:\[(\d+m)\]|-(\d+m))$/);
+  if (hint) return `${normalizeClaudeModel(hint[1])}[${hint[2] ?? hint[3]}]`;
+  // A full Claude model id the adapter advertises ("claude-sonnet-5", "claude-opus-4-8") stays as is
+  if (/^claude-(opus|sonnet|haiku|fable|mythos)-\d+(-\d+)?$/.test(m)) return m;
+  if (m.includes('fable-5-1') || m.includes('fable-5.1')) return 'claude-fable-5-1';
+  if (m.includes('fable')) return 'claude-fable-5';
   if (m === 'sonnet' || m === 'opus' || m === 'haiku') return m;
   if (m.includes('opus-4-6') || m.includes('opus-4.6')) return 'claude-opus-4-6';
   if (m.includes('opus-4-5') || m.includes('opus-4.5')) return 'claude-opus-4-5';
@@ -66,6 +74,12 @@ export interface ClientHostEvents {
   turnCompleted: (stopReason: string) => void;
   promptSuggestion: (suggestion: string) => void;
   asyncTask: (update: AsyncTaskUpdate) => void;
+  availableCommands: (names: string[]) => void;
+  compaction: (update: CompactionEvent) => void;
+  /** Effort and model choices the agent advertised (session/new, set_config_option, config_option_update). */
+  agentOptions: (options: AgentOptions) => void;
+  /** The context window the agent reported with usage (ACP usage_update.size). */
+  contextWindow: (size: number) => void;
   error: (err: Error) => void;
   closed: () => void;
 }
@@ -89,14 +103,20 @@ export class AcpClientHost extends EventEmitter {
   public mcpInfo: SessionMcpInfo | null = null;
   public isTurnInFlight = false;
   public lastActivityAt = Date.now();
+  /** Command names (no leading slash) from the agent's latest available_commands_update. */
+  public availableCommands: string[] = [];
+  /** The agent's latest effort and model choices; null until it advertises any. */
+  public options: AgentOptions | null = null;
+  private holdOptions = false;
 
   constructor(
     public readonly sessionRecordId: string,
     public readonly agent: AgentDescriptor,
     public readonly cwd: string,
     private readonly isAutoApprove?: () => boolean,
-    public readonly model?: string,
-    public readonly effort?: string
+    // Both change in place when the running agent accepts a new value
+    public model?: string,
+    public effort?: string
   ) {
     super();
     this.closeSignal = new Promise<never>((_resolve, reject) => {
@@ -151,19 +171,9 @@ export class AcpClientHost extends EventEmitter {
       env.GEMINI_MODEL = this.model;
       env.MODEL = this.model;
     }
-    if (this.effort) {
-      env.REASONING_EFFORT = this.effort;
-      env.THINKING_EFFORT = this.effort;
-      if (this.effort === 'off') {
-        env.MAX_THINKING_TOKENS = '0';
-      } else if (this.effort === 'low') {
-        env.MAX_THINKING_TOKENS = '2048';
-      } else if (this.effort === 'medium') {
-        env.MAX_THINKING_TOKENS = '8192';
-      } else if (this.effort === 'high') {
-        env.MAX_THINKING_TOKENS = '32768';
-      }
-    }
+    // Effort goes through the agent's own config option after session/new, so it can
+    // change without a restart. (A MAX_THINKING_TOKENS budget here would pin Claude's
+    // thinking, and current Claude models reject a fixed budget outright.)
 
     this.child = spawn(cmd, this.agent.args, {
       cwd: this.cwd,
@@ -189,7 +199,7 @@ export class AcpClientHost extends EventEmitter {
     const stream = acp.ndJsonStream(input, output);
 
     const clientApp = acp.client({
-      name: 'acp-terminal',
+      name: 'codepit',
     });
 
     // 1. Permission requests from agent
@@ -365,10 +375,16 @@ export class AcpClientHost extends EventEmitter {
             outputTokens: 0,
             cachedTokens: 0,
           });
+          if (typeof update.size === 'number' && update.size > 0) this.emit('contextWindow', update.size);
           const rateLimit = (update._meta as any)?.['_claude/rateLimit'] || (update as any).rate_limit_info;
           if (rateLimit) {
             this.emit('rateLimitUpdate', rateLimit);
           }
+          break;
+        }
+        case 'config_option_update': {
+          // Sent when the agent changes options itself, e.g. a model switch typed as /model
+          this.setOptions(update.configOptions);
           break;
         }
         case 'session_info_update': {
@@ -376,6 +392,20 @@ export class AcpClientHost extends EventEmitter {
           if (suggestion && typeof suggestion === 'string') {
             this.emit('promptSuggestion', suggestion);
           }
+          break;
+        }
+        case 'available_commands_update': {
+          const names = Array.isArray(update.availableCommands)
+            ? update.availableCommands.map((c: any) => (typeof c?.name === 'string' ? c.name.replace(/^\//, '') : '')).filter(Boolean)
+            : [];
+          this.availableCommands = names;
+          this.emit('availableCommands', names);
+          break;
+        }
+        case 'compaction_update':
+        case 'compaction_summary_chunk': {
+          const parsed = parseCompactionUpdate(update);
+          if (parsed) this.emit('compaction', parsed);
           break;
         }
       }
@@ -407,6 +437,9 @@ export class AcpClientHost extends EventEmitter {
           writeTextFile: true,
         },
         terminal: true,
+        // Compaction runs (the agent's own /compact, or its automatic one) are
+        // reported as compaction_update lifecycles with a retained summary.
+        session: { compaction: {} },
         _meta: {
           // Agents that run shell commands themselves (Claude Code, Codex) only
           // report command output and exit codes when the client asks for it.
@@ -446,34 +479,94 @@ export class AcpClientHost extends EventEmitter {
     this.sessionId = sessionRes.sessionId;
     this.mcpInfo = mcp.info;
 
-    // Apply model if specified
+    // Reported once the model and effort below are applied, so listeners never see the
+    // options of the agent's default model in place of the chosen one
+    this.holdOptions = true;
+    this.setOptions(sessionRes.configOptions);
+    try {
+      await this.applyStartOptions();
+    } finally {
+      this.holdOptions = false;
+    }
+    if (this.options) this.emit('agentOptions', this.options);
+  }
+
+  private async applyStartOptions(): Promise<void> {
+    // Apply model if specified: the advertised value it matches, else the id as stored
     if (this.model) {
-      const modelToSend = this.agent.id === 'claude' ? normalizeClaudeModel(this.model) : this.model;
-      try {
-        await this.untilClosed(connection.agent.request(acp.methods.agent.session.setConfigOption, {
-          sessionId: this.sessionId,
-          configId: 'model',
-          value: modelToSend,
-        }));
-      } catch (err) {
-        if (err instanceof HostClosedError) throw err;
-        // Fallback gracefully if agent doesn't support session/setConfigOption
+      const advertised = resolveModelValue(this.model, this.options?.models ?? []);
+      const modelToSend = advertised ?? (this.agent.id === 'claude' ? normalizeClaudeModel(this.model) : this.model);
+      if (modelToSend !== this.options?.currentModel) {
+        try {
+          await this.setConfigValue(this.options?.modelConfigId ?? 'model', modelToSend);
+        } catch (err) {
+          if (err instanceof HostClosedError) throw err;
+          // Fallback gracefully if agent doesn't support session/setConfigOption
+        }
       }
     }
 
-    // Apply effort if specified
-    if (this.effort) {
+    // Apply effort against the levels this model offers; 'auto' uses the agent's own default.
+    // A level the model lacks is left out; the session manager resets it to Auto and says so.
+    const effort = effortToSend(this.effort, this.options);
+    // Sent even when it matches the current value: an explicit pick then follows model switches
+    if (effort.value) {
       try {
-        await this.untilClosed(connection.agent.request(acp.methods.agent.session.setConfigOption, {
-          sessionId: this.sessionId,
-          configId: 'effort',
-          value: this.effort,
-        }));
+        await this.setConfigValue(this.options?.effortConfigId ?? 'effort', effort.value);
       } catch (err) {
         if (err instanceof HostClosedError) throw err;
         // Fallback gracefully if agent doesn't support effort config
       }
     }
+  }
+
+  /** Take a configOptions list from the agent; ignored when it sent none. */
+  private setOptions(configOptions: unknown): void {
+    const parsed = parseAgentOptions(configOptions);
+    if (!parsed) return;
+    this.options = parsed;
+    if (!this.holdOptions) this.emit('agentOptions', parsed);
+  }
+
+  /** session/set_config_option; the agent answers with its full, updated option set. */
+  private async setConfigValue(configId: string, value: string): Promise<void> {
+    if (this.closed) throw this.closed;
+    if (!this.connection || !this.sessionId) throw new Error('ACP Client not connected or initialized');
+    this.touch();
+    const res = await this.untilClosed(this.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+      sessionId: this.sessionId,
+      configId,
+      value,
+    }));
+    this.setOptions(res?.configOptions);
+  }
+
+  /** True once the agent advertised a model option, so the model can change without a restart. */
+  get canSwitchModel(): boolean {
+    return Boolean(this.options?.modelConfigId) && !this.closed;
+  }
+
+  /**
+   * Change effort on the running agent, keeping its conversation. Throws when the
+   * agent has no effort option or rejects the level.
+   */
+  async applyEffort(effort: string): Promise<void> {
+    const opts = this.options;
+    if (!opts?.effortConfigId) throw new Error(`${this.agent.name} has no effort setting for this model`);
+    const { value, supported } = effortToSend(effort, opts, true);
+    if (!supported) throw new Error(`This model does not offer ${effort} effort`);
+    if (value) await this.setConfigValue(opts.effortConfigId, value);
+    this.effort = effort;
+  }
+
+  /** Switch model on the running agent, keeping its conversation. Returns the value the agent took. */
+  async applyModel(model: string): Promise<string> {
+    const opts = this.options;
+    if (!opts?.modelConfigId) throw new Error(`${this.agent.name} cannot switch models while running`);
+    const value = resolveModelValue(model, opts.models) ?? (this.agent.id === 'claude' ? normalizeClaudeModel(model) : model);
+    await this.setConfigValue(opts.modelConfigId, value);
+    this.model = model;
+    return value;
   }
 
   private resolveMcpServers(caps: { http?: boolean; sse?: boolean } | undefined): { servers: acp.McpServer[]; info: SessionMcpInfo } {
@@ -691,6 +784,49 @@ export class AcpClientHost extends EventEmitter {
 // session/update decoding helpers
 // ---------------------------------------------------------------------------
 
+/** One compaction_update or compaction_summary_chunk, flattened. */
+export interface CompactionEvent {
+  compactionId: string;
+  /** Absent on a summary chunk. */
+  status?: 'in_progress' | 'completed' | 'failed' | 'cancelled';
+  /** Complete replacement summary (compaction_update). */
+  summary?: string;
+  /** Text to append to the summary (compaction_summary_chunk). */
+  summaryChunk?: string;
+  error?: string;
+  /** Who started it, from the contextCompaction meta: the user's /compact or the agent itself. */
+  trigger?: 'manual' | 'automatic';
+  preTokens?: number;
+  postTokens?: number;
+}
+
+const COMPACTION_STATUSES = new Set(['in_progress', 'completed', 'failed', 'cancelled']);
+
+/** Decode a compaction lifecycle update; the token counts ride in `_meta.contextCompaction`. */
+export function parseCompactionUpdate(update: any): CompactionEvent | null {
+  if (typeof update?.compactionId !== 'string') return null;
+  const text = (blocks: unknown) =>
+    Array.isArray(blocks)
+      ? blocks.map((b: any) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('')
+      : undefined;
+  if (update.sessionUpdate === 'compaction_summary_chunk') {
+    const chunk = text([update.content]);
+    return chunk ? { compactionId: update.compactionId, summaryChunk: chunk } : null;
+  }
+  if (update.sessionUpdate !== 'compaction_update') return null;
+  const meta = update._meta?.contextCompaction;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  return {
+    compactionId: update.compactionId,
+    status: COMPACTION_STATUSES.has(update.status) ? update.status : undefined,
+    summary: text(update.summary) || undefined,
+    error: typeof update.error === 'string' ? update.error : undefined,
+    trigger: meta?.trigger === 'automatic' || meta?.trigger === 'manual' ? meta.trigger : undefined,
+    preTokens: num(meta?.preTokens),
+    postTokens: num(meta?.postTokens),
+  };
+}
+
 const ASYNC_TASK_STATES = new Set(['running', 'completed', 'failed', 'stopped']);
 
 /** Decode an `async_task_spawned` / `_progress` / `_state_update` update. */
@@ -709,6 +845,12 @@ export function parseAsyncTaskUpdate(update: any): AsyncTaskUpdate | null {
     summary: typeof update.summary === 'string' ? update.summary : undefined,
     name: typeof update.name === 'string' ? update.name : undefined,
     outputFilePath: typeof update.outputFilePath === 'string' ? update.outputFilePath : undefined,
+    taskType: typeof update.taskType === 'string' ? update.taskType : undefined,
+    description: typeof update.description === 'string' ? update.description : undefined,
+    usage:
+      typeof update.usage?.totalTokens === 'number' && typeof update.usage?.toolUses === 'number' && typeof update.usage?.durationMs === 'number'
+        ? { totalTokens: update.usage.totalTokens, toolUses: update.usage.toolUses, durationMs: update.usage.durationMs }
+        : undefined,
   };
 }
 
@@ -799,10 +941,26 @@ function toolCallFields(update: any): Partial<ToolCallRecord> {
     description: typeof claude.title === 'string' ? claude.title : input?.description,
     parentToolUseId: claude.parentToolUseId,
     isSubagent: claude.subagent === true ? true : undefined,
-    subagentType: input?.subagent_type,
+    // Claude fills in the default type (general-purpose) in its response when the input named none
+    subagentType: input?.subagent_type ?? (typeof claude.toolResponse?.agentType === 'string' ? claude.toolResponse.agentType : undefined),
     exitCode: exit ? (typeof exit.exit_code === 'number' ? exit.exit_code : null) : undefined,
     background: backgrounded ? true : undefined,
+    agentUsage: agentUsage(claude.toolResponse),
+    // An async subagent reports only its transcript file; its end is read from there
+    agentOutputFile: typeof claude.toolResponse?.outputFile === 'string' ? claude.toolResponse.outputFile : undefined,
   };
+}
+
+/** Totals Claude's Agent tool reports when a subagent finishes. */
+function agentUsage(res: any): ToolCallRecord['agentUsage'] {
+  if (!res || typeof res !== 'object') return undefined;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const usage = {
+    totalTokens: num(res.totalTokens),
+    toolUses: num(res.totalToolUseCount),
+    durationMs: num(res.totalDurationMs),
+  };
+  return Object.values(usage).some((v) => v !== undefined) ? usage : undefined;
 }
 
 // Tool output is stored on the session and resent with every turn update, so a

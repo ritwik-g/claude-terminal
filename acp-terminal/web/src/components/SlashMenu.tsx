@@ -52,7 +52,7 @@ export const SlashMenu = React.forwardRef<
         label:
           key === 'terminal' ? (
             <>
-              <Icon name="terminal" size={11} /> ACP Terminal
+              <Icon name="terminal" size={11} /> CodePit
             </>
           ) : (
             <>

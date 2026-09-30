@@ -3,6 +3,7 @@ import type { ToolCallRecord, TurnMessage, TurnSegment } from '../types';
 import { MarkdownContent } from './MarkdownContent';
 import { Badge, Button, Icon, IconButton, Spinner, type Tone } from '../ui';
 import { BackgroundBadge } from './BackgroundBadge';
+import { useOpenAgentTask } from './agentTaskNav';
 import {
   backgroundRunning,
   commandOf,
@@ -273,7 +274,7 @@ export const OutputText: React.FC<{ text: string }> = ({ text }) => {
   );
 };
 
-const IoPanel: React.FC<{
+export const IoPanel: React.FC<{
   label: React.ReactNode;
   copy?: string;
   tone?: 'danger';
@@ -419,7 +420,7 @@ export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolea
   );
 };
 
-const ThoughtRow: React.FC<{ text: string; live: boolean }> = ({ text, live }) => {
+export const ThoughtRow: React.FC<{ text: string; live: boolean }> = ({ text, live }) => {
   const [open, setOpen] = useState(false);
   const firstLine = text.trim().split('\n')[0].replace(/[*_#`]/g, '');
   return (
@@ -462,6 +463,7 @@ export const SubagentCard: React.FC<{ call: ToolCallRecord; childCalls: ToolCall
   const badge = SUBAGENT_BADGE[status];
   const live = status === 'running' || status === 'background';
   const title = call.description || describeTool(call).target;
+  const openTask = useOpenAgentTask();
   const statParts = [
     stats.toolUses != null ? `${stats.toolUses} tool use${stats.toolUses === 1 ? '' : 's'}` : null,
     stats.durationMs != null ? formatDuration(stats.durationMs) : null,
@@ -488,6 +490,18 @@ export const SubagentCard: React.FC<{ call: ToolCallRecord; childCalls: ToolCall
             {live && <Spinner size={9} />}
             {badge.label}
           </Badge>
+          {openTask && (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon="external"
+              onClick={() => openTask(call.id)}
+              title="Show only this subagent's activity"
+              aria-label={`Open subagent: ${title}`}
+            >
+              <span className="subagent-open-label">Open</span>
+            </Button>
+          )}
         </div>
       </header>
 

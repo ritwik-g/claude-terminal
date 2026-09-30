@@ -12,5 +12,5 @@
     "resolveJsonModule": true,
     "outDir": "./dist"
   },
-  "include": ["server/**/*", "scripts/**/*"]
+  "include": ["server/**/*", "scripts/**/*", "electron/**/*"]
 }

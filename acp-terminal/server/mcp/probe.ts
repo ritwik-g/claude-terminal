@@ -50,7 +50,7 @@ const initialize = (id: number) => ({
   jsonrpc: '2.0',
   id,
   method: 'initialize',
-  params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'acp-terminal', version: '0.1.0' } },
+  params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'codepit', version: '0.1.0' } },
 });
 const initialized = { jsonrpc: '2.0', method: 'notifications/initialized' };
 const toolsList = (id: number) => ({ jsonrpc: '2.0', id, method: 'tools/list', params: {} });

@@ -5,6 +5,8 @@ import { exec } from 'node:child_process';
 import { getCredentialsFile, ensurePrivateDir, getAppDir, FILE_MODE } from './paths.js';
 import { store } from './store.js';
 import type { AcpSession } from './types.js';
+import { getCodexRateLimits } from './codex-limits.js';
+import { contextWindowHint } from './acp/agent-options.js';
 
 export interface VendorRateLimitWindow {
   utilization: number;
@@ -15,6 +17,11 @@ export interface VendorRateLimits {
   fiveHour?: VendorRateLimitWindow | null;
   weeklyAll?: VendorRateLimitWindow | null;
   weeklyModels?: Array<{ name: string; utilization: number; resetsAt?: string | null }>;
+  /** Windows of any length (Codex reports e.g. a 30-day window); resetsAtMs is an epoch time. */
+  windows?: Array<{ name: string; utilization: number; resetsAtMs?: number }>;
+  /** Codex credit balance: 'None', 'Unlimited' or the balance. */
+  credits?: string;
+  planType?: string;
   updatedAt?: number;
 }
 
@@ -42,21 +49,32 @@ export interface ModelPricing {
 }
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-  // Anthropic
-  'sonnet': { inputPerMillion: 3.0, outputPerMillion: 15.0, cachePerMillion: 0.3, contextWindow: 200000 },
-  'opus': { inputPerMillion: 15.0, outputPerMillion: 75.0, cachePerMillion: 1.5, contextWindow: 200000 },
-  'haiku': { inputPerMillion: 0.8, outputPerMillion: 4.0, cachePerMillion: 0.08, contextWindow: 200000 },
-  'claude-opus-4-6': { inputPerMillion: 15.0, outputPerMillion: 75.0, cachePerMillion: 1.5, contextWindow: 200000 },
+  // Anthropic, most specific first: lookups take the first key the model id contains.
+  // The window is a fallback; a running agent reports the real one (usage_update.size).
+  'claude-fable-5-1': { inputPerMillion: 10.0, outputPerMillion: 50.0, cachePerMillion: 0.25, contextWindow: 1000000 },
+  'fable-5.1': { inputPerMillion: 10.0, outputPerMillion: 50.0, cachePerMillion: 0.25, contextWindow: 1000000 },
+  'fable': { inputPerMillion: 10.0, outputPerMillion: 50.0, cachePerMillion: 1.0, contextWindow: 1000000 },
+  'claude-opus-5-5': { inputPerMillion: 4.0, outputPerMillion: 20.0, cachePerMillion: 0.2, contextWindow: 1000000 },
+  'opus-5.5': { inputPerMillion: 4.0, outputPerMillion: 20.0, cachePerMillion: 0.2, contextWindow: 1000000 },
+  'claude-opus-5': { inputPerMillion: 5.0, outputPerMillion: 25.0, cachePerMillion: 0.5, contextWindow: 1000000 },
+  'claude-opus-4-8': { inputPerMillion: 5.0, outputPerMillion: 25.0, cachePerMillion: 0.5, contextWindow: 1000000 },
+  'claude-opus-4-7': { inputPerMillion: 5.0, outputPerMillion: 25.0, cachePerMillion: 0.5, contextWindow: 1000000 },
+  'claude-opus-4-6': { inputPerMillion: 5.0, outputPerMillion: 25.0, cachePerMillion: 0.5, contextWindow: 1000000 },
+  'opus-4.6': { inputPerMillion: 5.0, outputPerMillion: 25.0, cachePerMillion: 0.5, contextWindow: 1000000 },
   'claude-opus-4-5': { inputPerMillion: 15.0, outputPerMillion: 75.0, cachePerMillion: 1.5, contextWindow: 200000 },
-  'claude-haiku-4-5': { inputPerMillion: 0.8, outputPerMillion: 4.0, cachePerMillion: 0.08, contextWindow: 200000 },
+  // The bare alias is Claude Code's current Opus (5.5)
+  'opus': { inputPerMillion: 4.0, outputPerMillion: 20.0, cachePerMillion: 0.2, contextWindow: 1000000 },
+  'claude-sonnet-5-5': { inputPerMillion: 2.0, outputPerMillion: 10.0, cachePerMillion: 0.2, contextWindow: 1000000 },
+  'sonnet-5': { inputPerMillion: 2.0, outputPerMillion: 10.0, cachePerMillion: 0.2, contextWindow: 1000000 },
+  'claude-sonnet-4-6': { inputPerMillion: 3.0, outputPerMillion: 15.0, cachePerMillion: 0.3, contextWindow: 1000000 },
   'claude-3-7-sonnet': { inputPerMillion: 3.0, outputPerMillion: 15.0, cachePerMillion: 0.3, contextWindow: 200000 },
   'claude-3-5-sonnet': { inputPerMillion: 3.0, outputPerMillion: 15.0, cachePerMillion: 0.3, contextWindow: 200000 },
+  // The bare alias is Claude Code's current Sonnet (5.5)
+  'sonnet': { inputPerMillion: 2.0, outputPerMillion: 10.0, cachePerMillion: 0.2, contextWindow: 1000000 },
   'claude-3-5-haiku': { inputPerMillion: 0.8, outputPerMillion: 4.0, cachePerMillion: 0.08, contextWindow: 200000 },
-  'opus-5.5': { inputPerMillion: 15.0, outputPerMillion: 75.0, cachePerMillion: 1.5, contextWindow: 200000 },
-  'opus-4.6': { inputPerMillion: 15.0, outputPerMillion: 75.0, cachePerMillion: 1.5, contextWindow: 200000 },
-  'sonnet-5': { inputPerMillion: 3.0, outputPerMillion: 15.0, cachePerMillion: 0.3, contextWindow: 200000 },
-  'fable-5.1': { inputPerMillion: 5.0, outputPerMillion: 25.0, cachePerMillion: 0.5, contextWindow: 200000 },
-  'haiku-4.5': { inputPerMillion: 0.8, outputPerMillion: 4.0, cachePerMillion: 0.08, contextWindow: 200000 },
+  'claude-haiku-4-5': { inputPerMillion: 1.0, outputPerMillion: 5.0, cachePerMillion: 0.1, contextWindow: 200000 },
+  'haiku-4.5': { inputPerMillion: 1.0, outputPerMillion: 5.0, cachePerMillion: 0.1, contextWindow: 200000 },
+  'haiku': { inputPerMillion: 1.0, outputPerMillion: 5.0, cachePerMillion: 0.1, contextWindow: 200000 },
 
   // OpenAI
   'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10.0, cachePerMillion: 1.25, contextWindow: 128000 },
@@ -86,11 +104,12 @@ export const DEFAULT_PRICING: ModelPricing = {
 export function getPricingForModel(modelId?: string): ModelPricing {
   if (!modelId) return DEFAULT_PRICING;
   const lower = modelId.toLowerCase();
-  for (const [key, pricing] of Object.entries(MODEL_PRICING)) {
-    if (lower.includes(key) || key.includes(lower)) {
-      return pricing;
-    }
-  }
+  // An exact key wins, then the first key the id contains. A key containing the id (a
+  // short alias like 'haiku' inside 'claude-3-5-haiku') is only a last resort.
+  if (MODEL_PRICING[lower]) return MODEL_PRICING[lower];
+  const entries = Object.entries(MODEL_PRICING);
+  const match = entries.find(([key]) => lower.includes(key)) ?? entries.find(([key]) => key.includes(lower));
+  if (match) return match[1];
   if (lower.includes('opus')) {
     return MODEL_PRICING['opus-4.6'];
   }
@@ -379,6 +398,10 @@ export function getVendorSubscriptions(): Record<'anthropic' | 'openai' | 'googl
     // ignore
   }
 
+  // The rate-limit read also names the plan (e.g. "go"), which auth.json does not
+  const codexLimits = codexStatus === 'active' ? getCodexRateLimits() : undefined;
+  if (codexLimits?.planType) codexPlan = `ChatGPT ${codexLimits.planType.charAt(0).toUpperCase()}${codexLimits.planType.slice(1)}`;
+
   const hasOpenAiKey = Boolean(process.env.OPENAI_API_KEY || creds.openaiApiKey);
   const openAiPreferredMode = creds.preferredAuthMode?.openai || (hasOpenAiKey && codexStatus !== 'active' ? 'api_key' : 'subscription');
 
@@ -391,6 +414,7 @@ export function getVendorSubscriptions(): Record<'anthropic' | 'openai' | 'googl
     apiKeyConfigured: hasOpenAiKey,
     apiKeyMasked: maskApiKey(process.env.OPENAI_API_KEY || creds.openaiApiKey),
     reauthCommand: 'codex login',
+    rateLimits: codexLimits,
     details: {
       authMode: codexMode,
       configPath: '~/.codex/auth.json',
@@ -622,7 +646,9 @@ export function getUsageSummary(): UsageReport {
 
     const primaryPricing = getPricingForModel(s.model);
     const context = s.usage?.contextTokens || input;
-    const percentContext = Math.min(100, Math.round((context / primaryPricing.contextWindow) * 100));
+    // What the agent reported wins over the table; "[1m]" model ids mean a 1M window
+    const contextLimit = s.contextWindow || contextWindowHint(s.model) || primaryPricing.contextWindow;
+    const percentContext = Math.min(100, Math.round((context / contextLimit) * 100));
 
     report.sessionsUsage.push({
       id: s.id,
@@ -631,7 +657,7 @@ export function getUsageSummary(): UsageReport {
       model: s.model,
       totalTokens: total,
       contextTokens: context,
-      contextLimit: primaryPricing.contextWindow,
+      contextLimit,
       percentContextUsed: percentContext,
       estimatedCost: sessionCost,
     });

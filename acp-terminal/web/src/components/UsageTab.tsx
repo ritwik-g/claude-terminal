@@ -32,7 +32,18 @@ export const LimitMeter: React.FC<{ label: string; utilization: number; resetsAt
   );
 };
 
-/** The 5-hour, weekly and per-model windows a vendor reports. */
+/** "in 29d 3h" / "in 4h 10m" / "in 12m" until an epoch time. */
+export function formatResetIn(ms: number, now = Date.now()): string {
+  const mins = Math.max(0, Math.round((ms - now) / 60_000));
+  const d = Math.floor(mins / 1440);
+  const h = Math.floor((mins % 1440) / 60);
+  const m = mins % 60;
+  if (d > 0) return `in ${d}d ${h}h`;
+  if (h > 0) return `in ${h}h ${m}m`;
+  return `in ${m}m`;
+}
+
+/** The 5-hour, weekly and per-model windows a vendor reports, plus any credit balance. */
 export const RateLimitList: React.FC<{ limits: VendorRateLimits }> = ({ limits }) => (
   <div className="usg-limits">
     {limits.fiveHour && <LimitMeter label="5-hour window" {...limits.fiveHour} />}
@@ -40,11 +51,25 @@ export const RateLimitList: React.FC<{ limits: VendorRateLimits }> = ({ limits }
     {limits.weeklyModels?.map((wm) => (
       <LimitMeter key={wm.name} label={`Weekly, ${wm.name}`} utilization={wm.utilization} resetsAt={wm.resetsAt} />
     ))}
+    {limits.windows?.map((w) => (
+      <LimitMeter
+        key={w.name}
+        label={w.name}
+        utilization={w.utilization}
+        resetsAt={w.resetsAtMs ? formatResetIn(w.resetsAtMs) : undefined}
+      />
+    ))}
+    {limits.credits && (
+      <div className="usg-limit-head">
+        <span className="usg-limit-label">Credits</span>
+        <span className="usg-limit-value">{limits.credits}</span>
+      </div>
+    )}
   </div>
 );
 
 export const hasRateLimits = (limits?: VendorRateLimits | null): limits is VendorRateLimits =>
-  Boolean(limits && (limits.fiveHour || limits.weeklyAll || limits.weeklyModels?.length));
+  Boolean(limits && (limits.fiveHour || limits.weeklyAll || limits.weeklyModels?.length || limits.windows?.length));
 
 /* --------------------------------------------------------------- Turn rows */
 

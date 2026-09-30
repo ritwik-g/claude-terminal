@@ -3,6 +3,7 @@ import type { AcpSession, FileAttachment, TurnMessage } from '../types';
 import { withToken } from '../api';
 import { Badge, Button, EmptyState, Icon, IconButton, Spinner } from '../ui';
 import { AgentTurnBody } from './AgentTurn';
+import { CompactionCard } from './CompactionCard';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
 import { cx, formatBytes, formatTime } from './sessionMeta';
@@ -268,6 +269,9 @@ export const ConversationView: React.FC<{
 
           {session.turns.map((turn, index) => {
             if (index < hiddenTurnCount) return null;
+            if (turn.role === 'system' && turn.compaction) {
+              return <CompactionCard key={turn.id} turn={turn} />;
+            }
             if (turn.role === 'system') {
               return (
                 <div key={turn.id} className="ws-system-event" role="note">

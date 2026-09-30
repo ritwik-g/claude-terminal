@@ -6,11 +6,15 @@ import { store } from '../store.js';
 import { getGitInfo } from '../git.js';
 import { rankSession, sortSessions } from '../rank.js';
 import { getAgent, hasAgent } from '../agents/registry.js';
-import { AcpClientHost, HostClosedError, TurnInFlightError, capToolOutput, normalizeClaudeModel, type ChunkMeta } from './client-host.js';
+import { AcpClientHost, HostClosedError, TurnInFlightError, capToolOutput, normalizeClaudeModel, type ChunkMeta, type CompactionEvent } from './client-host.js';
+import { HANDOFF_SUMMARY_PROMPT, autoCompactDecision, capSummary, contextWindowFor, latestCompaction, readAutoCompactDefault, writeAutoCompactDefault } from '../compaction.js';
 import { ptyManager } from '../pty-manager.js';
 import { getUploadsDir } from '../paths.js';
 import { getClaudeRateLimits, updateClaudeRateLimitsFromSdk } from '../subscriptions.js';
-import type { AcpSession, AsyncTaskUpdate, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
+import { cachedAgentOptions, effortLabel, rememberAgentOptions, resolveModelValue } from './agent-options.js';
+import { appendSubagentText, completeAsyncSubagent, endAgentTasks, stopAgentTask, stopTranscriptWatchers, syncAgentTasks, trackAsyncTask, trackTaskText, trackToolCall, trackToolCallUpdate, watchSubagentTranscript } from './agent-tasks.js';
+import { AUTO_EFFORT } from '../types.js';
+import type { AcpSession, AutoCompactSetting, CompactionRecord, AgentOptions, AgentTask, AgentTaskTextDelta, AsyncTaskUpdate, QueuedPrompt, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
 
 /**
  * Format conversation history into a structured briefing block for context transfer.
@@ -24,17 +28,23 @@ export function formatSessionHistory(
   const compact = opts?.compact !== false;
   const maxTurns = opts?.maxTurns ?? (compact ? 6 : 4);
 
-  const relevantTurns = turns.filter(
+  // The latest compaction summary stands in for every turn before it; only later turns are listed
+  const checkpoint = latestCompaction(turns);
+  const relevantTurns = turns.slice(checkpoint ? checkpoint.index + 1 : 0).filter(
     (t) => (t.role === 'user' || t.role === 'agent') && (t.content || (t.toolCalls && t.toolCalls.length > 0))
   );
 
-  if (relevantTurns.length === 0) return '';
+  if (relevantTurns.length === 0 && !checkpoint) return '';
 
   const slice = relevantTurns.slice(-maxTurns);
   const lines: string[] = [
     `[Prior Conversation Context (${compact ? 'Compacted' : 'Recent Turns'})]`,
     `The following is context from prior turns in this session to maintain continuity:`,
   ];
+  if (checkpoint) {
+    lines.push('Summary of the conversation so far (written when its context was compacted):', checkpoint.summary);
+    if (slice.length > 0) lines.push('Turns since that summary:');
+  }
 
   for (const turn of slice) {
     if (turn.role === 'user') {
@@ -65,8 +75,43 @@ export function formatSessionHistory(
   return lines.join('\n');
 }
 
+/**
+ * Reset an effort the current model does not offer to Auto, and record why in the
+ * conversation. Returns the note it added, or null when the effort stands.
+ */
+export function reconcileEffort(s: AcpSession, options: AgentOptions): TurnMessage | null {
+  if (!s.effort || s.effort === AUTO_EFFORT) return null;
+  if (options.efforts.some((e) => e.value === s.effort)) return null;
+  const previous = s.effort;
+  s.effort = AUTO_EFFORT;
+  const model = options.models.find((m) => m.value === options.currentModel)?.label || s.model || s.agentName;
+  const reason = options.efforts.length === 0
+    ? `${model} has no effort setting`
+    : `${model} does not offer ${effortLabel(previous)} effort`;
+  const note: TurnMessage = {
+    id: `sys-${Date.now()}-effort`,
+    role: 'system',
+    content: `${reason}, so effort is back to Auto.`,
+    timestamp: Date.now(),
+  };
+  s.turns.push(note);
+  return note;
+}
+
 // A 'working' turn with no agent, permission or terminal activity for this long is treated as hung
 const STALE_TURN_MS = 10 * 60_000;
+
+export class QueuedPromptNotFoundError extends Error {
+  constructor() {
+    super('That queued message was already sent or removed');
+  }
+}
+
+export class NothingToCompactError extends Error {
+  constructor() {
+    super('Nothing new to compact since the last compaction');
+  }
+}
 
 export class SessionManager extends EventEmitter {
   private activeHosts = new Map<string, AcpClientHost>();
@@ -76,6 +121,12 @@ export class SessionManager extends EventEmitter {
   private activePrompts = new Map<string, number>();
   private promptSeq = 0;
   private pollTimer: NodeJS.Timeout | null = null;
+  // A compaction in progress per session; the agent's output during it goes to the compaction, not the transcript
+  private compactionRuns = new Map<string, CompactionRun>();
+  // `<sessionId>:<agent compaction id>` -> the card of a compaction the agent started on its own
+  private agentCompactions = new Map<string, string>();
+  // "Compact when finished" held back by background work: the stop reason of the turn it follows
+  private autoCompactAfterBackground = new Map<string, string | undefined>();
 
   constructor() {
     super();
@@ -93,6 +144,9 @@ export class SessionManager extends EventEmitter {
 
   /** Shut down the session's agent (running or still starting) and drop turn ownership. */
   private dropHost(sessionId: string): void {
+    const run = this.compactionRuns.get(sessionId);
+    if (run) this.finishCompaction(sessionId, run, { stopReason: 'cancelled' });
+    this.settleAgentCompactions(sessionId, 'Stopped when the agent was stopped');
     this.settleBackgroundWork(sessionId, 'Stopped when the agent was stopped');
     const host = this.activeHosts.get(sessionId);
     if (host) {
@@ -107,7 +161,30 @@ export class SessionManager extends EventEmitter {
     this.activePrompts.delete(sessionId);
   }
 
+  /**
+   * Close the cards of compactions the agent started on its own: with its process gone no
+   * update will ever end them. Our own run is left to finishCompaction.
+   */
+  private settleAgentCompactions(sessionId: string, reason: string): void {
+    for (const key of this.agentCompactions.keys()) {
+      if (key.startsWith(`${sessionId}:`)) this.agentCompactions.delete(key);
+    }
+    const s = store.get(sessionId);
+    if (!s) return;
+    const ownTurnId = this.compactionRuns.get(sessionId)?.turnId;
+    const settled = s.turns.filter((t) => t.compaction?.status === 'running' && t.id !== ownTurnId);
+    if (settled.length === 0) return;
+    for (const turn of settled) {
+      turn.compaction = { ...turn.compaction!, status: 'cancelled', error: reason, endedAt: Date.now() };
+      turn.content = compactionLabel(turn.compaction);
+    }
+    store.save(s, { touch: false });
+    for (const turn of settled) this.emit('sessionStream', { sessionId, type: 'compaction', turn });
+  }
+
   private settleBackgroundWork(sessionId: string, reason: string): void {
+    // Work cut short by a stop is not a finished run to compact after
+    this.autoCompactAfterBackground.delete(sessionId);
     const s = store.get(sessionId);
     if (!s || !endBackgroundWork(s, reason)) return;
     store.save(s, { touch: false });
@@ -174,6 +251,13 @@ export class SessionManager extends EventEmitter {
       if (!host && endBackgroundWork(session, 'Stopped when the server restarted')) {
         sessionChanged = true;
       }
+      for (const turn of session.turns) {
+        if (turn.compaction?.status === 'running' && !host) {
+          turn.compaction = { ...turn.compaction, status: 'failed', error: 'Stopped when the server restarted', endedAt: Date.now() };
+          turn.content = compactionLabel(turn.compaction);
+          sessionChanged = true;
+        }
+      }
       if (session.activeTerminalId && !ptyManager.getTerminal(session.activeTerminalId)) {
         session.activeTerminalId = undefined;
         sessionChanged = true;
@@ -194,6 +278,11 @@ export class SessionManager extends EventEmitter {
         let changed = false;
         // Recover orphaned 'working' state when no turn is executing, and cancel a turn gone silent
         const host = this.activeHosts.get(session.id);
+        if (this.compactionRuns.has(session.id) && host?.isTurnInFlight && Date.now() - host.lastActivityAt > STALE_TURN_MS) {
+          console.warn(`[session-mgr] Compaction on ${session.id} silent for ${STALE_TURN_MS / 60_000}m; cancelling`);
+          this.cancelPrompt(session.id).catch(() => {});
+          continue;
+        }
         if (session.state === 'working') {
           if (!this.isTurnInFlight(session.id)) {
             session.state = 'needs_you';
@@ -290,7 +379,51 @@ export class SessionManager extends EventEmitter {
       s.rateLimits = s.rateLimits || getClaudeRateLimits();
     }
     s.isAgentRunning = this.activeHosts.has(s.id);
+    // Older sessions get their agent tasks built; undone or compacted turns take theirs along
+    if (syncAgentTasks(s)) store.save(s, { touch: false });
     return s;
+  }
+
+  /** Broadcast changed agent tasks, and start watching any async subagent that only a transcript can end. */
+  /** Stream a chunk trackTaskText just added to the task's last segment. */
+  private emitTaskText(sessionId: string, task: AgentTask, text: string, toolCallId?: string): void {
+    const seg = task.segments?.[task.segments.length - 1];
+    if (!seg || (seg.kind !== 'text' && seg.kind !== 'thought')) return;
+    const taskText: AgentTaskTextDelta = { taskId: task.id, segmentId: seg.id, kind: seg.kind, text, toolCallId };
+    if (seg.kind === 'text' && seg.messageId) taskText.messageId = seg.messageId;
+    this.emit('sessionStream', { sessionId, type: 'agentTaskText', taskText });
+  }
+
+  private agentTasksChanged(sessionId: string, tasks: AgentTask[]): AgentTask[] | undefined {
+    for (const task of tasks) {
+      if (task.kind !== 'subagent' || task.status !== 'running' || !task.toolCallId) continue;
+      const call = findToolCall(store.get(sessionId)!, task.toolCallId)?.call;
+      if (!call?.agentOutputFile) continue;
+      watchSubagentTranscript(
+        `${sessionId}:${task.id}`,
+        call.agentOutputFile,
+        () => store.get(sessionId)?.agentTasks?.find((t) => t.id === task.id)?.status === 'running',
+        (report) => {
+          const s = store.get(sessionId);
+          const done = s && completeAsyncSubagent(s, task.id, report);
+          if (!s || !done) return;
+          store.save(s, { touch: false });
+          const owner = done.call && findToolCall(s, done.call.id);
+          this.emit('sessionStream', { sessionId, type: 'backgroundUpdate', toolCall: done.call, turn: owner?.turn, agentTasks: [done.task] });
+          this.recheckAutoCompact(sessionId);
+        },
+        () => {
+          // A task left 'running' for good would hold back "Compact when finished" forever
+          const s = store.get(sessionId);
+          const ended = s && stopAgentTask(s, task.id, 'No sign of it finishing after 6 hours');
+          if (!s || !ended) return;
+          store.save(s, { touch: false });
+          this.emit('sessionStream', { sessionId, type: 'agentTask', agentTasks: [ended] });
+          this.recheckAutoCompact(sessionId);
+        }
+      );
+    }
+    return tasks.length > 0 ? tasks : undefined;
   }
 
   async createSession(opts: {
@@ -340,6 +473,7 @@ export class SessionManager extends EventEmitter {
       turns: [],
       failoverFromId: opts.failoverFromId,
       rateLimits: (agent.id === 'claude' || agent.provider === 'anthropic') ? getClaudeRateLimits() : undefined,
+      autoCompact: readAutoCompactDefault(),
     };
 
     store.save(session);
@@ -434,7 +568,13 @@ export class SessionManager extends EventEmitter {
     host.on('thought', (text: string, meta: ChunkMeta) => {
       const s = store.get(session.id);
       if (!s) return;
-      if (meta.parentToolUseId) return; // subagent reasoning stays out of the main transcript
+      if (this.compactionRuns.has(session.id)) return; // reasoning behind a summary is not shown
+      if (meta.parentToolUseId) {
+        // A subagent's reasoning stays out of the main transcript; its own view shows it
+        const task = trackTaskText(s, meta.parentToolUseId, 'thought', text);
+        if (task) this.emitTaskText(s.id, task, text);
+        return;
+      }
       const turn = ensureAgentTurn(s);
       turn.thoughts = (turn.thoughts || '') + text;
       appendTextSegment(turn, 'thought', text);
@@ -444,13 +584,20 @@ export class SessionManager extends EventEmitter {
     host.on('message', (text: string, meta: ChunkMeta) => {
       const s = store.get(session.id);
       if (!s) return;
+      const run = this.compactionRuns.get(session.id);
+      if (run) {
+        // The handoff summary; kept out of the transcript and shown in the compaction's card
+        if (!meta.parentToolUseId) run.text += text;
+        return;
+      }
       if (meta.parentToolUseId) {
         // A subagent's reply belongs to the call that spawned it, not the main thread.
         const owner = findToolCall(s, meta.parentToolUseId);
-        if (owner) {
-          owner.call.subagentText = (owner.call.subagentText || '') + text;
-          this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: owner.call, turn: owner.turn });
-        }
+        const task = trackTaskText(s, meta.parentToolUseId, 'text', text, meta.messageId);
+        if (owner) owner.call.subagentText = appendSubagentText(owner.call.subagentText, text);
+        // Only the chunk goes out, as for the main thread; resending the whole call or task per chunk grows with its length
+        if (task) this.emitTaskText(s.id, task, text, owner?.call.id);
+        else if (owner) this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: owner.call, turn: owner.turn });
         return;
       }
       const turn = ensureAgentTurn(s);
@@ -471,15 +618,19 @@ export class SessionManager extends EventEmitter {
       // A subagent's calls can arrive after the parent's turn has ended; keep
       // them with the turn that holds the spawning call.
       const owner = record.parentToolUseId ? findToolCall(s, record.parentToolUseId) : null;
-      const turn = owner ? owner.turn : ensureAgentTurn(s);
+      // A call made while compacting stays with the compaction's turn, out of the reply flow
+      const run = this.compactionRuns.get(session.id);
+      const compactionTurn = !owner && run ? s.turns.find((t) => t.id === run.turnId) : undefined;
+      const turn = owner ? owner.turn : compactionTurn ?? ensureAgentTurn(s);
       turn.toolCalls = turn.toolCalls || [];
       turn.toolCalls.push(record);
-      if (!record.parentToolUseId) {
+      if (!record.parentToolUseId && !compactionTurn) {
         turn.segments = turn.segments || [];
         turn.segments.push({ kind: 'tool', id: `seg-${record.id}`, toolCallId: record.id });
       }
+      const agentTasks = this.agentTasksChanged(s.id, trackToolCall(s, record));
       store.save(s);
-      this.emit('sessionStream', { sessionId: s.id, type: 'toolCall', toolCall: record, turn });
+      this.emit('sessionStream', { sessionId: s.id, type: 'toolCall', toolCall: record, turn, agentTasks });
     });
 
     host.on('toolCallUpdate', (record: ToolCallRecord) => {
@@ -489,8 +640,9 @@ export class SessionManager extends EventEmitter {
       if (!owner) return;
       const patch = Object.fromEntries(Object.entries(record).filter(([, v]) => v !== undefined));
       Object.assign(owner.call, patch);
+      const agentTasks = this.agentTasksChanged(s.id, trackToolCallUpdate(s, owner.call));
       store.save(s);
-      this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: owner.call, turn: owner.turn });
+      this.emit('sessionStream', { sessionId: s.id, type: 'toolCallUpdate', toolCall: owner.call, turn: owner.turn, agentTasks });
     });
 
     // Background shells and other async work settle after their tool call has
@@ -501,9 +653,22 @@ export class SessionManager extends EventEmitter {
       if (u.toolCallId) taskCalls.set(u.asyncTaskId, u.toolCallId);
       const callId = u.toolCallId ?? taskCalls.get(u.asyncTaskId);
       const s = store.get(session.id);
-      if (!s || !callId) return;
-      const owner = findToolCall(s, callId);
-      if (!owner) return;
+      if (!s) return;
+      // Every task gets a record, even one no tool call can be matched to
+      const idsBefore = (s.agentTasks || []).map((t) => t.id);
+      const task = trackAsyncTask(s, u, callId && findToolCall(s, callId) ? callId : undefined);
+      // A duplicate record merged into this one is gone; the client must drop it too
+      const removed = idsBefore.filter((id) => !s.agentTasks?.some((t) => t.id === id));
+      const removedAgentTaskIds = removed.length > 0 ? removed : undefined;
+      const owner = callId ? findToolCall(s, callId) : null;
+      if (!owner) {
+        if (task) {
+          store.save(s, { touch: false });
+          this.emit('sessionStream', { sessionId: s.id, type: 'agentTask', agentTasks: [task], removedAgentTaskIds });
+          this.recheckAutoCompact(s.id);
+        }
+        return;
+      }
       const call = owner.call;
       call.background = true;
       if (u.outputFilePath) taskOutputs.set(u.asyncTaskId, u.outputFilePath);
@@ -517,9 +682,11 @@ export class SessionManager extends EventEmitter {
       } else if (!call.backgroundState) {
         call.backgroundState = 'running';
       }
+      if (task) trackToolCallUpdate(s, call);
       store.save(s, { touch: false });
       // Not 'toolCallUpdate': the turn may be long over, and that event marks the session working
-      this.emit('sessionStream', { sessionId: s.id, type: 'backgroundUpdate', toolCall: call, turn: owner.turn });
+      this.emit('sessionStream', { sessionId: s.id, type: 'backgroundUpdate', toolCall: call, turn: owner.turn, agentTasks: task ? [task] : undefined, removedAgentTaskIds });
+      this.recheckAutoCompact(s.id);
     });
 
     host.on('plan', (entries: PlanEntry[]) => {
@@ -528,6 +695,31 @@ export class SessionManager extends EventEmitter {
       s.plan = entries;
       store.save(s);
       this.emit('sessionStream', { sessionId: s.id, type: 'plan', plan: entries, session: { plan: entries } });
+    });
+
+    host.on('agentOptions', (options: AgentOptions) => {
+      const s = store.get(session.id);
+      if (!s) return;
+      s.agentOptions = options;
+      // Cache under the stored model id only when the agent is actually running that model
+      const runningStored = !options.currentModel || resolveModelValue(s.model, options.models) === options.currentModel;
+      rememberAgentOptions(s.agentId, runningStored ? s.model : undefined, options);
+      const note = reconcileEffort(s, options);
+      store.save(s, { touch: false });
+      this.emit('sessionStream', {
+        sessionId: s.id,
+        type: 'agentOptions',
+        session: { agentOptions: options, effort: s.effort },
+        ...(note ? { turn: note } : {}),
+      });
+    });
+
+    host.on('contextWindow', (size: number) => {
+      const s = store.get(session.id);
+      if (!s || s.contextWindow === size) return;
+      s.contextWindow = size;
+      store.save(s, { touch: false });
+      this.emit('sessionStream', { sessionId: s.id, type: 'contextWindow', session: { contextWindow: size } });
     });
 
     host.on('usageUpdate', (usage) => {
@@ -566,8 +758,10 @@ export class SessionManager extends EventEmitter {
     host.on('turnCompleted', () => {
       const s = store.get(session.id);
       if (!s) return;
-      s.state = 'needs_you';
       activeAgentTurn = null;
+      // The compaction settles its own state, and must not count as a fresh reply
+      if (this.compactionRuns.has(session.id)) return;
+      s.state = 'needs_you';
       store.save(s);
       this.emit('sessionStream', { sessionId: s.id, type: 'turnCompleted' });
       this.emit('sessionsUpdated', this.listSessions());
@@ -610,6 +804,11 @@ export class SessionManager extends EventEmitter {
       console.warn(`[session-mgr] Agent error on session ${session.id}:`, err);
       const s = store.get(session.id);
       if (!s) return;
+      if (this.compactionRuns.has(session.id)) {
+        // Reported on the compaction's card when its prompt fails
+        activeAgentTurn = null;
+        return;
+      }
       s.state = 'needs_you';
       s.pendingPermission = null;
       if (!activeAgentTurn) {
@@ -632,6 +831,10 @@ export class SessionManager extends EventEmitter {
       store.save(s);
       this.emit('sessionStream', { sessionId: s.id, type: 'turnCompleted' });
       this.emit('sessionsUpdated', this.listSessions());
+    });
+
+    host.on('compaction', (u: CompactionEvent) => {
+      if (this.applyCompactionUpdate(session.id, u)) activeAgentTurn = null;
     });
 
     host.on('terminalCreated', (termId: string) => {
@@ -658,6 +861,7 @@ export class SessionManager extends EventEmitter {
       this.activeHosts.delete(session.id);
       this.activePrompts.delete(session.id);
       activeAgentTurn = null;
+      this.settleAgentCompactions(session.id, 'Stopped when the agent exited');
       this.settleBackgroundWork(session.id, 'Stopped when the agent exited');
       const s = store.get(session.id);
       if (s && (s.state === 'working' || s.state === 'blocked' || s.pendingPermission)) {
@@ -679,6 +883,8 @@ export class SessionManager extends EventEmitter {
     if (this.isTurnInFlight(sessionId)) throw new TurnInFlightError();
     const seq = ++this.promptSeq;
     this.activePrompts.set(sessionId, seq);
+    // This turn's own end decides about compaction now
+    this.autoCompactAfterBackground.delete(sessionId);
 
     // Process and save any attachments to disk
     const savedAttachments: FileAttachment[] = [];
@@ -767,9 +973,13 @@ export class SessionManager extends EventEmitter {
     store.save(session);
     this.emit('sessionsUpdated', this.listSessions());
 
+    let endedCleanly = false;
+    let turnStopReason: string | undefined;
     try {
       const host = await this.ensureHost(session);
-      await host.sendPrompt(promptToSendToHost, savedAttachments);
+      const { stopReason } = await host.sendPrompt(promptToSendToHost, savedAttachments);
+      turnStopReason = stopReason;
+      endedCleanly = stopReason === 'end_turn';
     } catch (err: any) {
       // Host torn down by stop/switch/rollback/delete: that action already updated the session
       if (err instanceof HostClosedError && err.byShutdown) return;
@@ -803,7 +1013,85 @@ export class SessionManager extends EventEmitter {
         this.emit('sessionStream', { sessionId: s.id, type: 'turnCompleted', session: s });
         this.emit('sessionsUpdated', this.listSessions());
       }
+      // A stopped or failed turn leaves the queue alone so the user decides what happens next
+      if (owned && endedCleanly) this.sendNextQueued(sessionId);
+      // "Compact when finished" goes after the queue has drained, never between queued messages
+      if (owned) this.maybeAutoCompact(sessionId, turnStopReason);
     }
+  }
+
+  /** Queue a message behind the running turn, or send it straight away when nothing is running. */
+  async queuePrompt(sessionId: string, text: string, attachments?: FileAttachment[]): Promise<{ queued: boolean }> {
+    const session = store.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    if (!this.isTurnInFlight(sessionId) && !session.queuedPrompts?.length) {
+      this.runPrompt(sessionId, text, attachments);
+      return { queued: false };
+    }
+    const item: QueuedPrompt = {
+      id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      text,
+      attachments: attachments?.length ? attachments : undefined,
+      queuedAt: Date.now(),
+    };
+    session.queuedPrompts = [...(session.queuedPrompts || []), item];
+    this.saveQueue(session);
+    return { queued: true };
+  }
+
+  updateQueuedPrompt(sessionId: string, queueId: string, text: string): AcpSession {
+    const session = this.requireQueued(sessionId, queueId);
+    session.queuedPrompts = session.queuedPrompts!.map((q) => (q.id === queueId ? { ...q, text } : q));
+    this.saveQueue(session);
+    return session;
+  }
+
+  removeQueuedPrompt(sessionId: string, queueId: string): AcpSession {
+    const session = this.requireQueued(sessionId, queueId);
+    session.queuedPrompts = session.queuedPrompts!.filter((q) => q.id !== queueId);
+    this.saveQueue(session);
+    return session;
+  }
+
+  /** Stop the running turn, if any, and send this queued message now. */
+  async sendQueuedNow(sessionId: string, queueId: string): Promise<void> {
+    const session = this.requireQueued(sessionId, queueId);
+    const item = session.queuedPrompts!.find((q) => q.id === queueId)!;
+    if (this.isTurnInFlight(sessionId)) await this.cancelPrompt(sessionId);
+    const fresh = store.get(sessionId)!;
+    fresh.queuedPrompts = (fresh.queuedPrompts || []).filter((q) => q.id !== queueId);
+    this.saveQueue(fresh);
+    this.runPrompt(sessionId, item.text, item.attachments);
+  }
+
+  private sendNextQueued(sessionId: string): void {
+    const session = store.get(sessionId);
+    const next = session?.queuedPrompts?.[0];
+    if (!session || !next || this.isTurnInFlight(sessionId)) return;
+    session.queuedPrompts = session.queuedPrompts!.slice(1);
+    this.saveQueue(session);
+    this.runPrompt(sessionId, next.text, next.attachments);
+  }
+
+  private runPrompt(sessionId: string, text: string, attachments?: FileAttachment[]): void {
+    this.sendPrompt(sessionId, text, attachments).catch((err) => {
+      console.error(`[session-mgr] Error executing prompt for ${sessionId}:`, err);
+    });
+  }
+
+  private requireQueued(sessionId: string, queueId: string): AcpSession {
+    const session = store.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    if (!session.queuedPrompts?.some((q) => q.id === queueId)) throw new QueuedPromptNotFoundError();
+    return session;
+  }
+
+  private saveQueue(session: AcpSession): void {
+    session.updatedAt = Date.now();
+    store.save(session);
+    // Always an array so the client's shallow merge clears an emptied queue
+    this.emit('sessionStream', { sessionId: session.id, type: 'queueUpdated', session: { queuedPrompts: session.queuedPrompts || [] } });
+    this.emit('sessionsUpdated', this.listSessions());
   }
 
   async resolvePermission(sessionId: string, optionId: string): Promise<boolean> {
@@ -817,6 +1105,9 @@ export class SessionManager extends EventEmitter {
     if (host) {
       await host.cancel();
     }
+    // Settle it now: its prompt may resolve after the next message has already started
+    const run = this.compactionRuns.get(sessionId);
+    if (run) this.finishCompaction(sessionId, run, { stopReason: 'cancelled' });
     this.activePrompts.delete(sessionId);
     const session = store.get(sessionId);
     if (session) {
@@ -918,8 +1209,26 @@ export class SessionManager extends EventEmitter {
       targetModel = normalizeClaudeModel(targetModel);
     }
 
+    // Same agent, and it can switch models while running: keep the process and its conversation
+    const liveHost = targetAgent.id === session.agentId ? this.activeHosts.get(sessionId) : undefined;
+    if (liveHost?.canSwitchModel) {
+      try {
+        return await this.switchModelLive(session, liveHost, targetModel, newEffort);
+      } catch (err: any) {
+        if (!(err instanceof HostClosedError)) {
+          throw new Error(`${targetAgent.name.replace(/ \(ACP\)$/, '')} did not accept model ${targetModel}: ${err.message}`);
+        }
+        // The agent exited meanwhile: fall through to a restart with a handover
+      }
+    }
+
     // Shutdown previous host process so new host can be spun up on next turn
     this.dropHost(sessionId);
+    if (targetAgent.id !== session.agentId || targetModel !== session.model) {
+      // Choices and window belong to the old model; the new one reports its own when it starts
+      session.agentOptions = cachedAgentOptions(targetAgent.id, targetModel);
+      session.contextWindow = undefined;
+    }
 
     session.agentId = targetAgent.id;
     session.agentName = targetAgent.name;
@@ -929,7 +1238,7 @@ export class SessionManager extends EventEmitter {
     }
 
     session.contextMode = contextMode;
-    const hasPriorTurns = session.turns.some((t) => t.role === 'user' || t.role === 'agent');
+    const hasPriorTurns = session.turns.some((t) => t.role === 'user' || t.role === 'agent') || latestCompaction(session.turns) !== null;
     session.contextHandoffPending = contextMode !== 'none' && hasPriorTurns;
 
     // Reset crashed, blocked, or working state since old host is shutdown
@@ -938,7 +1247,9 @@ export class SessionManager extends EventEmitter {
       session.pendingPermission = null;
     }
 
-    const effortLabel = session.effort && session.effort !== 'off' ? ` [Effort: ${session.effort}]` : '';
+    // A level the new model is known not to offer falls back to Auto (the agent's report settles unknown models)
+    const effortNote = session.agentOptions ? reconcileEffort(session, session.agentOptions) : null;
+    const effortLabel = session.effort && session.effort !== AUTO_EFFORT ? ` [Effort: ${session.effort}]` : '';
     const contextLabel = session.contextHandoffPending ? ` [Context: ${contextMode}]` : '';
     // Record an informative system event in the conversation
     session.turns.push({
@@ -947,6 +1258,11 @@ export class SessionManager extends EventEmitter {
       content: `Switched model to ${targetModel || targetAgent.name}${effortLabel}${contextLabel}`,
       timestamp: Date.now(),
     });
+    if (effortNote) {
+      // Keep the note after the switch line it explains
+      session.turns.splice(session.turns.indexOf(effortNote), 1);
+      session.turns.push(effortNote);
+    }
 
     session.updatedAt = Date.now();
     store.save(session);
@@ -957,22 +1273,65 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Set or update thinking / reasoning effort for a session.
-   * Restarts the host process on the next prompt to apply reasoning parameters.
+   * Model switch within the running agent (ACP set_config_option): the process and its
+   * conversation stay, so no handover is needed.
+   */
+  private async switchModelLive(
+    session: AcpSession,
+    host: AcpClientHost,
+    targetModel: string | undefined,
+    newEffort: ThinkingEffort | undefined
+  ): Promise<AcpSession> {
+    const sessionId = session.id;
+    // The new model's choices arrive during applyModel and may add an effort note; it goes after this line
+    const switchLineAt = session.turns.length;
+    if (targetModel && targetModel !== session.model) {
+      await host.applyModel(targetModel);
+      session.model = targetModel;
+      // The agent reports the new window with its next usage
+      session.contextWindow = undefined;
+    }
+    session.turns.splice(switchLineAt, 0, {
+      id: `sys-${Date.now()}`,
+      role: 'system',
+      content: `Switched model to ${targetModel || session.agentName} (same conversation)`,
+      timestamp: Date.now(),
+    });
+    // applyModel already reported the new model's choices, which reset an unsupported level to Auto
+    if (newEffort !== undefined && newEffort !== session.effort) {
+      const options = host.options;
+      const supported = newEffort === AUTO_EFFORT || Boolean(options?.efforts.some((e) => e.value === newEffort));
+      if (supported) {
+        if (options?.effortConfigId) await host.applyEffort(newEffort);
+        session.effort = newEffort;
+      }
+    }
+    session.updatedAt = Date.now();
+    store.save(session);
+    this.emit('sessionsUpdated', this.listSessions());
+    this.emit('sessionStream', { sessionId, type: 'sessionSwitched', session });
+    return session;
+  }
+
+  /**
+   * Set thinking / reasoning effort for a session. A running agent takes it at once and
+   * keeps its conversation; otherwise it is stored and applied when the agent starts.
    */
   async setSessionEffort(sessionId: string, effort: ThinkingEffort): Promise<AcpSession> {
     const session = store.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
-    session.effort = effort;
-
-    // Shutdown running host so new reasoning budget applies on next prompt
-    this.dropHost(sessionId);
-
-    if (session.state === 'working' || session.state === 'crashed' || session.state === 'blocked') {
-      session.state = 'needs_you';
+    const host = this.activeHosts.get(sessionId);
+    if (host?.options?.effortConfigId) {
+      // Throws when the agent rejects it, leaving the stored effort as it was
+      await host.applyEffort(effort);
+    } else {
+      // Still starting: it may already be past applying the old effort, so apply once it is up
+      this.startingHosts.get(sessionId)?.promise
+        .then((h) => (h.options?.effortConfigId && store.get(sessionId)?.effort === effort ? h.applyEffort(effort) : undefined))
+        .catch((err) => console.warn(`[session-mgr] Effort not applied to ${sessionId}: ${err.message}`));
     }
-    session.pendingPermission = null;
+    session.effort = effort;
 
     session.updatedAt = Date.now();
     store.save(session);
@@ -983,67 +1342,241 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Compact conversation context for a session.
-   * Distills verbose turns and past tool outputs into a single consolidated summary turn,
-   * keeping the active goal and resetting the ACP subprocess memory to maximize context efficiency.
+   * Compact the session's context. An agent with its own compaction (it offers a `compact`
+   * command, as Claude Code and Codex do) runs it inside the same agent session. Any other
+   * agent is asked for a handoff summary and then restarted; the summary is the first
+   * context the next prompt carries. Earlier turns stay in the transcript: the compaction's
+   * system turn marks the boundary. Returns at once; progress streams as 'compaction' events.
    */
-  async compactSession(sessionId: string): Promise<AcpSession> {
+  async compactSession(sessionId: string, opts: { trigger?: 'manual' | 'auto' } = {}): Promise<AcpSession> {
     const session = store.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
+    if (this.compactionRuns.has(sessionId)) return session;
+    if (this.isTurnInFlight(sessionId)) throw new TurnInFlightError('Wait for the current turn to finish before compacting');
 
-    const relevantTurns = session.turns.filter((t) => t.role === 'user' || t.role === 'agent');
-    if (relevantTurns.length <= 1) {
-      return session; // nothing substantial to compact
+    let lastBoundary = -1;
+    session.turns.forEach((t, i) => {
+      if (t.compaction?.status === 'completed' || (t.role === 'system' && !t.compaction && t.id.startsWith('compact-'))) lastBoundary = i;
+    });
+    if (!session.turns.slice(lastBoundary + 1).some((t) => t.role === 'agent')) throw new NothingToCompactError();
+
+    const host = this.activeHosts.get(sessionId);
+    // A pending handoff means the running agent has not been given the conversation yet
+    // (e.g. restarted with Start agent), so it has nothing of its own to compact
+    const hostHasContext = Boolean(host) && !session.contextHandoffPending;
+    const method: CompactionRecord['method'] = hostHasContext && host!.availableCommands.includes('compact') ? 'native' : 'handoff';
+    // The handoff restarts the agent, which would cut off work it still runs in the background
+    if (method === 'handoff' && host && hasRunningBackground(session)) {
+      throw new Error('Background work is still running; compact once it has finished');
     }
 
-    // Extract original goal and last user prompt
-    const userPrompts = session.turns.filter((t) => t.role === 'user').map((t) => t.content || '');
-    const firstPrompt = userPrompts[0] || session.title;
-    const lastPrompt = userPrompts[userPrompts.length - 1] || session.lastPrompt || firstPrompt;
+    const trigger = opts.trigger ?? 'manual';
+    const compaction: CompactionRecord = {
+      status: 'running',
+      method,
+      trigger,
+      startedAt: Date.now(),
+      preTokens: session.usage.contextTokens || undefined,
+    };
+    const turn: TurnMessage = { id: `compact-${Date.now()}`, role: 'system', content: compactionLabel(compaction), timestamp: Date.now(), compaction };
+    session.turns.push(turn);
+    // It owns the session like a prompt does, so messages sent meanwhile are queued behind it
+    const seq = ++this.promptSeq;
+    this.activePrompts.set(sessionId, seq);
+    const run: CompactionRun = { turnId: turn.id, method, seq, text: '' };
+    this.compactionRuns.set(sessionId, run);
+    // An automatic one is housekeeping after a finished turn, not new activity to rank on
+    store.save(session, { touch: trigger === 'manual' });
+    this.emit('sessionStream', { sessionId, type: 'compaction', turn });
+    this.emit('sessionsUpdated', this.listSessions());
 
-    // Collect touched files from tool calls
-    const touchedFiles = new Set<string>();
-    for (const turn of session.turns) {
-      if (turn.toolCalls) {
-        for (const tc of turn.toolCalls) {
-          const input: any = tc.input;
-          if (input?.path) touchedFiles.add(input.path);
-          if (input?.file) touchedFiles.add(input.file);
+    void this.runCompaction(sessionId, run);
+    return session;
+  }
+
+  private async runCompaction(sessionId: string, run: CompactionRun): Promise<void> {
+    let outcome: { stopReason?: string; error?: string };
+    try {
+      const session = store.get(sessionId);
+      if (!session) return;
+      const needsHistory = !this.activeHosts.has(sessionId) || Boolean(session.contextHandoffPending);
+      const host = await this.ensureHost(session);
+      if (this.compactionRuns.get(sessionId) !== run) return;
+      let prompt = '/compact';
+      if (run.method === 'handoff') {
+        prompt = HANDOFF_SUMMARY_PROMPT;
+        // A freshly started agent has none of the conversation yet: give it what there is to summarise
+        if (needsHistory) {
+          const history = formatSessionHistory(session.turns.filter((t) => t.id !== run.turnId), { compact: false, maxTurns: 20 });
+          if (history) prompt = `${history}\n\n${prompt}`;
+        }
+        // The agent now has the history; the next prompt must not send it again
+        const s = store.get(sessionId);
+        if (s?.contextHandoffPending) {
+          s.contextHandoffPending = false;
+          store.save(s, { touch: false });
         }
       }
+      const { stopReason } = await host.sendPrompt(prompt);
+      outcome = { stopReason };
+    } catch (err: any) {
+      outcome =
+        err instanceof HostClosedError && err.byShutdown
+          ? { stopReason: 'cancelled' }
+          : { stopReason: 'error', error: err?.message || String(err) };
     }
-    const filesSummary = touchedFiles.size > 0 ? Array.from(touchedFiles).slice(0, 8).join(', ') : '';
+    this.finishCompaction(sessionId, run, outcome);
+  }
 
-    const summaryLines = [
-      `📦 **Session Context Compacted**`,
-      `- **Initial Goal**: "${firstPrompt}"`,
-      `- **Current Goal / State**: "${lastPrompt}"`,
-      session.recap ? `- **Recap of progress**: ${session.recap}` : '',
-      filesSummary ? `- **Files referenced/modified**: ${filesSummary}${touchedFiles.size > 8 ? ` (+${touchedFiles.size - 8} more)` : ''}` : '',
-      `\n*Earlier verbose turns and tool outputs have been compacted into this checkpoint to free up context.*`
-    ].filter(Boolean).join('\n');
-
-    const compactedTurn: TurnMessage = {
-      id: `compact-${Date.now()}`,
-      role: 'system',
-      content: summaryLines,
-      timestamp: Date.now(),
-    };
-
-    session.turns = [compactedTurn];
-    session.contextMode = 'compact';
-    session.contextHandoffPending = true;
-
-    // Reset host subprocess memory so on next prompt the agent starts with the lean context
-    this.dropHost(sessionId);
-
-    session.state = 'needs_you';
-    session.pendingPermission = null;
-    session.updatedAt = Date.now();
-    store.save(session);
+  /** Close a compaction run with how its prompt ended. Later calls for the same run do nothing. */
+  private finishCompaction(sessionId: string, run: CompactionRun, outcome: { stopReason?: string; error?: string }): void {
+    if (this.compactionRuns.get(sessionId) !== run) return;
+    this.compactionRuns.delete(sessionId);
+    const owned = this.activePrompts.get(sessionId) === run.seq;
+    if (owned) this.activePrompts.delete(sessionId);
+    const s = store.get(sessionId);
+    if (!s) return;
+    const turn = s.turns.find((t) => t.id === run.turnId);
+    const c = turn?.compaction;
+    if (turn && c) {
+      // A native run may already have been settled by the agent's own lifecycle updates
+      if (c.status === 'running') {
+        if (outcome.stopReason === 'end_turn') {
+          const summary = run.method === 'handoff' ? capSummary(run.text) : '';
+          // A native run the agent never reported on compacted nothing (e.g. an empty conversation)
+          if (run.method === 'native') Object.assign(c, run.agentCompactionId ? { status: 'completed' } : { status: 'failed', error: 'The agent did not report a compaction' });
+          else if (summary) Object.assign(c, { status: 'completed', summary });
+          else Object.assign(c, { status: 'failed', error: 'The agent did not write a summary' });
+        } else if (outcome.stopReason === 'cancelled') {
+          c.status = 'cancelled';
+        } else {
+          c.status = 'failed';
+          c.error = outcome.error || `The agent stopped (${outcome.stopReason ?? 'no reason given'})`;
+        }
+      }
+      c.endedAt ??= Date.now();
+      if (c.summary) c.summary = capSummary(c.summary);
+      if (c.status === 'completed' && c.postTokens === undefined) {
+        if (run.method === 'handoff' && c.summary) {
+          // Roughly what the restarted agent starts with: the summary, at ~4 characters a token
+          c.postTokens = Math.ceil(c.summary.length / 4);
+          c.postTokensEstimated = true;
+        } else if (s.usage.contextTokens && s.usage.contextTokens !== c.preTokens) {
+          c.postTokens = s.usage.contextTokens;
+        }
+      }
+      turn.content = compactionLabel(c);
+    }
+    if (c?.status === 'completed' && run.method === 'handoff') {
+      // Restart: the next prompt starts a fresh agent with the summary as its first context
+      this.dropHost(sessionId);
+      s.contextHandoffPending = true;
+      s.usage = { ...s.usage, contextTokens: c.postTokens ?? 0 };
+    }
+    // The turn before it already asked for the user; the compaction itself does not
+    if (s.state === 'working') s.state = 'needs_you';
+    store.save(s, { touch: false });
+    this.emit('sessionStream', { sessionId, type: 'sessionCompacted', turn, session: { usage: s.usage } });
     this.emit('sessionsUpdated', this.listSessions());
-    this.emit('sessionStream', { sessionId, type: 'sessionCompacted', session });
+    // Messages queued while it ran go out now, as after any clean turn
+    if (owned && outcome.stopReason === 'end_turn') this.sendNextQueued(sessionId);
+  }
 
+  /**
+   * A compaction lifecycle update from the agent. During our native run it fills in that
+   * run's card; otherwise the agent compacted on its own (e.g. Claude near a full window)
+   * and gets a card of its own. Returns true when a card was added, so the reply that
+   * follows starts below it.
+   */
+  private applyCompactionUpdate(sessionId: string, u: CompactionEvent): boolean {
+    const s = store.get(sessionId);
+    if (!s) return false;
+    const run = this.compactionRuns.get(sessionId);
+    let added = false;
+    let turn: TurnMessage | undefined;
+    if (run?.method === 'native' && (!run.agentCompactionId || run.agentCompactionId === u.compactionId)) {
+      run.agentCompactionId = u.compactionId;
+      turn = s.turns.find((t) => t.id === run.turnId);
+    } else {
+      const key = `${sessionId}:${u.compactionId}`;
+      const known = this.agentCompactions.get(key);
+      turn = known ? s.turns.find((t) => t.id === known) : undefined;
+      if (!turn) {
+        if (!u.status) return false; // a summary chunk for a compaction never seen starting
+        const compaction: CompactionRecord = {
+          status: 'running',
+          method: 'native',
+          trigger: 'agent',
+          startedAt: Date.now(),
+          preTokens: s.usage.contextTokens || undefined,
+        };
+        turn = { id: `compact-${Date.now()}`, role: 'system', content: '', timestamp: Date.now(), compaction };
+        s.turns.push(turn);
+        this.agentCompactions.set(key, turn.id);
+        added = true;
+      }
+    }
+    const c = turn?.compaction;
+    if (!turn || !c) return false;
+    if (u.summaryChunk) c.summary = (c.summary || '') + u.summaryChunk;
+    if (u.summary !== undefined) c.summary = u.summary;
+    if (u.error) c.error = u.error;
+    if (u.preTokens !== undefined) c.preTokens = u.preTokens;
+    if (u.postTokens !== undefined) c.postTokens = u.postTokens;
+    if (u.status && u.status !== 'in_progress' && c.status === 'running') {
+      c.status = u.status;
+      c.endedAt = Date.now();
+      if (c.summary) c.summary = capSummary(c.summary);
+    }
+    // Summary chunks stream in quickly; the next status update carries them to disk and the UI
+    if (!u.status && !added) return false;
+    turn.content = compactionLabel(c);
+    store.save(s, { touch: false });
+    this.emit('sessionStream', { sessionId, type: 'compaction', turn });
+    return added;
+  }
+
+  /** Start "Compact when finished" when the turn that just ended qualifies. */
+  private maybeAutoCompact(sessionId: string, stopReason?: string): void {
+    const s = store.get(sessionId);
+    if (!s?.autoCompact?.enabled || this.isTurnInFlight(sessionId) || this.compactionRuns.has(sessionId)) return;
+    const decision = autoCompactDecision({
+      setting: s.autoCompact,
+      stopReason,
+      queuedCount: s.queuedPrompts?.length ?? 0,
+      backgroundRunning: hasRunningBackground(s),
+      pendingPermission: Boolean(s.pendingPermission),
+      contextTokens: s.usage.contextTokens,
+      contextWindow: contextWindowFor(s),
+    });
+    if (!decision.compact) {
+      if (decision.waitForBackground) this.autoCompactAfterBackground.set(sessionId, stopReason);
+      return;
+    }
+    console.log(`[session-mgr] Compacting ${sessionId} after its turn: ${decision.reason}`);
+    this.compactSession(sessionId, { trigger: 'auto' }).catch((err) => {
+      console.warn(`[session-mgr] Automatic compaction of ${sessionId} not started: ${err.message}`);
+    });
+  }
+
+  /** Decide again for a turn whose compaction waited on background work, once none is left running. */
+  private recheckAutoCompact(sessionId: string): void {
+    if (!this.autoCompactAfterBackground.has(sessionId)) return;
+    const s = store.get(sessionId);
+    if (s && hasRunningBackground(s)) return;
+    const stopReason = this.autoCompactAfterBackground.get(sessionId);
+    this.autoCompactAfterBackground.delete(sessionId);
+    if (s) this.maybeAutoCompact(sessionId, stopReason);
+  }
+
+  /** Set "Compact when finished" for a session; the choice becomes the default for new sessions too. */
+  setAutoCompact(sessionId: string, setting: AutoCompactSetting): AcpSession {
+    const session = store.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    session.autoCompact = setting;
+    store.save(session, { touch: false });
+    writeAutoCompactDefault(setting);
+    this.emit('sessionStream', { sessionId, type: 'autoCompactUpdated', session: { autoCompact: setting } });
     return session;
   }
 
@@ -1307,7 +1840,48 @@ function endBackgroundWork(s: AcpSession, reason: string): boolean {
       }
     }
   }
+  stopTranscriptWatchers(s.id);
+  if (endAgentTasks(s, reason)) changed = true;
   return changed;
+}
+
+interface CompactionRun {
+  turnId: string;
+  method: CompactionRecord['method'];
+  /** Prompt ownership, as in activePrompts. */
+  seq: number;
+  /** The agent's reply so far: the handoff summary. */
+  text: string;
+  /** The agent's own id for the compaction, once it reports one. */
+  agentCompactionId?: string;
+}
+
+/** Background shells, workflows or async subagents still running after the turn ended. */
+function hasRunningBackground(s: AcpSession): boolean {
+  if (s.agentTasks?.some((t) => t.status === 'running')) return true;
+  return s.turns.some((t) => t.toolCalls?.some((c) => c.background && (c.backgroundState ?? 'running') === 'running'));
+}
+
+const kTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
+/** The compaction turn's text: what the card shows, and what search and older clients see. */
+function compactionLabel(c: CompactionRecord): string {
+  const who = c.trigger === 'auto' ? ' automatically' : c.trigger === 'agent' ? ' by the agent' : '';
+  switch (c.status) {
+    case 'running':
+      return 'Compacting context…';
+    case 'completed': {
+      const tokens =
+        c.preTokens && c.postTokens !== undefined
+          ? `: ${kTokens(c.preTokens)} → ${c.postTokensEstimated ? '~' : ''}${kTokens(c.postTokens)} tokens`
+          : '';
+      return `Context compacted${who}${tokens}`;
+    }
+    case 'cancelled':
+      return 'Compaction stopped';
+    default:
+      return `Compaction failed${c.error ? `: ${c.error}` : ''}`;
+  }
 }
 
 function findToolCall(s: AcpSession, toolCallId: string): { turn: TurnMessage; call: ToolCallRecord } | null {

@@ -1,6 +1,6 @@
-# ACP Terminal design system
+# CodePit design system
 
-ACP Terminal is a workspace where one person supervises several AI coding agents.
+CodePit is a workspace where one person supervises several AI coding agents.
 The UI should feel like a calm, precise professional tool (think Linear, Raycast,
 Zed): dense but readable, quiet by default, and loud only when something needs
 the user.
@@ -85,6 +85,16 @@ icon, loading), `IconButton`, `Badge`, `StatusDot`, `Card`, `Field` + `Input` +
 `Textarea`, `Segmented`, `ChoiceCard`, `Switch`, `Tabs`, `Kbd`, `EmptyState`,
 `Progress`, `Stat`, `SectionHeader`, plus `Icon` and `Spinner`. Also available:
 `components/Menu.tsx` (overflow menu) and `components/Modal.tsx` (dialog shell).
+
+## Brand
+
+- The name is **CodePit**, one word. Tagline: "A pit wall for your coding agents".
+- Motor racing is flavour only: the icon, a tooltip, an empty state. State labels
+  and buttons stay plain ("Your turn", not "Box, box").
+- The icon is a pit board showing `>_`. Sources are `build/icon.svg` and
+  `build/icon-small.svg` (16 and 32 px); `node scripts/render-icons.mjs`
+  regenerates the PNG and `.icns`. The favicon and sidebar logo use
+  `web/public/favicon.svg` via `components/BrandMark.tsx`.
 
 ## Seeing your work
 

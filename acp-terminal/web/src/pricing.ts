@@ -18,10 +18,14 @@ const price = (
 ): ModelPricing => ({ basis, inputPerMillion, outputPerMillion, cachePerMillion, contextWindow });
 
 const FREE = price('Built-in demo agent', 0, 0, 0, 200_000);
-const CLAUDE_OPUS = price('Claude Opus', 15, 75, 1.5, 200_000);
-const CLAUDE_SONNET = price('Claude Sonnet', 3, 15, 0.3, 200_000);
-const CLAUDE_HAIKU = price('Claude Haiku', 0.8, 4, 0.08, 200_000);
-const CLAUDE_FABLE = price('Claude Fable', 5, 25, 0.5, 200_000);
+// Current Claude models run a 1M window (Haiku 4.5: 200k); a running agent reports the real one
+const CLAUDE_OPUS = price('Claude Opus 5.5', 4, 20, 0.2, 1_000_000);
+const CLAUDE_OPUS_5 = price('Claude Opus 5 / 4.x', 5, 25, 0.5, 1_000_000);
+const CLAUDE_OPUS_45 = price('Claude Opus 4.5', 15, 75, 1.5, 200_000);
+const CLAUDE_SONNET = price('Claude Sonnet 5.5', 2, 10, 0.2, 1_000_000);
+const CLAUDE_SONNET_46 = price('Claude Sonnet 4.6', 3, 15, 0.3, 1_000_000);
+const CLAUDE_HAIKU = price('Claude Haiku 4.5', 1, 5, 0.1, 200_000);
+const CLAUDE_FABLE = price('Claude Fable', 10, 50, 1, 1_000_000);
 const GEMINI_PRO = price('Gemini Pro', 1.25, 5, 0.3125, 1_000_000);
 const GEMINI_FLASH = price('Gemini Flash', 0.15, 0.6, 0.0375, 1_000_000);
 const GEMINI_FLASH_LITE = price('Gemini Flash-Lite', 0.075, 0.3, 0.01875, 1_000_000);
@@ -34,18 +38,31 @@ const CODEX = price('OpenAI Codex', 2.5, 10, 1.25, 128_000);
 const isGoogleAgent = (agentId: string) => /gemini|antigravity|google/.test(agentId);
 const isOpenAiAgent = (agentId: string) => /codex|openai/.test(agentId);
 
-/** Context window and list prices used for the usage estimates. */
+/**
+ * Context window and list prices used for the usage estimates. The window is the
+ * one the agent reported when known; model ids ending in [1m] or -1m mean 1M.
+ */
 export function sessionPricing(session: AcpSession): ModelPricing {
+  const listed = listPricing(session);
+  const hint = /(?:\[(\d+)m\]|-(\d+)m)$/i.exec(session.model || '');
+  const contextWindow = session.contextWindow || (hint ? Number(hint[1] ?? hint[2]) * 1_000_000 : listed.contextWindow);
+  return contextWindow === listed.contextWindow ? listed : { ...listed, contextWindow };
+}
+
+function listPricing(session: AcpSession): ModelPricing {
   const agentId = (session.agentId || '').toLowerCase();
   const m = (session.model || '').toLowerCase();
 
   // The built-in demo agent runs locally and costs nothing.
   if (agentId === 'mock') return FREE;
 
-  // Anthropic families.
+  // Anthropic families; the bare aliases (opus, sonnet) are Claude Code's current models.
+  if (m.includes('opus-4-5') || m.includes('opus-4.5')) return CLAUDE_OPUS_45;
+  if (/opus-(5|4[.-][678])\b/.test(m) && !/opus-5[.-]5/.test(m)) return CLAUDE_OPUS_5;
   if (m.includes('opus')) return CLAUDE_OPUS;
   if (m.includes('fable')) return CLAUDE_FABLE;
   if (m.includes('haiku')) return CLAUDE_HAIKU;
+  if (m.includes('sonnet-4-6') || m.includes('sonnet-4.6')) return CLAUDE_SONNET_46;
   if (m.includes('sonnet')) return CLAUDE_SONNET;
 
   // Google. "pro" counts only inside a Gemini model id ("gemini-3.1-pro") or on

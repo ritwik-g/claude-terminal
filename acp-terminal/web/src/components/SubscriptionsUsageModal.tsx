@@ -81,7 +81,6 @@ const VENDORS: VendorSpec[] = [
     envVar: 'OPENAI_API_KEY',
     loginCommand: 'codex login',
     loginHint: 'To switch accounts or ChatGPT plans, run',
-    note: "OpenAI doesn't report how much of your plan is left. ChatGPT plans apply rolling limits when you send a prompt.",
   },
   {
     key: 'google',
@@ -247,7 +246,7 @@ const LoadError: React.FC<{ what: string; message: string; onRetry: () => void }
     <EmptyState
       icon="alert"
       title={`Couldn't load ${what}`}
-      description={`${message}. Check that ACP Terminal's server is running, then try again.`}
+      description={`${message}. Check that CodePit's server is running, then try again.`}
       action={
         <Button icon="refresh" onClick={onRetry}>
           Try again
@@ -294,7 +293,7 @@ const VendorCard: React.FC<{
     rows.push(['App data', <code className="usg-mono">~/.gemini/antigravity</code>]);
   }
 
-  const showLimits = spec.key === 'anthropic' && (hasRateLimits(sub?.rateLimits) || mode !== 'api_key');
+  const showLimits = (spec.key === 'anthropic' || spec.key === 'openai') && (hasRateLimits(sub?.rateLimits) || mode !== 'api_key');
 
   return (
     <Card className="acct-card" padding="none">
@@ -337,7 +336,11 @@ const VendorCard: React.FC<{
           ) : (
             <div className="acct-note">
               <Icon name="info" size={13} />
-              <span>No limit data yet. Refresh to read your 5-hour and weekly windows from Claude Code.</span>
+              <span>
+                {spec.key === 'openai'
+                  ? 'No limit data yet. Refresh to read your usage windows and credits from Codex.'
+                  : 'No limit data yet. Refresh to read your 5-hour and weekly windows from Claude Code.'}
+              </span>
             </div>
           )}
           {refreshError && <div className="acct-inline-error">Couldn't refresh limits: {refreshError}</div>}

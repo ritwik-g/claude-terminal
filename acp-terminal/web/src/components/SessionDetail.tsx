@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { AcpSession, AgentDescriptor } from '../types';
 import { api } from '../api';
 import { useEscapeLayer } from '../hooks';
@@ -8,14 +8,18 @@ import { UsageTab } from './UsageTab';
 import { sessionPricing } from '../pricing';
 import { commandOf, isShellCall } from '../toolDisplay';
 import { getModelMeta } from './AgentModelPicker';
+import { advertisedModelLabel, effortLabel, sessionEffortChoices } from '../effort';
 import type { MenuItem } from './Menu';
 import { SessionHeader, SessionTabsBar, type WorkspaceTab } from './SessionHeader';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ConversationView, type RollbackAction } from './ConversationView';
 import { Composer } from './Composer';
 import { MobileActionSheet } from './MobileActionSheet';
+import { isCompacting } from './CompactionCard';
 import { ImageLightbox } from './ImageLightbox';
 import { nextPriority } from './sessionMeta';
+import { AgentsPanel, agentTaskCounts } from './AgentsView';
+import { AgentTaskNavContext } from './agentTaskNav';
 
 // Other areas import these from here.
 export { STATE_LABEL, formatTime, nextPriority } from './sessionMeta';
@@ -48,15 +52,27 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   const [showMobileActions, setShowMobileActions] = useState(false);
   const [promptText, setPromptText] = useState('');
   const [rollingBack, setRollingBack] = useState(false);
-  const [compacting, setCompacting] = useState(false);
+  const [requestingCompaction, setRequestingCompaction] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   useEscapeLayer(Boolean(previewImage), () => setPreviewImage(null));
   useEscapeLayer(showMobileActions, () => setShowMobileActions(false));
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
 
+  // Agent tasks open in the focused view of the Agents tab (empty: its list)
+  const [focusedTasks, setFocusedTasks] = useState<string[]>([]);
+  const openAgentTasks = useCallback((...ids: string[]) => {
+    setFocusedTasks(ids);
+    setActiveTab('agents');
+  }, []);
+  const changeTab = useCallback((tab: WorkspaceTab) => {
+    setFocusedTasks([]);
+    setActiveTab(tab);
+  }, []);
+
   useEffect(() => {
     setPromptText('');
+    setFocusedTasks([]);
   }, [session.id]);
 
   const shellCommandCount = session.turns.reduce(
@@ -65,19 +81,35 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   );
 
   // ------------------------------------------------------------- Handlers
+  // The transcript is kept, so compacting needs no confirmation; its card shows progress
+  const compacting = requestingCompaction || isCompacting(session);
+  // As on the server: only what came after the last completed compaction can be compacted
+  const compactBoundary = session.turns.reduce(
+    (b, t, i) => (t.compaction?.status === 'completed' || (t.role === 'system' && !t.compaction && t.id.startsWith('compact-')) ? i : b),
+    -1
+  );
+  const hasNewToCompact = session.turns.slice(compactBoundary + 1).some((t) => t.role === 'agent');
+  const turnBusy = session.state === 'working' || Boolean(session.pendingPermission);
+  const canCompact = hasNewToCompact && !turnBusy;
+  const compactBlockedReason = compacting
+    ? 'Already compacting'
+    : turnBusy
+      ? 'Compaction can run once this turn finishes'
+      : !hasNewToCompact
+        ? compactBoundary >= 0
+          ? 'Nothing new since the last compaction'
+          : 'Nothing to compact yet'
+        : undefined;
   const handleCompactSession = async () => {
-    if (compacting || session.turns.length <= 1) return;
-    if (!confirm('Compact conversation history? This summarizes prior turns and tool outputs into a lean checkpoint, freeing up context.')) {
-      return;
-    }
-    setCompacting(true);
+    if (compacting || !canCompact) return;
+    setRequestingCompaction(true);
     try {
       await api.compactSession(session.id);
       onRefresh();
     } catch (err: any) {
-      alert(`Failed to compact session: ${err.message}`);
+      alert(`Could not compact: ${err.message}`);
     } finally {
-      setCompacting(false);
+      setRequestingCompaction(false);
     }
   };
 
@@ -195,6 +227,11 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   const runLocalCommand = async (command: string): Promise<boolean> => {
     switch (command) {
       case '/compact':
+        // Handled here either way, so it never goes to the agent; when it cannot run, say why and keep the text
+        if (compactBlockedReason) {
+          alert(`Could not compact: ${compactBlockedReason}`);
+          return true;
+        }
         setPromptText('');
         await handleCompactSession();
         return true;
@@ -242,7 +279,9 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   const estimatedCost = (inputTokens / 1_000_000) * pricing.inputPerMillion + (outputTokens / 1_000_000) * pricing.outputPerMillion;
 
   const currentModelMeta = getModelMeta(session.model || 'sonnet');
-  const activeEffort = session.effort || 'medium';
+  const activeEffort = session.effort || 'auto';
+  const efforts = sessionEffortChoices(session, agents);
+  const modelName = advertisedModelLabel(session) || currentModelMeta.label || session.model || session.agentName;
 
   const menuItems: Array<MenuItem | 'divider'> = [
     {
@@ -255,7 +294,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
       label: compacting ? 'Compacting…' : 'Compact context',
       icon: 'archive',
       onSelect: handleCompactSession,
-      disabled: session.turns.length <= 1 || compacting,
+      disabled: !canCompact || compacting,
     },
     { label: isSnoozed ? 'Wake session' : 'Snooze for 1 hour', icon: 'moon', onSelect: handleToggleSnooze },
     { label: session.user.cleanup ? 'Unmark cleanup' : 'Mark for cleanup', icon: 'check', onSelect: handleToggleCleanup, hint: 'c' },
@@ -283,15 +322,25 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
 
       <SessionTabsBar
         activeTab={activeTab}
-        onChange={setActiveTab}
+        onChange={changeTab}
         shellCommandCount={shellCommandCount}
         contextTokens={contextTokens}
         contextWindow={pricing.contextWindow}
         estimatedCost={estimatedCost}
+        agentTasks={agentTaskCounts(session)}
       />
 
+      <AgentTaskNavContext.Provider value={openAgentTasks}>
       <div className="ws-body">
-        {activeTab === 'conversation' ? (
+        {activeTab === 'agents' ? (
+          <AgentsPanel
+            session={session}
+            focusedIds={focusedTasks}
+            onOpen={(ids) => openAgentTasks(...ids)}
+            onBack={() => setFocusedTasks([])}
+            onShowSession={() => changeTab('conversation')}
+          />
+        ) : activeTab === 'conversation' ? (
           <>
             <ActivityStrip session={session} />
             <ConversationView
@@ -316,6 +365,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
           />
         )}
       </div>
+      </AgentTaskNavContext.Provider>
 
       <Composer
         session={session}
@@ -343,10 +393,13 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
       {showMobileActions && (
         <MobileActionSheet
           session={session}
-          modelLabel={`${currentModelMeta.label || session.model || session.agentName}${currentModelMeta.supportsEffort ? `, ${activeEffort} effort` : ''}`}
+          modelLabel={`${modelName}${efforts.length > 0 ? `, ${effortLabel(activeEffort, efforts).toLowerCase()} effort` : ''}`}
           isSnoozed={isSnoozed}
           rollingBack={rollingBack}
           compacting={compacting}
+          canCompact={canCompact}
+          compactBlockedReason={compactBlockedReason}
+          onAutoCompactChanged={onRefresh}
           onClose={() => setShowMobileActions(false)}
           onToggleAutoApprove={handleToggleAutoApprove}
           onOpenModelPicker={() => setShowModelPicker(true)}

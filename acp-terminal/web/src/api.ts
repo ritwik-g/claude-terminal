@@ -1,15 +1,18 @@
 import type {
   AcpSession,
+  AutoCompactSetting,
   AgentDescriptor,
   EcosystemReport,
   McpPreset,
   McpProbeResult,
   McpServer,
   McpServerInput,
+  QueuedPrompt,
   FileAttachment,
   SessionCostDetail,
   SessionSummary,
   StoredCredentials,
+  ThinkingEffort,
   UsageReport,
   UserAnnotations,
   VendorSubscriptionInfo,
@@ -81,6 +84,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ prompt, attachments }),
     }),
+  /** Sends at once when the session is free, otherwise waits behind the running turn. */
+  queuePrompt: (id: string, prompt: string, attachments?: FileAttachment[]) =>
+    request<{ queued: boolean }>(`/api/sessions/${id}/queue`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt, attachments }),
+    }),
+  updateQueuedPrompt: (id: string, queueId: string, prompt: string) =>
+    request<{ queuedPrompts: QueuedPrompt[] }>(`/api/sessions/${id}/queue/${queueId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ prompt }),
+    }),
+  removeQueuedPrompt: (id: string, queueId: string) =>
+    request<{ queuedPrompts: QueuedPrompt[] }>(`/api/sessions/${id}/queue/${queueId}`, {
+      method: 'DELETE',
+    }),
+  sendQueuedNow: (id: string, queueId: string) =>
+    request<{ ok: boolean }>(`/api/sessions/${id}/queue/${queueId}/send`, {
+      method: 'POST',
+    }),
   cancelPrompt: (id: string) =>
     request<{ ok: boolean }>(`/api/sessions/${id}/cancel`, {
       method: 'POST',
@@ -129,6 +151,11 @@ export const api = {
     request<{ session: AcpSession }>(`/api/sessions/${id}/compact`, {
       method: 'POST',
     }),
+  setAutoCompact: (id: string, setting: AutoCompactSetting) =>
+    request<{ autoCompact: AutoCompactSetting }>(`/api/sessions/${id}/auto-compact`, {
+      method: 'PUT',
+      body: JSON.stringify(setting),
+    }),
   setSessionAgent: (
     id: string,
     agentId: string,
@@ -140,7 +167,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ agentId, model, effort, contextMode }),
     }),
-  setSessionEffort: (id: string, effort: 'off' | 'low' | 'medium' | 'high') =>
+  setSessionEffort: (id: string, effort: ThinkingEffort) =>
     request<{ session: AcpSession }>(`/api/sessions/${id}/effort`, {
       method: 'PATCH',
       body: JSON.stringify({ effort }),
@@ -197,17 +224,39 @@ export const api = {
     request<{ usage: UsageReport }>('/api/usage/summary'),
   getSessionUsage: (id: string) =>
     request<{ sessionCost: SessionCostDetail; usage: any; model?: string }>(`/api/sessions/${id}/usage`),
-  getNetworkInfo: () =>
-    request<{
-      port: number;
-      token: string;
-      ips: string[];
-      localUrl: string;
-      networkUrls: string[];
-      lanEnabled?: boolean;
-      host?: string;
-    }>('/api/network'),
+  getNetworkInfo: () => request<NetworkInfo>('/api/network'),
+  setLanAccess: (enabled: boolean) =>
+    request<NetworkInfo>('/api/network/lan', { method: 'POST', body: JSON.stringify({ enabled }) }),
 };
+
+export interface LanInterface {
+  address: string;
+  /** OS interface name, e.g. en0 or bridge100. */
+  name: string;
+  kind: 'wifi' | 'ethernet' | 'other' | 'vpn' | 'virtual';
+  /** Plain-words network name, e.g. "Wi-Fi". */
+  label: string;
+  /** Sign-in link for this address, token included. */
+  url: string;
+}
+
+export interface NetworkInfo {
+  port: number;
+  token: string;
+  /** Addresses LAN devices can reach the server on right now. */
+  ips: string[];
+  localUrl: string;
+  networkUrls: string[];
+  /** The same links, labelled by network and ordered best first (Wi-Fi before VM bridges). */
+  lanInterfaces?: LanInterface[];
+  lanEnabled: boolean;
+  host: string;
+  /** Interfaces that could not be listened on, with the reason. */
+  lanErrors: { address: string; error: string }[];
+  /** False when viewed from another device, or when HOST fixes the setting. */
+  canToggle: boolean;
+  lockedReason?: string;
+}
 
 /**
  * Appends the access token to a same-origin URL. Needed where a request can't

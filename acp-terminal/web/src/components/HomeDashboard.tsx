@@ -55,7 +55,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({ sessions, agents, 
           <div className="home-welcome">
             <EmptyState
               icon="terminal"
-              title="Welcome to ACP Terminal"
+              title="Welcome to CodePit"
               description={summary}
               action={
                 <Button variant="primary" size="lg" icon="plus" onClick={() => onNewSession()}>

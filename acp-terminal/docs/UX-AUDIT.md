@@ -1,4 +1,4 @@
-# ACP Terminal: UI/UX and functional gap audit (2026-09-29)
+# CodePit (then ACP Terminal): UI/UX and functional gap audit (2026-09-29)
 
 Method: drove the app in headless Chrome against an isolated server
 (`ACP_APP_DIR=/tmp/…`, empty `/tmp` workspaces, the built-in demo agent),

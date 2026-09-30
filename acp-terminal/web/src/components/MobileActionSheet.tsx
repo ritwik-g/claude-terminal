@@ -2,6 +2,7 @@ import React from 'react';
 import type { AcpSession } from '../types';
 import { Badge, Icon, IconButton, Switch, type IconName } from '../ui';
 import { cx } from './sessionMeta';
+import { AutoCompactControl } from './CompactionCard';
 
 const ActionRow: React.FC<{
   icon: IconName;
@@ -46,6 +47,11 @@ export const MobileActionSheet: React.FC<{
   isSnoozed: boolean;
   rollingBack: boolean;
   compacting: boolean;
+  canCompact?: boolean;
+  /** Why compaction cannot run now, shown in place of the row's description. */
+  compactBlockedReason?: string;
+  /** Called after "Compact when finished" changes. */
+  onAutoCompactChanged?: () => void;
   onClose: () => void;
   onToggleAutoApprove: () => void;
   onOpenModelPicker: () => void;
@@ -137,10 +143,20 @@ export const MobileActionSheet: React.FC<{
             <ActionRow
               icon="archive"
               label={p.compacting ? 'Compacting…' : 'Compact context'}
-              description="Summarise earlier turns to free up context"
+              description={(!p.compacting && p.compactBlockedReason) || 'Summarise earlier turns to free up context'}
               onClick={then(p.onCompact)}
-              disabled={session.turns.length <= 1 || p.compacting}
+              disabled={(p.canCompact === undefined ? session.turns.length <= 1 : !p.canCompact) || p.compacting}
             />
+            <div className="ws-sheet-row is-toggle">
+              <span className="ws-sheet-icon">
+                <Icon name="archive" size={16} />
+              </span>
+              <AutoCompactControl
+                session={session}
+                onChanged={() => p.onAutoCompactChanged?.()}
+                description="Saves context when a run ends, so the next one starts lean"
+              />
+            </div>
             {p.onOpenSubscriptionsModal && (
               <ActionRow icon="card" label="Subscriptions and usage" description="Vendor limits, keys and token usage" onClick={then(p.onOpenSubscriptionsModal)} />
             )}

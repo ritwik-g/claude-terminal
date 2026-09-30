@@ -13,7 +13,7 @@ type IconName =
   | 'external' | 'refresh' | 'download' | 'eye' | 'message' | 'sidebar' | 'chart' | 'dollar'
   | 'shield' | 'lock' | 'bell' | 'info' | 'help' | 'arrowRight' | 'arrowUp' | 'commit' | 'diff'
   | 'package' | 'hash' | 'image' | 'logout' | 'chevronUp' | 'chevronLeft' | 'checkCircle'
-  | 'xCircle' | 'pause' | 'link' | 'grid' | 'plug' | 'database';
+  | 'xCircle' | 'pause' | 'link' | 'grid' | 'plug' | 'database' | 'qr';
 
 const PATHS: Record<IconName, React.ReactNode> = {
   terminal: <><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></>,
@@ -97,6 +97,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   plug: <><path d="M12 22v-5" /><path d="M9 8V2" /><path d="M15 8V2" /><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" /></>,
   database: <><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0 0 18 0V5" /><path d="M3 12a9 3 0 0 0 18 0" /></>,
   grid: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /></>,
+  qr: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3h-3z" /><path d="M21 14v.01" /><path d="M21 21h-4v-4" /><path d="M14 21v-.01" /></>,
 };
 
 export const Icon: React.FC<{ name: IconName; size?: number; className?: string; title?: string }> = ({

@@ -1398,6 +1398,31 @@
   font-weight: 500;
 }
 
+/* Five or more levels (Claude: Auto..Max) take the full row under the label */
+.ws-model-effort.is-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+}
+
+/* Too many levels for a phone's width (Codex: Auto plus six) wrap onto a second row */
+.ws-model-effort.is-stacked .ui-segmented {
+  flex-wrap: wrap;
+}
+.ws-model-effort.is-stacked .ui-segment {
+  flex: 1 0 auto;
+}
+
+.ws-model-effort:has(.ws-model-effort-hint) {
+  flex-wrap: wrap;
+}
+
+.ws-model-effort-hint {
+  flex-basis: 100%;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
 .ws-model-list {
   flex: 1;
   min-height: 0;
@@ -2105,4 +2130,106 @@ button.ws-sheet-row:active:not(:disabled) {
   .ws-lightbox {
     padding: 56px var(--space-3) var(--space-3);
   }
+}
+
+/* ======================================================== Queued messages */
+
+.ws-queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+}
+
+.ws-queue-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.ws-queue-head > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 30vh;
+  overflow-y: auto;
+  list-style: none;
+  counter-reset: queue;
+}
+
+.ws-queue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  counter-increment: queue;
+}
+
+.ws-queue-item::before {
+  content: counter(queue);
+  flex-shrink: 0;
+  width: 16px;
+  padding-top: 5px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-align: right;
+}
+
+.ws-queue-text {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  padding: 4px var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ws-queue-text:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.ws-queue-files {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: var(--space-2);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.ws-queue-edit {
+  flex: 1;
+  min-width: 0;
+  padding: 4px var(--space-2);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  resize: vertical;
+}
+
+.ws-queue-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
 }

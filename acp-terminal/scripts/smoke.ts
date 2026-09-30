@@ -30,7 +30,7 @@ function httpGet(url: string, token?: string): Promise<{ status: number; body: s
 }
 
 async function runSmokeTest() {
-  console.log('💨 [Smoke Test] Launching ACP Terminal Server...');
+  console.log('💨 [Smoke Test] Launching CodePit Server...');
 
   // Isolate smoke test storage from the user's real ~/.acp-terminal directory
   const testAppDir = path.join(os.tmpdir(), `acp-terminal-smoke-app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);

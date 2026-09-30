@@ -3,6 +3,7 @@ import type { SessionSummary } from '../types';
 import { VendorIcon } from './VendorLogos';
 import { Badge, Button, Icon, IconButton, Input, Kbd, StatusDot, type Tone } from '../ui';
 import { ThemeMenu } from './ThemeMenu';
+import { BrandMark } from './BrandMark';
 
 // ------------------------------------------------------------------ helpers
 // Shared by the sidebar, the command palette and the home dashboard.
@@ -188,10 +189,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="sidebar" aria-label="Sessions">
       <div className="sb-head">
         <button type="button" className="sb-brand" onClick={onGoHome} title="Home">
-          <span className="sb-brand-mark" aria-hidden>
-            <Icon name="terminal" size={13} />
-          </span>
-          <span className="sb-brand-name">ACP Terminal</span>
+          <BrandMark />
+          <span className="sb-brand-name">CodePit</span>
         </button>
         <div className="sb-head-actions">
           <IconButton

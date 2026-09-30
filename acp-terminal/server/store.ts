@@ -36,7 +36,7 @@ class SessionStore {
             this.sessions.set(session.id, session);
           }
         } catch (err) {
-          console.warn(`[acp-terminal] Failed to parse session ${file}:`, err);
+          console.warn(`[codepit] Failed to parse session ${file}:`, err);
         }
       }
     } catch {
@@ -112,12 +112,12 @@ class SessionStore {
       const sessionsDir = getSessionsDir();
       ensurePrivateDir(sessionsDir);
       const filePath = path.join(sessionsDir, `${session.id}.json`);
-      fs.writeFileSync(filePath, JSON.stringify(session, null, 2), {
+      fs.writeFileSync(filePath, JSON.stringify(session), {
         mode: FILE_MODE,
         encoding: 'utf8',
       });
     } catch (err) {
-      console.error(`[acp-terminal] Failed to persist session ${session.id}:`, err);
+      console.error(`[codepit] Failed to persist session ${session.id}:`, err);
     }
   }
 }

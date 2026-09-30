@@ -1,0 +1,211 @@
+/* Context compaction: the divider card in the transcript and "Compact when finished" */
+
+.ws-compaction {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ws-compaction-rule {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.ws-compaction-rule::before,
+.ws-compaction-rule::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.ws-compaction.is-completed .ws-compaction-rule::before,
+.ws-compaction.is-completed .ws-compaction-rule::after {
+  background: var(--accent-border);
+}
+
+.ws-compaction-pill {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 88%;
+  min-height: 26px;
+  padding: 2px 6px 2px 10px;
+  border: 1px solid var(--tone-border, var(--border));
+  /* Not a full pill: on narrow screens it wraps to two lines */
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+.ws-compaction-pill.tone-neutral {
+  border-color: var(--border);
+}
+
+.ws-compaction-pill > .ui-icon,
+.ws-compaction-pill > svg {
+  color: var(--tone, var(--text-3));
+  flex: none;
+}
+
+.ws-compaction-title {
+  color: var(--text);
+  font-weight: 550;
+}
+
+.ws-compaction-detail {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+}
+
+.ws-compaction.is-running .ws-compaction-detail,
+.ws-compaction.is-failed .ws-compaction-detail {
+  font-family: var(--font-ui);
+}
+
+.ws-compaction.is-failed .ws-compaction-detail {
+  color: var(--danger);
+}
+
+.ws-compaction-trigger {
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+
+.ws-compaction-time {
+  color: var(--text-3);
+}
+
+.ws-compaction-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ws-compaction-toggle:hover {
+  background: var(--accent-soft);
+}
+
+.ws-compaction-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ws-compaction-summary {
+  margin: 0 auto;
+  width: min(100%, 680px);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: var(--text-base);
+  max-height: 420px;
+  overflow: auto;
+}
+
+/*
+ * What the agent no longer holds in context reads a step quieter once the conversation
+ * has moved on past the compaction (the last reply stays bright until then); hover brings it back.
+ */
+.ws-turn:has(~ .ws-compaction.is-completed ~ .ws-turn) {
+  opacity: 0.62;
+  transition: opacity 120ms ease;
+}
+
+.ws-turn:has(~ .ws-compaction.is-completed ~ .ws-turn):hover {
+  opacity: 1;
+}
+
+/* "Compact when finished" next to the composer tools */
+
+.ws-autocompact {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  margin-left: var(--space-1);
+  padding: 0 2px 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.ws-autocompact:hover {
+  border-color: var(--border);
+}
+
+.ws-autocompact.is-on {
+  color: var(--text-2);
+}
+
+.ws-autocompact-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.ws-autocompact-check input {
+  margin: 0;
+  accent-color: var(--accent-solid);
+  cursor: pointer;
+}
+
+.ws-autocompact-threshold {
+  height: 22px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ws-autocompact-threshold:hover,
+.ws-autocompact-threshold:focus-visible {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.ws-autocompact:not(.is-on) .ws-autocompact-threshold {
+  opacity: 0.7;
+}
+
+/* The mobile action sheet carries it on phones */
+@media (max-width: 768px) {
+  .ws-composer-tools .ws-autocompact {
+    display: none;
+  }
+}
+
+.ws-sheet-row .ws-autocompact {
+  margin-left: 0;
+  flex-wrap: wrap;
+  height: auto;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.ws-autocompact-desc {
+  flex-basis: 100%;
+  padding-left: 18px;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  white-space: normal;
+}

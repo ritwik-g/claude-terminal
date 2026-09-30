@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { AcpSession, AgentDescriptor, McpServer, SessionSummary } from './types';
+import type { AcpSession, AgentDescriptor, AgentTask, AgentTaskTextDelta, McpServer, SessionSummary } from './types';
 import { api, connectWebSocket } from './api';
 import { Sidebar } from './components/Sidebar';
 import { SessionDetail, nextPriority } from './components/SessionDetail';
@@ -7,6 +7,7 @@ import { NewSessionModal } from './components/NewSessionModal';
 import { SwitchAgentModal } from './components/SwitchAgentModal';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
 import { HomeDashboard } from './components/HomeDashboard';
+import { BrandMark } from './components/BrandMark';
 import { SubscriptionsUsageModal } from './components/SubscriptionsUsageModal';
 import { NetworkModal } from './components/NetworkModal';
 import { McpModal } from './components/mcp/McpModal';
@@ -20,6 +21,38 @@ function visibleSessionOrder(): string[] {
   return Array.from(document.querySelectorAll<HTMLElement>('.sidebar [data-session-id]')).map(
     (el) => el.dataset.sessionId!
   );
+}
+
+/** Append one streamed chunk of a subagent's text or reasoning to its task (and, for a reply, its spawning call). */
+function applyTaskText(prev: AcpSession, d: AgentTaskTextDelta): AcpSession {
+  let next = prev;
+  const tasks = prev.agentTasks || [];
+  const ti = tasks.findIndex((t) => t.id === d.taskId);
+  if (ti !== -1) {
+    const task = tasks[ti];
+    const segments = [...(task.segments || [])];
+    const si = segments.findIndex((seg) => seg.id === d.segmentId);
+    const seg = segments[si];
+    if (seg && seg.kind !== 'tool') segments[si] = { ...seg, text: seg.text + d.text };
+    else if (d.kind === 'text') segments.push({ kind: 'text', id: d.segmentId, text: d.text, messageId: d.messageId });
+    else segments.push({ kind: 'thought', id: d.segmentId, text: d.text });
+    const nextTasks = [...tasks];
+    nextTasks[ti] = { ...task, segments };
+    next = { ...next, agentTasks: nextTasks };
+  }
+  if (d.toolCallId) {
+    const turnIdx = prev.turns.findIndex((t) => t.toolCalls?.some((c) => c.id === d.toolCallId));
+    if (turnIdx !== -1) {
+      const turns = [...prev.turns];
+      const turn = turns[turnIdx];
+      turns[turnIdx] = {
+        ...turn,
+        toolCalls: turn.toolCalls!.map((c) => (c.id === d.toolCallId ? { ...c, subagentText: (c.subagentText || '') + d.text } : c)),
+      };
+      next = { ...next, turns };
+    }
+  }
+  return next;
 }
 
 export const App: React.FC = () => {
@@ -145,6 +178,10 @@ export const App: React.FC = () => {
           }
         }
       } else if (msg.type === 'sessionStream' || ['thought', 'message', 'toolCall', 'toolCallUpdate', 'turnCompleted'].includes(msg.type)) {
+        // An agent reported its models and effort levels; the server cached them on its descriptor
+        if (msg.event === 'agentOptions') {
+          api.getAgents().then((res) => setAgents(res.agents)).catch(() => {});
+        }
         if (selectedId && msg.sessionId === selectedId) {
           if (msg.session) {
             setActiveSession((prev) => (prev && prev.id === selectedId ? { ...prev, ...msg.session } : prev));
@@ -161,6 +198,23 @@ export const App: React.FC = () => {
               }
               return { ...prev, turns };
             });
+          }
+          if (Array.isArray(msg.agentTasks) || Array.isArray(msg.removedAgentTaskIds)) {
+            // Only the tasks that changed are sent; replace them by id, and drop any merged away
+            setActiveSession((prev) => {
+              if (!prev || prev.id !== msg.sessionId) return prev;
+              const removed = new Set<string>(msg.removedAgentTaskIds || []);
+              const tasks = (prev.agentTasks || []).filter((x) => !removed.has(x.id));
+              for (const t of (msg.agentTasks || []) as AgentTask[]) {
+                const idx = tasks.findIndex((x) => x.id === t.id);
+                if (idx === -1) tasks.push(t);
+                else tasks[idx] = t;
+              }
+              return { ...prev, agentTasks: tasks };
+            });
+          }
+          if (msg.taskText) {
+            setActiveSession((prev) => (prev && prev.id === msg.sessionId ? applyTaskText(prev, msg.taskText as AgentTaskTextDelta) : prev));
           }
           if (msg.event === 'rateLimits' || msg.rateLimits) {
             setActiveSession((prev) => (prev && prev.id === selectedId ? { ...prev, rateLimits: msg.rateLimits || prev.rateLimits } : prev));
@@ -234,7 +288,7 @@ export const App: React.FC = () => {
   // Show how many sessions need the user in the tab title.
   useEffect(() => {
     const n = sessions.filter(needsAttention).length;
-    document.title = n > 0 ? `(${n}) ACP Terminal` : 'ACP Terminal';
+    document.title = n > 0 ? `(${n}) CodePit` : 'CodePit';
   }, [sessions]);
 
   const handleDeleted = useCallback(
@@ -444,7 +498,7 @@ export const App: React.FC = () => {
           <span className="auth-icon" aria-hidden>
             <Icon name="lock" size={20} />
           </span>
-          <h1 className="auth-title">Connect to ACP Terminal</h1>
+          <h1 className="auth-title">Connect to CodePit</h1>
           <p className="auth-desc">
             You're opening the workspace from another device (<code>{window.location.host}</code>). Paste the access token
             from the host computer to continue.
@@ -637,14 +691,12 @@ const MainSkeleton: React.FC = () => (
 
 /** First paint while sessions load: the shell's shape, without content. */
 const AppSkeleton: React.FC = () => (
-  <div className="app-container mobile-view-list" aria-busy="true" aria-label="Loading ACP Terminal">
+  <div className="app-container mobile-view-list" aria-busy="true" aria-label="Loading CodePit">
     <aside className="sidebar sidebar-skeleton" aria-hidden>
       <div className="sb-head">
         <span className="sb-brand">
-          <span className="sb-brand-mark">
-            <Icon name="terminal" size={13} />
-          </span>
-          <span className="sb-brand-name">ACP Terminal</span>
+          <BrandMark />
+          <span className="sb-brand-name">CodePit</span>
         </span>
       </div>
       <div className="skel-side">

@@ -1,15 +1,21 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage, Server } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { sessionManager } from './acp/session-mgr.js';
 import { ptyManager } from './pty-manager.js';
 import { store } from './store.js';
 import { getOrCreateToken } from './paths.js';
 import { checkAccess } from './security.js';
 
-export function setupWebSockets(server: Server): void {
+/**
+ * Sets up the WebSocket endpoints and returns `attach`, which adds them to an HTTP
+ * listener. The loopback listener and every LAN listener share one set of clients,
+ * so session events are relayed once however many listeners there are.
+ */
+export function setupWebSockets(): (server: Server) => void {
   const wss = new WebSocketServer({ noServer: true });
 
-  server.on('upgrade', (request, socket, head) => {
+  const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     let url: URL;
     try {
       url = new URL(request.url || '/', `http://${request.headers.host}`);
@@ -35,7 +41,7 @@ export function setupWebSockets(server: Server): void {
     } else {
       socket.destroy();
     }
-  });
+  };
 
   const sessionClients = new Set<WebSocket>();
 
@@ -59,6 +65,9 @@ export function setupWebSockets(server: Server): void {
       usage: payload.usage,
       rateLimits: payload.rateLimits,
       promptSuggestion: payload.promptSuggestion,
+      agentTasks: payload.agentTasks,
+      removedAgentTaskIds: payload.removedAgentTaskIds,
+      taskText: payload.taskText,
     });
     for (const ws of sessionClients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(msg);
@@ -157,4 +166,8 @@ export function setupWebSockets(server: Server): void {
       sessionClients.delete(ws);
     });
   });
+
+  return (server: Server) => {
+    server.on('upgrade', onUpgrade);
+  };
 }

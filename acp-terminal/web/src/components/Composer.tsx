@@ -5,10 +5,14 @@ import { useEscapeLayer } from '../hooks';
 import { Button, Icon, IconButton, Kbd } from '../ui';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
+import { advertisedModelLabel, effortLabel, sessionEffortChoices } from '../effort';
 import { getSlashCommandsForAgent, filterSlashCommands } from '../slashCommands';
 import { SlashMenu, type SlashCategory } from './SlashMenu';
 import { ModelSwitcher } from './ModelSwitcher';
+import { QueuedPrompts } from './QueuedPrompts';
+import { AutoCompactControl, isCompacting } from './CompactionCard';
 import { cx, formatBytes } from './sessionMeta';
+import { MOD_KEY } from './Sidebar';
 
 // The textarea grows with its content up to this share of the viewport.
 const MAX_GROW = 0.4;
@@ -197,27 +201,16 @@ export const Composer: React.FC<{
 
     if (text.startsWith('/') && !text.includes(' ') && (await runLocalCommand(text))) return;
 
-    if (
-      session.state === 'working' &&
-      !confirm('The agent is still working on the current turn. Stop it and send this message instead?')
-    ) {
-      return;
-    }
-
+    // While a turn runs this queues behind it; each queued message can still be sent now from the list
     const outgoing = [...attachments];
     setPromptText('');
     setAttachments([]);
     setSending(true);
     try {
-      if (session.state === 'working') {
-        // Cancel the active turn first so the new prompt starts from a clean state.
-        try {
-          await api.cancelPrompt(session.id);
-        } catch {}
-      }
-      await api.sendPrompt(session.id, text, outgoing.length > 0 ? outgoing : undefined);
+      await api.queuePrompt(session.id, text, outgoing.length > 0 ? outgoing : undefined);
     } catch (err: any) {
       alert(`Error sending prompt: ${err.message}`);
+      setPromptText(text);
       setAttachments(outgoing);
     } finally {
       setSending(false);
@@ -256,15 +249,20 @@ export const Composer: React.FC<{
       setPromptText(session.promptSuggestion);
       return;
     }
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    // Plain and Shift+Enter fall through to the textarea as a new line; only Cmd/Ctrl+Enter sends
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSendPrompt();
     }
   };
 
   const currentModelMeta = getModelMeta(session.model || 'sonnet');
-  const activeEffort = session.effort || 'medium';
-  const working = session.state === 'working';
+  const activeEffort = session.effort || 'auto';
+  const efforts = sessionEffortChoices(session, agents);
+  const modelName = advertisedModelLabel(session) || currentModelMeta.label || session.model || session.agentName;
+  const compacting = isCompacting(session);
+  // A compaction holds the session like a turn: messages queue behind it and Stop ends it
+  const working = session.state === 'working' || compacting;
   const agentShort = session.agentName.replace(/ \(ACP\)$/, '');
   // Phones get a shorter placeholder so it fits on one line.
   const narrow = typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches;
@@ -274,6 +272,9 @@ export const Composer: React.FC<{
     <form className="ws-composer-dock" onSubmit={handleSendPrompt}>
       <div className="ws-composer-column">
         {above}
+        {session.queuedPrompts && session.queuedPrompts.length > 0 && (
+          <QueuedPrompts session={session} onRefresh={onRefresh} />
+        )}
         {showSlashMenu && (
           <SlashMenu
             ref={slashMenuRef}
@@ -348,9 +349,11 @@ export const Composer: React.FC<{
               session.promptSuggestion
                 ? `${session.promptSuggestion}  (Tab to use it)`
                 : attachments.length > 0
-                ? 'Add a message, or press Enter to send the attachments'
+                ? `Add a message, or press ${MOD_KEY} Enter to send the attachments`
+                : compacting
+                ? 'Queue a message for when compaction finishes'
                 : working
-                ? 'Type to redirect the agent (sending stops the current turn)'
+                ? 'Queue a message for when the agent finishes'
                 : narrow
                 ? `Message ${agentShort}`
                 : `Message ${agentShort}, or type / for commands`
@@ -375,9 +378,9 @@ export const Composer: React.FC<{
                   title="Switch model or effort for your next messages"
                 >
                   <VendorIcon agentId={session.agentId} size={14} />
-                  <span className="ws-model-pill-name">{currentModelMeta.label || session.model || session.agentName}</span>
-                  {currentModelMeta.supportsEffort && activeEffort !== 'off' && (
-                    <span className="ws-model-pill-effort">{activeEffort}</span>
+                  <span className="ws-model-pill-name">{modelName}</span>
+                  {efforts.length > 0 && (
+                    <span className="ws-model-pill-effort">{effortLabel(activeEffort, efforts)}</span>
                   )}
                   <Icon name="chevronDown" size={12} className="ws-model-pill-chevron" />
                 </button>
@@ -414,6 +417,7 @@ export const Composer: React.FC<{
               >
                 /
               </button>
+              <AutoCompactControl session={session} onChanged={onRefresh} />
               <input
                 ref={fileInputRef}
                 type="file"
@@ -431,17 +435,23 @@ export const Composer: React.FC<{
             </div>
             <div className="ws-composer-send">
               <span className="ws-composer-hint">
-                <Kbd>Enter</Kbd> send <Kbd>Shift Enter</Kbd> new line
+                <Kbd>{MOD_KEY} Enter</Kbd> send <Kbd>Enter</Kbd> new line
               </span>
               {working && (
-                <Button variant="secondary" size="sm" icon="stop" onClick={onCancelPrompt} title="Stop the current turn">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon="stop"
+                  onClick={onCancelPrompt}
+                  title={compacting ? 'Stop compacting; the context stays as it was' : 'Stop the current turn'}
+                >
                   Stop
                 </Button>
               )}
               <IconButton
                 type="submit"
                 icon="arrowUp"
-                label={working ? 'Stop the current turn and send this instead' : 'Send (Enter)'}
+                label={working ? `Queue for after this turn (${MOD_KEY} Enter)` : `Send (${MOD_KEY} Enter)`}
                 className={cx('ws-send', sending && 'is-sending')}
                 disabled={!canSend}
                 aria-busy={sending || undefined}
