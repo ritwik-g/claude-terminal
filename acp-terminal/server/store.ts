@@ -112,10 +112,13 @@ class SessionStore {
       const sessionsDir = getSessionsDir();
       ensurePrivateDir(sessionsDir);
       const filePath = path.join(sessionsDir, `${session.id}.json`);
-      fs.writeFileSync(filePath, JSON.stringify(session), {
+      // Written aside and renamed over the old file, so a crash mid-write never leaves half a session
+      const tmp = `${filePath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(session), {
         mode: FILE_MODE,
         encoding: 'utf8',
       });
+      fs.renameSync(tmp, filePath);
     } catch (err) {
       console.error(`[codepit] Failed to persist session ${session.id}:`, err);
     }

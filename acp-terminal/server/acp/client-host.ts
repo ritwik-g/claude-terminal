@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import * as acp from '@agentclientprotocol/sdk';
 import { ptyManager } from '../pty-manager.js';
 import { appEnv } from '../env.js';
-import type { AgentDescriptor, AgentOptions, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
+import type { AgentCommand, AgentDescriptor, AgentOptions, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
 import { appliesTo, listMcpServers, resolveSessionMcpServers } from '../mcp/config.js';
 import { effortToSend, parseAgentOptions, resolveModelValue } from './agent-options.js';
 
@@ -38,6 +38,19 @@ export function normalizeClaudeModel(model?: string): string {
  * read, so one macrotask lets their handlers finish before the turn ends.
  */
 const settleNotifications = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+// A resume that hangs falls back to a new session rather than holding up the prompt
+const RESUME_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 /** Thrown by sendPrompt when the session already has a turn running. */
 export class TurnInFlightError extends Error {
@@ -75,7 +88,7 @@ export interface ClientHostEvents {
   turnCompleted: (stopReason: string) => void;
   promptSuggestion: (suggestion: string) => void;
   asyncTask: (update: AsyncTaskUpdate) => void;
-  availableCommands: (names: string[]) => void;
+  availableCommands: (commands: AgentCommand[]) => void;
   compaction: (update: CompactionEvent) => void;
   /** Effort and model choices the agent advertised (session/new, set_config_option, config_option_update). */
   agentOptions: (options: AgentOptions) => void;
@@ -103,9 +116,23 @@ export class AcpClientHost extends EventEmitter {
   /** Which app-level MCP servers this session got, set once session/new succeeds. */
   public mcpInfo: SessionMcpInfo | null = null;
   public isTurnInFlight = false;
+  /** The agent session to continue instead of starting a new one (ACP session/resume). */
+  public resumeSessionId?: string;
+  /** The agent offers session/resume, so this session can be continued after a restart. */
+  public canResume = false;
+  /** True when start() continued resumeSessionId; resumeError says why it could not. */
+  public resumed = false;
+  public resumeError?: string;
+  /** The agent takes `_session/steering`: a message added to the running turn instead of stopping it. */
+  public supportsSteering = false;
   public lastActivityAt = Date.now();
+  /** When this agent process was started; work it reports started after this. */
+  public readonly createdAt = Date.now();
   /** Command names (no leading slash) from the agent's latest available_commands_update. */
   public availableCommands: string[] = [];
+  /** Approval mode and fast mode chosen in the app, applied at start and when changed. */
+  public mode?: string;
+  public fastMode?: boolean;
   /** The agent's latest effort and model choices; null until it advertises any. */
   public options: AgentOptions | null = null;
   private holdOptions = false;
@@ -396,11 +423,15 @@ export class AcpClientHost extends EventEmitter {
           break;
         }
         case 'available_commands_update': {
-          const names = Array.isArray(update.availableCommands)
-            ? update.availableCommands.map((c: any) => (typeof c?.name === 'string' ? c.name.replace(/^\//, '') : '')).filter(Boolean)
-            : [];
-          this.availableCommands = names;
-          this.emit('availableCommands', names);
+          const commands: AgentCommand[] = (Array.isArray(update.availableCommands) ? update.availableCommands : [])
+            .filter((c: any) => typeof c?.name === 'string' && c.name.replace(/^\//, ''))
+            .map((c: any) => ({
+              name: c.name.replace(/^\//, ''),
+              description: typeof c.description === 'string' ? c.description : '',
+              ...(typeof c.input?.hint === 'string' && c.input.hint ? { hint: c.input.hint } : {}),
+            }));
+          this.availableCommands = commands.map((c) => c.name);
+          this.emit('availableCommands', commands);
           break;
         }
         case 'compaction_update':
@@ -471,19 +502,52 @@ export class AcpClientHost extends EventEmitter {
       }
     }
 
-    // Create session in agent, with the app-level MCP servers in scope for it
+    // Advertised in the initialize response's top-level _meta (Claude and Codex adapters)
+    this.supportsSteering = (initRes as { _meta?: { steering?: { supported?: unknown } } })._meta?.steering?.supported === true;
+
+    // Continue the previous agent session when there is one and the agent can resume it
+    // (Claude and Codex: session/resume restores the agent's own context without replaying it),
+    // else create a session, with the app-level MCP servers in scope for it either way
     const mcp = this.resolveMcpServers(initRes.agentCapabilities?.mcpCapabilities ?? undefined);
-    const sessionRes = await this.untilClosed(connection.agent.request(acp.methods.agent.session.new, {
-      cwd: this.cwd,
-      mcpServers: mcp.servers,
-    }));
-    this.sessionId = sessionRes.sessionId;
+    this.canResume = initRes.agentCapabilities?.sessionCapabilities?.resume != null;
+    let configOptions: unknown;
+    if (this.resumeSessionId && this.canResume) {
+      try {
+        const res = await this.untilClosed(
+          withTimeout(
+            connection.agent.request(acp.methods.agent.session.resume, {
+              sessionId: this.resumeSessionId,
+              cwd: this.cwd,
+              // Both adapters drop MCP servers from a resumed session unless they are sent again
+              mcpServers: mcp.servers,
+            }),
+            RESUME_TIMEOUT_MS,
+            'The agent did not resume the session in time'
+          )
+        );
+        this.sessionId = this.resumeSessionId;
+        this.resumed = true;
+        configOptions = res?.configOptions;
+      } catch (err: any) {
+        if (err instanceof HostClosedError) throw err;
+        this.resumeError = err?.message || String(err);
+      }
+    }
+    if (!this.resumed) {
+      const sessionRes = await this.untilClosed(connection.agent.request(acp.methods.agent.session.new, {
+        cwd: this.cwd,
+        mcpServers: mcp.servers,
+      }));
+      this.sessionId = sessionRes.sessionId;
+      configOptions = sessionRes.configOptions;
+    }
     this.mcpInfo = mcp.info;
 
     // Reported once the model and effort below are applied, so listeners never see the
-    // options of the agent's default model in place of the chosen one
+    // options of the agent's default model in place of the chosen one. After a resume they
+    // are applied again too: both adapters reset the approval mode on resume.
     this.holdOptions = true;
-    this.setOptions(sessionRes.configOptions);
+    this.setOptions(configOptions);
     try {
       await this.applyStartOptions();
     } finally {
@@ -519,6 +583,40 @@ export class AcpClientHost extends EventEmitter {
         // Fallback gracefully if agent doesn't support effort config
       }
     }
+
+    // Approval mode and fast mode, when this agent offers them and they differ from its own start
+    const opts = this.options;
+    if (this.mode && opts?.modeConfigId && opts.modes?.some((m) => m.value === this.mode) && this.mode !== opts.currentMode) {
+      try {
+        await this.setConfigValue(opts.modeConfigId, this.mode);
+      } catch (err) {
+        if (err instanceof HostClosedError) throw err;
+      }
+    }
+    const fast = this.options?.fast;
+    if (this.fastMode !== undefined && fast && fast.enabled !== this.fastMode) {
+      try {
+        await this.setConfigValue(fast.configId, this.fastMode ? fast.onValue : fast.offValue);
+      } catch (err) {
+        if (err instanceof HostClosedError) throw err;
+      }
+    }
+  }
+
+  /** Change the approval mode on the running agent. Throws when it has no such mode. */
+  async applyMode(mode: string): Promise<void> {
+    const opts = this.options;
+    if (!opts?.modeConfigId || !opts.modes?.some((m) => m.value === mode)) throw new Error(`${this.agent.name} has no "${mode}" mode`);
+    await this.setConfigValue(opts.modeConfigId, mode);
+    this.mode = mode;
+  }
+
+  /** Turn fast mode on or off on the running agent. Throws when the model does not offer it. */
+  async applyFastMode(enabled: boolean): Promise<void> {
+    const fast = this.options?.fast;
+    if (!fast) throw new Error('This model has no fast mode');
+    await this.setConfigValue(fast.configId, enabled ? fast.onValue : fast.offValue);
+    this.fastMode = enabled;
   }
 
   /** Take a configOptions list from the agent; ignored when it sent none. */
@@ -598,8 +696,14 @@ export class AcpClientHost extends EventEmitter {
     const turn = ++this.turnSeq;
     this.isTurnInFlight = true;
     this.touch();
-    const run = this.runPrompt(this.connection, this.sessionId, text, attachments);
-    this.inflightPrompt = run.catch(() => {});
+    const done = this.runTurn(turn, this.runPrompt(this.connection, this.sessionId, text, attachments));
+    // The whole turn, cleanup included: cancel() waits for it, so a prompt sent right after a
+    // cancel does not find the turn still marked in flight
+    this.inflightPrompt = done.catch(() => {});
+    return done;
+  }
+
+  private async runTurn(turn: number, run: Promise<string>): Promise<{ stopReason: string }> {
     try {
       const stopReason = await run;
       await settleNotifications();
@@ -622,36 +726,43 @@ export class AcpClientHost extends EventEmitter {
     }
   }
 
+  /**
+   * Add a message to the running turn. 'promptRequired' means no turn was running and
+   * nothing was sent; 'startedNewTurn' means the agent started a turn of its own for it
+   * (Codex does when the turn ended as the message arrived).
+   */
+  async steer(text: string, attachments?: FileAttachment[]): Promise<'injected' | 'promptRequired' | 'startedNewTurn'> {
+    if (this.closed) throw this.closed;
+    if (!this.connection || !this.sessionId) throw new Error('ACP Client not connected or initialized');
+    if (!this.supportsSteering) throw new Error('This agent cannot take a message during a turn');
+    this.touch();
+    const res = await this.untilClosed(
+      this.connection.agent.request<{ outcome?: string }>('_session/steering', {
+        sessionId: this.sessionId,
+        prompt: promptBlocks(text, attachments),
+        _meta: { steering: { idleBehavior: 'promptRequired' } },
+      })
+    );
+    return res?.outcome === 'promptRequired' || res?.outcome === 'startedNewTurn' ? res.outcome : 'injected';
+  }
+
   private async runPrompt(
     connection: acp.ClientConnection,
     sessionId: string,
     text: string,
     attachments?: FileAttachment[]
   ): Promise<string> {
-    const promptBlocks: acp.ContentBlock[] = [];
-    if (attachments && attachments.length > 0) {
-      for (const att of attachments) {
-        if (att.isImage && att.data) {
-          const rawBase64 = att.data.replace(/^data:[^;]+;base64,/, '');
-          promptBlocks.push({
-            type: 'image',
-            data: rawBase64,
-            mimeType: att.mimeType || 'image/png',
-          });
-        }
-      }
-    }
-    promptBlocks.push({ type: 'text', text });
+    const blocks = promptBlocks(text, attachments);
 
     let res: acp.PromptResponse;
     try {
       res = await this.untilClosed(connection.agent.request(acp.methods.agent.session.prompt, {
         sessionId,
-        prompt: promptBlocks,
+        prompt: blocks,
       }));
     } catch (err: any) {
       // If image block was rejected by the agent, fall back to pure text prompt with file path references
-      if (!(err instanceof HostClosedError) && promptBlocks.length > 1 && (err.message?.includes('image') || err.message?.includes('modality') || err.message?.includes('capability'))) {
+      if (!(err instanceof HostClosedError) && blocks.length > 1 && (err.message?.includes('image') || err.message?.includes('modality') || err.message?.includes('capability'))) {
         console.warn(`[client-host] Image prompt rejected by agent, retrying with text fallback: ${err.message}`);
         res = await this.untilClosed(connection.agent.request(acp.methods.agent.session.prompt, {
           sessionId,
@@ -949,7 +1060,25 @@ function toolCallFields(update: any): Partial<ToolCallRecord> {
     agentUsage: agentUsage(claude.toolResponse),
     // An async subagent reports only its transcript file; its end is read from there
     agentOutputFile: typeof claude.toolResponse?.outputFile === 'string' ? claude.toolResponse.outputFile : undefined,
+    agentRef: agentRef(claude.toolResponse),
   };
+}
+
+/** Ids and paths Claude's Agent and Workflow tools report about the work they launched. */
+function agentRef(res: any): ToolCallRecord['agentRef'] {
+  if (!res || typeof res !== 'object') return undefined;
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  const ref = {
+    subagentId: str(res.agentId),
+    subagentModel: str(res.resolvedModel) ?? (Array.isArray(res.modelsUsed) ? str(res.modelsUsed[0]) : undefined),
+    runId: str(res.runId),
+    scriptPath: str(res.scriptPath),
+    transcriptPath: str(res.transcriptDir),
+    worktreePath: str(res.worktreePath),
+    worktreeBranch: str(res.worktreeBranch),
+  };
+  const set = Object.fromEntries(Object.entries(ref).filter(([, v]) => v !== undefined));
+  return Object.keys(set).length > 0 ? set : undefined;
 }
 
 /** Totals Claude's Agent tool reports when a subagent finishes. */
@@ -1002,4 +1131,16 @@ function toolOutput(update: any): string | undefined {
     if (text.length > 0) return text.join('\n');
   }
   return undefined;
+}
+
+/** A prompt's content: its images as image blocks, then the text. */
+function promptBlocks(text: string, attachments?: FileAttachment[]): acp.ContentBlock[] {
+  const blocks: acp.ContentBlock[] = [];
+  for (const att of attachments || []) {
+    if (att.isImage && att.data) {
+      blocks.push({ type: 'image', data: att.data.replace(/^data:[^;]+;base64,/, ''), mimeType: att.mimeType || 'image/png' });
+    }
+  }
+  blocks.push({ type: 'text', text });
+  return blocks;
 }

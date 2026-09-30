@@ -114,9 +114,13 @@ export const SlashMenu = React.forwardRef<
                     <span className="ws-slash-line">
                       <span className="ws-slash-cmd">{cmd.command}</span>
                       {cmd.hint && <span className="ws-slash-hint">{cmd.hint}</span>}
-                      <span className="ws-slash-label">{cmd.label}</span>
+                      {!cmd.fromAgent && <span className="ws-slash-label">{cmd.label}</span>}
                     </span>
-                    <span className="ws-slash-desc">{cmd.description}</span>
+                    <span className="ws-slash-desc">
+                      {/* Claude already names the plugin in its descriptions */}
+                      {cmd.source && !cmd.description.includes(`(${cmd.source})`) && <span className="ws-slash-source">({cmd.source}) </span>}
+                      {cmd.description}
+                    </span>
                   </span>
                   {index === selectedIndex && (
                     <span className="ws-slash-enter" aria-hidden>

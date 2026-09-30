@@ -261,8 +261,10 @@ async function runTests() {
     // In-place switch with context transfer enabled
     const preSwitchTurns = codexSession.turns.length;
     const switchedContextSession = await sessionManager.setSessionAgent(codexSession.id, 'mock', 'gpt-4o', undefined, 'compact');
-    if (!switchedContextSession.contextHandoffPending) {
-      throw new Error('contextHandoffPending must be true when switching with prior turns');
+    // The handover is settled when the new agent starts: a new agent session gets the conversation
+    const switchNote = switchedContextSession.turns[switchedContextSession.turns.length - 1]?.content || '';
+    if (!switchNote.includes('[Context: compact]')) {
+      throw new Error(`Switching with prior turns must announce the handover, got "${switchNote}"`);
     }
     // Send next prompt - should ingest context and clear handoffPending
     await sessionManager.sendPrompt(codexSession.id, 'Next instruction after switch');
@@ -357,7 +359,29 @@ async function runTests() {
     if (userTexts().at(-1) !== 'queue six' || userTexts().includes('queue five')) {
       throw new Error(`Send-now and remove should act on the right items: ${JSON.stringify(userTexts())}`);
     }
-    console.log('   ✅ Queue drains in order, pauses on stop, and supports edit, remove and send-now\n');
+    // A new message is not stuck behind a paused queue: it goes out, then the paused queue follows
+    await sessionManager.queuePrompt(qSession.id, 'queue seven');
+    await sessionManager.queuePrompt(qSession.id, 'queue eight');
+    await sessionManager.cancelPrompt(qSession.id);
+    await new Promise((r) => setTimeout(r, 800));
+    if (queued().length !== 1) throw new Error('A stopped turn must pause the queue');
+    if ((await sessionManager.queuePrompt(qSession.id, 'queue nine')).queued) throw new Error('A new message must not wait behind a paused queue');
+    await drained();
+    if (JSON.stringify(userTexts().slice(-3)) !== JSON.stringify(['queue seven', 'queue nine', 'queue eight'])) {
+      throw new Error(`The paused queue should resume after the new message: ${JSON.stringify(userTexts())}`);
+    }
+    // Two "Send now" clicks on the same paused message send it once
+    await sessionManager.queuePrompt(qSession.id, 'queue ten');
+    await sessionManager.queuePrompt(qSession.id, 'queue eleven');
+    await sessionManager.cancelPrompt(qSession.id);
+    await new Promise((r) => setTimeout(r, 800));
+    const sendNowId = queued()[0].id;
+    await Promise.allSettled([sessionManager.sendQueuedNow(qSession.id, sendNowId), sessionManager.sendQueuedNow(qSession.id, sendNowId)]);
+    await drained();
+    if (userTexts().filter((t) => t === 'queue eleven').length !== 1) {
+      throw new Error(`A double "Send now" must send the message once: ${JSON.stringify(userTexts())}`);
+    }
+    console.log('   ✅ Queue drains in order, pauses on stop, resumes after a new message, and supports edit, remove and send-now\n');
 
     // 9d. Codex account rate limits (app-server `account/rateLimits/read`) map onto plan windows
     const { parseCodexRateLimits } = await import('../server/codex-limits.js');

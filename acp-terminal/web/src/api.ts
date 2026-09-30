@@ -202,6 +202,21 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ effort }),
     }),
+  /** An approval mode the agent offers (agentOptions.modes); turns off this app's auto-approve. */
+  setSessionMode: (id: string, mode: string) =>
+    request<{ session: AcpSession }>(`/api/sessions/${id}/mode`, { method: 'PUT', body: JSON.stringify({ mode }) }),
+  /** Claude's ultrathink (next message only) and ultracode (every message, at xhigh effort). */
+  setSessionUltra: (id: string, opts: { ultracode?: boolean; ultrathinkNext?: boolean }) =>
+    request<{ session: AcpSession }>(`/api/sessions/${id}/ultra`, { method: 'PUT', body: JSON.stringify(opts) }),
+  /** Set the agent session aside: the next message starts a new one, handed the conversation per contextMode. */
+  forgetAgentSession: (id: string, contextMode: 'compact' | 'full' | 'none') =>
+    request<{ session: AcpSession }>(`/api/sessions/${id}/agent-session/forget`, { method: 'POST', body: JSON.stringify({ contextMode }) }),
+  setSessionFastMode: (id: string, enabled: boolean) =>
+    request<{ session: AcpSession }>(`/api/sessions/${id}/fast-mode`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  /** Starred models, "<agentId>:<model>", shared by every device. */
+  getFavoriteModels: () => request<{ favorites: string[] }>('/api/settings/favorite-models'),
+  setFavoriteModels: (favorites: string[]) =>
+    request<{ favorites: string[] }>('/api/settings/favorite-models', { method: 'PUT', body: JSON.stringify({ favorites }) }),
   updateAnnotations: (id: string, updates: Partial<UserAnnotations>) =>
     request<{ session: AcpSession }>(`/api/sessions/${id}/annotations`, {
       method: 'PATCH',

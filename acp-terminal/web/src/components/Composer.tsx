@@ -5,7 +5,8 @@ import { useEscapeLayer } from '../hooks';
 import { Button, Icon, IconButton, Kbd } from '../ui';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
-import { advertisedModelLabel, effortLabel, sessionEffortChoices } from '../effort';
+import { advertisedModelLabel } from '../effort';
+import { ApprovalPicker, EffortPicker } from './ComposerPickers';
 import { getSlashCommandsForAgent, filterSlashCommands } from '../slashCommands';
 import { SlashMenu, type SlashCategory } from './SlashMenu';
 import { ModelSwitcher } from './ModelSwitcher';
@@ -74,7 +75,10 @@ export const Composer: React.FC<{
   }, [promptText, inputRef]);
 
   // ----------------------------------------------------------- Slash menu
-  const availableSlashCommands = useMemo(() => getSlashCommandsForAgent(session.agentId), [session.agentId]);
+  const availableSlashCommands = useMemo(
+    () => getSlashCommandsForAgent(session.agentId, session.agentCommands),
+    [session.agentId, session.agentCommands]
+  );
   const slashQuery = useMemo(() => {
     if (!promptText.startsWith('/')) return '';
     const match = promptText.match(/^\/(\S*)/);
@@ -257,8 +261,6 @@ export const Composer: React.FC<{
   };
 
   const currentModelMeta = getModelMeta(session.model || 'sonnet');
-  const activeEffort = session.effort || 'auto';
-  const efforts = sessionEffortChoices(session, agents);
   const modelName = advertisedModelLabel(session) || currentModelMeta.label || session.model || session.agentName;
   const compacting = isCompacting(session);
   // A compaction holds the session like a turn: messages queue behind it and Stop ends it
@@ -375,13 +377,10 @@ export const Composer: React.FC<{
                   onClick={() => setShowModelPicker((prev) => !prev)}
                   aria-haspopup="dialog"
                   aria-expanded={showModelPicker}
-                  title="Switch model or effort for your next messages"
+                  title="Switch model for your next messages"
                 >
                   <VendorIcon agentId={session.agentId} size={14} />
                   <span className="ws-model-pill-name">{modelName}</span>
-                  {efforts.length > 0 && (
-                    <span className="ws-model-pill-effort">{effortLabel(activeEffort, efforts)}</span>
-                  )}
                   <Icon name="chevronDown" size={12} className="ws-model-pill-chevron" />
                 </button>
                 {showModelPicker && (
@@ -397,6 +396,8 @@ export const Composer: React.FC<{
                   </>
                 )}
               </div>
+              <EffortPicker session={session} agents={agents} onChanged={onRefresh} />
+              <ApprovalPicker session={session} agents={agents} onChanged={onRefresh} />
               <IconButton
                 icon="paperclip"
                 label="Attach files"

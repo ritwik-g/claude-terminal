@@ -43,6 +43,18 @@ export interface ConfigChoice {
   value: string;
   label: string;
   description?: string;
+  /** An approval mode's kind (ACP `_meta.kind`): standard, plan, auto_review or full_access. */
+  kind?: string;
+  /** A model this app first saw the agent offer in the last two weeks. */
+  isNew?: boolean;
+}
+
+/** A slash command or skill the agent offers (ACP available_commands_update). */
+export interface AgentCommand {
+  name: string;
+  description: string;
+  /** What to type after it, e.g. "[pr-number]". */
+  hint?: string;
 }
 
 /**
@@ -62,6 +74,12 @@ export interface AgentOptions {
   modelConfigId?: string;
   models: ConfigChoice[];
   currentModel?: string;
+  /** The agent's approval modes (ACP `mode` option), e.g. Claude's Manual, Accept edits, Auto. */
+  modeConfigId?: string;
+  modes?: ConfigChoice[];
+  currentMode?: string;
+  /** Fast mode, when the current model offers it (Claude's `fast` option, an on/off select). */
+  fast?: { configId: string; enabled: boolean; onValue: string; offValue: string; description?: string };
   updatedAt: number;
 }
 
@@ -116,6 +134,8 @@ export interface ToolCallRecord {
   agentUsage?: AgentTask['usage'];
   /** An async subagent's transcript file (Claude's Agent tool response `outputFile`). */
   agentOutputFile?: string;
+  /** What the agent said about the subagent or workflow this call launched (ids, model, transcript). */
+  agentRef?: Omit<TaskAudit, 'agentId' | 'agentName' | 'model' | 'agentSessionId'>;
 }
 
 /**
@@ -159,6 +179,8 @@ export interface TurnMessage {
   model?: string;
   /** Set on the system turn that marks a context compaction; turns before it are what was compacted. */
   compaction?: CompactionRecord;
+  /** Claude keywords CodePit added to a user message it sent (ultrathink, ultracode). */
+  keywords?: string[];
 }
 
 /**
@@ -234,6 +256,26 @@ export interface SessionRateLimits {
   updatedAt?: number;
 }
 
+/** One agent session (the agent's own conversation) behind a CodePit session. */
+export interface AgentSessionRecord {
+  /** The agent's session id: for Claude the Claude Code session, for Codex the thread. */
+  id: string;
+  agentId: string;
+  agentName: string;
+  model?: string;
+  startedAt: number;
+  /** When it was last started or continued; equals startedAt until it is resumed. */
+  lastStartedAt: number;
+  /** How many times it was continued after a restart or a stop. */
+  resumes: number;
+  endedAt?: number;
+  endReason?: string;
+  /** Why continuing the previous session failed, when this one replaced it. */
+  replacedBecause?: string;
+  /** The agent's own transcript on this machine, when known. */
+  transcriptPath?: string;
+}
+
 export interface AcpSession {
   id: string;
   agentId: string;
@@ -258,6 +300,29 @@ export interface AcpSession {
   turns: TurnMessage[];
   model?: string;
   effort?: ThinkingEffort;
+  /** The approval mode chosen here (an agentOptions.modes value), applied when the agent starts. */
+  mode?: string;
+  /** Fast mode chosen here, applied when the agent starts. */
+  fastMode?: boolean;
+  /** The slash commands and skills the agent last reported. */
+  agentCommands?: AgentCommand[];
+  /** The running agent's own session id (for Claude, its Claude Code session). */
+  agentSessionId?: string;
+  /** The agent session to continue on the next start (ACP session/resume); absent means start fresh. */
+  agentResume?: { agentId: string; sessionId: string; cwd: string; savedAt: number };
+  /** Every agent session that has served this conversation, oldest first. */
+  agentSessions?: AgentSessionRecord[];
+  /**
+   * Never pick up an older Claude session found on disk for this conversation: set once the
+   * user cleared the context, set the agent session aside, or rewound the conversation.
+   */
+  skipClaudeAdoption?: boolean;
+  /** Turns before this index are not handed to a new agent session ("Clean slate"). */
+  contextStartIndex?: number;
+  /** Claude's ultracode: multi-agent workflow orchestration on every message, at xhigh effort. */
+  ultracode?: boolean;
+  /** Claude's ultrathink on the next message only. */
+  ultrathinkNext?: boolean;
   contextMode?: ContextTransferMode;
   contextHandoffPending?: boolean;
   failoverFromId?: string; // Tracks previous session if failed over from another agent
@@ -265,6 +330,8 @@ export interface AcpSession {
   promptSuggestion?: string;
   rateLimits?: SessionRateLimits;
   isAgentRunning?: boolean;
+  /** The running agent can take a message into a turn in progress (ACP steering). */
+  canSteer?: boolean;
   agentStopped?: boolean; // Set by an explicit Stop; ranks the session 'parked' until restarted
   /** The agent's latest todo list (ACP `plan` update). */
   plan?: PlanEntry[];
@@ -378,6 +445,29 @@ export type AgentTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
  * a background shell or monitor, or a workflow run. The tool calls and
  * messages it produced are tagged with its id so it can be viewed on its own.
  */
+/**
+ * Where an agent task came from. The session fields are stamped when the task is first
+ * seen, so a later agent switch or restart does not rewrite them.
+ */
+export interface TaskAudit {
+  /** The CodePit agent (e.g. "claude") and its name, and the session's model at the time. */
+  agentId?: string;
+  agentName?: string;
+  model?: string;
+  /** The agent's own session id; for Claude, the Claude Code session whose transcript holds this work. */
+  agentSessionId?: string;
+  /** The subagent's own id and the model it ran on, as the agent reports them. */
+  subagentId?: string;
+  subagentModel?: string;
+  /** A workflow's run id and script. */
+  runId?: string;
+  scriptPath?: string;
+  /** Its transcript on this machine: a subagent's .jsonl, or a workflow's transcript folder. */
+  transcriptPath?: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
+}
+
 export interface AgentTask {
   /** The spawning tool call's id, or `task:<asyncTaskId>` when there is none. */
   id: string;
@@ -399,6 +489,8 @@ export interface AgentTask {
   /** How it ended, or why it was cut off. */
   summary?: string;
   usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
+  /** Who ran it, for audit: recorded when the agent reported it and kept as it was. */
+  audit?: TaskAudit;
   /** Its own messages, reasoning and tool calls in the order they happened. */
   segments?: TurnSegment[];
 }

@@ -19,7 +19,8 @@ import { isCompacting } from './CompactionCard';
 import { ImageLightbox } from './ImageLightbox';
 import { nextPriority } from './sessionMeta';
 import { AgentsPanel, agentTaskCounts } from './AgentsView';
-import { AgentTaskNavContext } from './agentTaskNav';
+import { AgentSessionNavContext, AgentTaskNavContext } from './agentTaskNav';
+import { AgentSessionsPanel } from './AgentSessionsView';
 
 // Other areas import these from here.
 export { STATE_LABEL, formatTime, nextPriority } from './sessionMeta';
@@ -59,20 +60,28 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
   useEscapeLayer(showMobileActions, () => setShowMobileActions(false));
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Agent tasks open in the focused view of the Agents tab (empty: its list)
+  // Agent tasks open in the focused view of the Subagents tab (empty: its list)
   const [focusedTasks, setFocusedTasks] = useState<string[]>([]);
   const openAgentTasks = useCallback((...ids: string[]) => {
     setFocusedTasks(ids);
     setActiveTab('agents');
   }, []);
+  // An agent session opens in the Agents tab, scrolled to and highlighted
+  const [focusedAgentSession, setFocusedAgentSession] = useState<string | null>(null);
+  const openAgentSession = useCallback((id: string) => {
+    setFocusedAgentSession(id);
+    setActiveTab('agentSessions');
+  }, []);
   const changeTab = useCallback((tab: WorkspaceTab) => {
     setFocusedTasks([]);
+    setFocusedAgentSession(null);
     setActiveTab(tab);
   }, []);
 
   useEffect(() => {
     setPromptText('');
     setFocusedTasks([]);
+    setFocusedAgentSession(null);
   }, [session.id]);
 
   const shellCommandCount = session.turns.reduce(
@@ -337,11 +346,15 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         contextWindow={pricing.contextWindow}
         estimatedCost={estimatedCost}
         agentTasks={agentTaskCounts(session)}
+        agentSessionCount={session.agentSessions?.length}
       />
 
       <AgentTaskNavContext.Provider value={openAgentTasks}>
+      <AgentSessionNavContext.Provider value={openAgentSession}>
       <div className="ws-body">
-        {activeTab === 'agents' ? (
+        {activeTab === 'agentSessions' ? (
+          <AgentSessionsPanel session={session} focusedId={focusedAgentSession} busy={turnBusy || compacting} onChanged={onRefresh} />
+        ) : activeTab === 'agents' ? (
           <AgentsPanel
             session={session}
             focusedIds={focusedTasks}
@@ -374,6 +387,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
           />
         )}
       </div>
+      </AgentSessionNavContext.Provider>
       </AgentTaskNavContext.Provider>
 
       <Composer

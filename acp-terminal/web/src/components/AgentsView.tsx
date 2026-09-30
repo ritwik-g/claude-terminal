@@ -4,11 +4,13 @@ import { Badge, Button, EmptyState, Icon, IconButton, Spinner, type IconName, ty
 import { MarkdownContent } from './MarkdownContent';
 import { IoPanel, OutputText, SubagentCard, ThoughtRow, ToolRow } from './AgentTurn';
 import { cx, formatTime, formatTokens } from './sessionMeta';
-import { formatDuration, isActive, subagentResult } from '../toolDisplay';
+import { copyToClipboard, formatDuration, isActive, subagentResult } from '../toolDisplay';
+import { VendorIcon } from './VendorLogos';
+import { useOpenAgentSession } from './agentTaskNav';
 import '../styles/agents.css';
 
 /**
- * The session's Agents tab: every subagent, background command and workflow
+ * The session's Subagents tab: every subagent, background command and workflow
  * the agent launched, and a focused view of one (or several, merged in time
  * order) showing only its own prompt, messages, tool calls and result.
  */
@@ -26,6 +28,9 @@ function kindView(task: AgentTask): { icon: IconName; label: string } {
   if (task.agentType === 'monitor') return { icon: 'eye', label: 'Monitor' };
   return { icon: 'terminal', label: 'Background command' };
 }
+
+/** The agent that ran it, as recorded when it started: "Claude Code". */
+const agentShort = (task: AgentTask) => task.audit?.agentName?.replace(/ \(ACP\)$/, '');
 
 /** The subagent type worth showing; background task types only repeat the kind label. */
 const shownType = (task: AgentTask) =>
@@ -174,7 +179,7 @@ const TaskList: React.FC<{ session: AcpSession; tasks: AgentTask[]; onOpen: (ids
     return (
       <EmptyState
         icon="bot"
-        title="No agents yet"
+        title="No subagents yet"
         description="When the agent hands work to a subagent, runs a command in the background or starts a workflow, it shows up here. Open one to see only its own activity."
       />
     );
@@ -208,7 +213,7 @@ const TaskList: React.FC<{ session: AcpSession; tasks: AgentTask[]; onOpen: (ids
   return (
     <>
       <header className="agents-head">
-        <h2 className="agents-title">Agents</h2>
+        <h2 className="agents-title">Subagents</h2>
         <p className="agents-desc">
           Subagents, background commands and workflows this session's agent started. Open one to see only its own work.
         </p>
@@ -248,6 +253,8 @@ const TaskRow: React.FC<{
   const meta = [
     kind.label,
     shownType(task),
+    // The model a subagent ran on can differ from the session's
+    task.audit?.subagentModel ?? (task.kind === 'subagent' ? task.audit?.model : undefined),
     parentTitle ? `from ${parentTitle}` : null,
     task.kind !== 'background' || count > 0 ? `${count} tool call${count === 1 ? '' : 's'}` : null,
     duration,
@@ -267,7 +274,18 @@ const TaskRow: React.FC<{
           <span className="agents-row-title" title={task.title}>
             {task.title}
           </span>
-          <span className="agents-row-meta">{meta.join(' · ')}</span>
+          <span className="agents-row-meta">
+            {task.audit?.agentId && (
+              <>
+                <span className="agents-row-agent" title={`Run by ${agentShort(task)}`}>
+                  <VendorIcon agentId={task.audit.agentId} size={11} />
+                  {agentShort(task)}
+                </span>
+                {' · '}
+              </>
+            )}
+            {meta.join(' · ')}
+          </span>
         </span>
         <Badge tone={status.tone} title={task.summary}>
           {task.status === 'running' && <Spinner size={9} />}
@@ -291,12 +309,12 @@ const FocusedView: React.FC<{
   const calls = useMemo(() => allCalls(session), [session.turns]);
   const single = tasks.length === 1 ? tasks[0] : null;
   const now = useNow(tasks.some((t) => t.status === 'running'));
-  const crumb = single ? single.title : `${tasks.length} agents together`;
+  const crumb = single ? single.title : `${tasks.length} selected`;
 
   return (
     <>
       <nav className="agents-crumbs" aria-label="Breadcrumb">
-        <IconButton icon="arrowLeft" label="Back to all agents" size="sm" onClick={onBack} />
+        <IconButton icon="arrowLeft" label="Back to all subagents" size="sm" onClick={onBack} />
         <ol>
           <li>
             <button type="button" className="agents-crumb" onClick={onShowSession}>
@@ -308,7 +326,7 @@ const FocusedView: React.FC<{
           </li>
           <li>
             <button type="button" className="agents-crumb" onClick={onBack}>
-              Agents
+              Subagents
             </button>
           </li>
           <li aria-hidden className="agents-crumb-sep">
@@ -432,7 +450,95 @@ const SingleTask: React.FC<{ task: AgentTask; calls: Map<string, ToolCallRecord>
           )}
         </section>
       )}
+
+      <TaskDetails task={task} />
     </>
+  );
+};
+
+/** One copyable id or path in the details list. */
+export const DetailValue: React.FC<{ value: string; mono?: boolean }> = ({ value, mono = true }) => {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="agents-detail-value">
+      <span className={cx(mono && 'mono')} title={value}>
+        {value}
+      </span>
+      <IconButton
+        icon={copied ? 'check' : 'copy'}
+        size="sm"
+        label={copied ? 'Copied' : 'Copy'}
+        onClick={async () => {
+          if (await copyToClipboard(value)) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }
+        }}
+      />
+    </span>
+  );
+};
+
+export const exactTime = (ts: number) => new Date(ts).toLocaleString([], { dateStyle: 'medium', timeStyle: 'medium' });
+
+/** The agent session's id, with a link to it in the Agents tab. */
+const AgentSessionLink: React.FC<{ id: string }> = ({ id }) => {
+  const open = useOpenAgentSession();
+  return (
+    <span className="agents-detail-value">
+      <DetailValue value={id} />
+      {open && (
+        <Button size="sm" variant="ghost" onClick={() => open(id)}>
+          Show
+        </Button>
+      )}
+    </span>
+  );
+};
+
+/** Who ran the task and where its records are, for audit. */
+const TaskDetails: React.FC<{ task: AgentTask }> = ({ task }) => {
+  const a = task.audit;
+  const rows: Array<{ label: string; node: React.ReactNode }> = [];
+  if (a?.agentId) {
+    rows.push({
+      label: 'Agent',
+      node: (
+        <span className="agents-detail-value">
+          <VendorIcon agentId={a.agentId} size={13} />
+          {agentShort(task)}
+        </span>
+      ),
+    });
+  }
+  if (a?.model) rows.push({ label: 'Session model', node: <span className="mono">{a.model}</span> });
+  if (a?.subagentModel && a.subagentModel !== a.model) rows.push({ label: 'Ran on', node: <span className="mono">{a.subagentModel}</span> });
+  if (a?.agentSessionId) rows.push({ label: 'Agent session', node: <AgentSessionLink id={a.agentSessionId} /> });
+  if (a?.subagentId) rows.push({ label: 'Subagent id', node: <DetailValue value={a.subagentId} /> });
+  if (a?.runId) rows.push({ label: 'Workflow run', node: <DetailValue value={a.runId} /> });
+  if (task.toolCallId) rows.push({ label: 'Tool call', node: <DetailValue value={task.toolCallId} /> });
+  if (task.asyncTaskId) rows.push({ label: 'Background task', node: <DetailValue value={task.asyncTaskId} /> });
+  if (a?.transcriptPath) rows.push({ label: 'Transcript', node: <DetailValue value={a.transcriptPath} /> });
+  if (a?.scriptPath) rows.push({ label: 'Script', node: <DetailValue value={a.scriptPath} /> });
+  if (a?.worktreePath) {
+    rows.push({ label: 'Worktree', node: <DetailValue value={a.worktreeBranch ? `${a.worktreePath} (${a.worktreeBranch})` : a.worktreePath} /> });
+  }
+  rows.push({ label: 'Started', node: exactTime(task.startedAt) });
+  if (task.endedAt) rows.push({ label: 'Ended', node: exactTime(task.endedAt) });
+
+  return (
+    <section className="agents-details" aria-label="Details">
+      <h3 className="agents-group-label">Details</h3>
+      {!a?.agentId && <p className="agents-note">Started before CodePit recorded which agent session ran each task; only its ids are known.</p>}
+      <dl className="agents-detail-list">
+        {rows.map((r) => (
+          <div key={r.label} className="agents-detail-row">
+            <dt>{r.label}</dt>
+            <dd>{r.node}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
   );
 };
 

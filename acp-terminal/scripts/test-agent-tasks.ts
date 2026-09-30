@@ -282,4 +282,16 @@ test('a workflow stored as a background task is relabelled when the session load
   assert.equal(syncAgentTasks(s), false, 'nothing left to change');
 });
 
+test("what the agent reports about a subagent (id, model, worktree) goes on the task's audit", () => {
+  const s = session([agentTurn()]);
+  addCall(s, { id: 'a9', title: 'Agent', status: 'pending', startedAt: 1, isSubagent: true, toolName: 'Agent' });
+  s.agentTasks![0].audit = { agentId: 'claude', agentName: 'Claude Code', agentSessionId: 'sess-1' };
+  update(s, 'a9', { status: 'completed', agentRef: { subagentId: 'abc123', subagentModel: 'claude-haiku-4-5', worktreeBranch: 'wt-1' } });
+  const audit = s.agentTasks![0].audit!;
+  assert.equal(audit.subagentId, 'abc123');
+  assert.equal(audit.subagentModel, 'claude-haiku-4-5');
+  assert.equal(audit.worktreeBranch, 'wt-1');
+  assert.equal(audit.agentSessionId, 'sess-1', 'the session stamp is kept');
+});
+
 console.log(`\n${passed} passed`);

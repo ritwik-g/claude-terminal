@@ -221,6 +221,7 @@ function upsertFromCall(s: AcpSession, call: ToolCallRecord): AgentTask | undefi
 
 function refreshFromCall(task: AgentTask, call: ToolCallRecord): void {
   const input = callInput(call);
+  if (call.agentRef) task.audit = { ...task.audit, ...call.agentRef };
   if (isWorkflowCall(call) && task.kind === 'background') task.kind = 'workflow';
   const title = [call.description, input.description, call.title].find(
     (v): v is string => typeof v === 'string' && v.trim() !== '' && !PLACEHOLDER_TITLES.has(v.trim())

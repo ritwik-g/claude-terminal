@@ -1,4 +1,4 @@
-import type { SlashCommandItem } from './types.js';
+import type { AgentCommand, SlashCommandItem } from './types.js';
 
 export const CLAUDE_COMMANDS: SlashCommandItem[] = [
   {
@@ -318,14 +318,41 @@ export const TERMINAL_UNIVERSAL_COMMANDS: SlashCommandItem[] = [
 ];
 
 /**
- * Get all available slash commands for a specific agent.
- * Combines agent-specific native commands with universal terminal session commands.
+ * The commands and skills the agent reported, in its order. A plugin's own are named
+ * "<plugin>:<name>" and MCP prompts "mcp:<server>:<name>"; the prefix is shown as the source.
  */
-export function getSlashCommandsForAgent(agentId?: string): SlashCommandItem[] {
+export function agentReportedCommands(reported: AgentCommand[], known: SlashCommandItem[] = []): SlashCommandItem[] {
+  const icons = new Map(known.map((k) => [k.command, k.icon]));
+  return reported.map((c) => {
+    const cut = c.name.lastIndexOf(':');
+    const source = c.name.startsWith('mcp:') ? 'MCP' : cut > 0 ? c.name.slice(0, cut) : undefined;
+    const command = `/${c.name}`;
+    return {
+      command,
+      label: cut > 0 ? c.name.slice(cut + 1) : c.name,
+      description: c.description,
+      category: 'agent',
+      hint: c.hint,
+      icon: icons.get(command),
+      actionType: 'insert',
+      source,
+      fromAgent: true,
+    };
+  });
+}
+
+/**
+ * Get all available slash commands for a specific agent.
+ * Combines the agent's native commands (what it reported, else a built-in list) with
+ * universal terminal session commands.
+ */
+export function getSlashCommandsForAgent(agentId?: string, reported?: AgentCommand[]): SlashCommandItem[] {
   const normId = (agentId || '').toLowerCase();
 
   let agentCommands: SlashCommandItem[] = [];
-  if (normId.includes('claude') || normId.includes('anthropic')) {
+  if (reported && reported.length > 0) {
+    agentCommands = agentReportedCommands(reported, [...CLAUDE_COMMANDS, ...CODEX_COMMANDS, ...ANTIGRAVITY_COMMANDS]);
+  } else if (normId.includes('claude') || normId.includes('anthropic')) {
     agentCommands = CLAUDE_COMMANDS;
   } else if (normId.includes('codex') || normId.includes('openai')) {
     agentCommands = CODEX_COMMANDS;
@@ -379,6 +406,7 @@ export function filterSlashCommands(commands: SlashCommandItem[], query: string)
     const cmdName = cmd.command.toLowerCase().replace(/^\//, '');
     const label = cmd.label.toLowerCase();
     const desc = cmd.description.toLowerCase();
-    return cmdName.includes(clean) || label.includes(clean) || desc.includes(clean);
+    const source = (cmd.source || '').toLowerCase();
+    return cmdName.includes(clean) || label.includes(clean) || desc.includes(clean) || source.includes(clean);
   });
 }

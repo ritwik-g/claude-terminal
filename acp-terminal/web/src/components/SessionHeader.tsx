@@ -6,7 +6,7 @@ import { Menu, type MenuItem } from './Menu';
 import { VendorIcon } from './VendorLogos';
 import { cx, formatTokens, sessionStateView } from './sessionMeta';
 
-export type WorkspaceTab = 'conversation' | 'agents' | 'terminal' | 'usage';
+export type WorkspaceTab = 'conversation' | 'agentSessions' | 'agents' | 'terminal' | 'usage';
 
 /** The session title, editable in place. Enter saves, Esc reverts. */
 const TitleInput: React.FC<{
@@ -300,7 +300,9 @@ export const SessionTabsBar: React.FC<{
   estimatedCost: number;
   /** Subagents, background work and workflows: how many, and how many still running. */
   agentTasks?: { total: number; running: number };
-}> = ({ activeTab, onChange, shellCommandCount, contextTokens, contextWindow, estimatedCost, agentTasks }) => {
+  /** How many agent sessions this conversation has had. */
+  agentSessionCount?: number;
+}> = ({ activeTab, onChange, shellCommandCount, contextTokens, contextWindow, estimatedCost, agentTasks, agentSessionCount }) => {
   const percent = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
   const tone: Tone = percent > 80 ? 'danger' : percent > 50 ? 'warn' : 'accent';
   return (
@@ -312,10 +314,15 @@ export const SessionTabsBar: React.FC<{
         items={[
           { id: 'conversation', label: 'Conversation' },
           {
+            id: 'agentSessions',
+            label: <span title="The agent sessions behind this conversation">Agents</span>,
+            count: agentSessionCount || undefined,
+          },
+          {
             id: 'agents',
             label: (
               <span className="agents-tab-label" title="Subagents, background commands and workflows">
-                Agents
+                Subagents
                 {agentTasks && agentTasks.running > 0 && <StatusDot tone="accent" pulse label={`${agentTasks.running} running`} />}
               </span>
             ),

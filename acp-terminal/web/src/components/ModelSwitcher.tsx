@@ -1,13 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { AcpSession, AgentDescriptor, ThinkingEffort } from '../types';
+import type { AcpSession, AgentDescriptor, ConfigChoice } from '../types';
 import { api } from '../api';
-import { Badge, Button, Icon, IconButton, Input, Kbd, Segmented, Switch } from '../ui';
+import { Badge, Button, Icon, Input, Kbd, Segmented, Switch } from '../ui';
 import { VendorIcon } from './VendorLogos';
 import { getModelMeta } from './AgentModelPicker';
 import { cx } from './sessionMeta';
-import { AUTO_EFFORT, effortChoices, effortLabel, modelChoices, sameModel, sessionEffortChoices } from '../effort';
+import { baseModel, modelChoices, sameModel, splitModels } from '../effort';
 
-type Effort = ThinkingEffort;
 type ContextMode = 'compact' | 'full' | 'none';
 
 const CONTEXT_MODE_HELP: Record<ContextMode, string> = {
@@ -16,10 +15,23 @@ const CONTEXT_MODE_HELP: Record<ContextMode, string> = {
   none: 'Start the new model with a blank conversation. Files and git state are kept.',
 };
 
+/** "<agentId>:<model>" for the favourites list. */
+const favKey = (agentId: string, model: string) => `${agentId}:${model}`;
+
+// Loaded once per page; every device shares the list through the server
+let favoritesCache: string[] | null = null;
+
+type Rail = 'favorites' | string;
+
+interface Row {
+  agent: AgentDescriptor;
+  choice: ConfigChoice;
+}
+
 /**
- * The composer's model and effort popover: models grouped by agent, an effort
- * control, and the handover options behind an "Advanced" disclosure. Arrow keys
- * move between models; Enter switches.
+ * The composer's model popover: a rail to pick an agent (or starred models), a search
+ * over every agent's models, and older versions under "Legacy models". Arrow keys move
+ * between models; Enter switches.
  */
 export const ModelSwitcher: React.FC<{
   session: AcpSession;
@@ -33,40 +45,78 @@ export const ModelSwitcher: React.FC<{
   const [customModelInput, setCustomModelInput] = useState('');
   const [switchingTo, setSwitchingTo] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [rail, setRail] = useState<Rail>(session.agentId);
+  const [showLegacy, setShowLegacy] = useState(false);
+  const [query, setQuery] = useState('');
+  const [favorites, setFavorites] = useState<string[]>(favoritesCache ?? []);
   const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
-  // Levels come from the agent for this exact model (Claude Haiku has none, some Codex models add Ultra)
-  const efforts = sessionEffortChoices(session, agents);
-  const activeEffort: Effort = session.effort || AUTO_EFFORT;
-  // What the agent reports it is running; with Auto that is its own choice
-  const agentDefault = session.agentOptions?.currentEffort;
-  const autoHint =
-    activeEffort === AUTO_EFFORT && agentDefault && efforts.some((e) => e.value === agentDefault)
-      ? `Auto lets the agent choose. It is using ${effortLabel(agentDefault, efforts)} now.`
-      : null;
-
-  // Focus the active model so arrow keys start from there.
   useEffect(() => {
-    const list = listRef.current;
-    if (!list) return;
-    const target = list.querySelector<HTMLButtonElement>('.ws-model-row.is-selected') || list.querySelector<HTMLButtonElement>('.ws-model-row');
-    target?.focus({ preventScroll: false });
-    target?.scrollIntoView({ block: 'nearest' });
+    searchRef.current?.focus();
+    api
+      .getFavoriteModels()
+      .then((res) => {
+        favoritesCache = res.favorites;
+        setFavorites(res.favorites);
+      })
+      .catch(() => {});
   }, []);
 
+  const toggleFavorite = (agentId: string, model: string) => {
+    const key = favKey(agentId, model);
+    const next = favorites.includes(key) ? favorites.filter((f) => f !== key) : [...favorites, key];
+    setFavorites(next);
+    favoritesCache = next;
+    api.setFavoriteModels(next).catch((err) => alert(`Could not save favourites: ${err.message}`));
+  };
+
+  // What each agent advertised (new models, 1M-context variants), else the registry list;
+  // the session's own agent has just reported its list, which beats the one loaded with the page
+  const byAgent = agents
+    .map((agent) => ({ agent, ...splitModels(modelChoices(agent, agent.id === session.agentId ? session.agentOptions : undefined)) }))
+    .filter((g) => g.current.length + g.legacy.length > 0);
+  const everything: Row[] = byAgent.flatMap((g) => [...g.current, ...g.legacy].map((choice) => ({ agent: g.agent, choice })));
+
+  const q = query.trim().toLowerCase();
+  let rows: Row[];
+  let legacyRows: Row[] = [];
+  if (q) {
+    rows = everything.filter(({ agent, choice }) =>
+      [choice.label, choice.value, choice.description || '', agent.name].some((t) => t.toLowerCase().includes(q))
+    );
+  } else if (rail === 'favorites') {
+    rows = everything.filter(({ agent, choice }) => favorites.includes(favKey(agent.id, choice.value)));
+  } else {
+    const group = byAgent.find((g) => g.agent.id === rail) ?? byAgent[0];
+    rows = (group?.current ?? []).map((choice) => ({ agent: group!.agent, choice }));
+    legacyRows = (group?.legacy ?? []).map((choice) => ({ agent: group!.agent, choice }));
+  }
+  const listed = showLegacy && legacyRows.length > 0 ? legacyRows : rows;
+
+  const isCurrent = (agent: AgentDescriptor, mId: string) =>
+    agent.id === session.agentId &&
+    (sameModel(baseModel(session.model || ''), mId) ||
+      baseModel(session.agentOptions?.currentModel || '') === mId ||
+      (!session.model && mId === agent.defaultModel));
+
   const onListKeyDown = (e: React.KeyboardEvent) => {
-    const rows = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>('.ws-model-row:not(:disabled)') || []);
-    if (rows.length === 0) return;
-    const idx = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const targets = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>('.mp-row-main:not(:disabled), .mp-legacy') || []);
+    if (targets.length === 0) return;
+    const idx = targets.indexOf(document.activeElement as HTMLButtonElement);
     let next = -1;
-    if (e.key === 'ArrowDown') next = idx === -1 ? 0 : Math.min(rows.length - 1, idx + 1);
-    else if (e.key === 'ArrowUp') next = idx === -1 ? rows.length - 1 : Math.max(0, idx - 1);
+    if (e.key === 'ArrowDown') next = idx === -1 ? 0 : Math.min(targets.length - 1, idx + 1);
+    else if (e.key === 'ArrowUp') next = idx <= 0 ? -2 : idx - 1;
     else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = rows.length - 1;
+    else if (e.key === 'End') next = targets.length - 1;
     if (next === -1) return;
     e.preventDefault();
-    rows[next].focus();
-    rows[next].scrollIntoView({ block: 'nearest' });
+    if (next === -2) {
+      searchRef.current?.focus();
+      return;
+    }
+    targets[next].focus();
+    targets[next].scrollIntoView({ block: 'nearest' });
   };
 
   const handleInPlaceSwitch = async (targetAgentId: string, targetModel?: string) => {
@@ -95,15 +145,6 @@ export const ModelSwitcher: React.FC<{
     }
   };
 
-  const handleSetEffort = async (effort: Effort) => {
-    try {
-      await api.setSessionEffort(session.id, effort);
-      onRefresh();
-    } catch (err: any) {
-      alert(`Failed to update reasoning effort: ${err.message}`);
-    }
-  };
-
   const applyCustomModel = () => {
     const id = customModelInput.trim();
     if (!id) return;
@@ -111,110 +152,136 @@ export const ModelSwitcher: React.FC<{
     setCustomModelInput('');
   };
 
-  // What each agent advertised (new models, 1M-context variants), else the registry list;
-  // the session's own agent has just reported its list, which beats the one loaded with the page
-  const groups = agents
-    .map((agent) => ({ agent, models: modelChoices(agent, agent.id === session.agentId ? session.agentOptions : undefined) }))
-    .filter((g) => g.models.length > 0);
+  const pickRail = (r: Rail) => {
+    setRail(r);
+    setShowLegacy(false);
+    setQuery('');
+  };
+
+  const railLabel = (agent: AgentDescriptor) => agent.name.replace(/ \(ACP\)$/, '');
 
   return (
-    <div className="ws-popover ws-model-switcher" role="dialog" aria-label="Model and effort">
+    <div className="ws-popover ws-model-switcher" role="dialog" aria-label="Model">
       <div className="ws-sheet-handle" aria-hidden />
-      <div className="ws-model-head">
-        <div>
-          <div className="ws-popover-title">Model and effort</div>
-          <div className="ws-popover-desc">Applies to your next messages. The conversation is kept.</div>
-        </div>
-        <IconButton icon="x" size="sm" label="Close" onClick={onClose} />
-      </div>
+      <div className="mp-body">
+        <nav className="mp-rail" aria-label="Agents">
+          <button
+            type="button"
+            className={cx('mp-rail-btn', rail === 'favorites' && !q && 'is-active')}
+            onClick={() => pickRail('favorites')}
+            title="Starred models"
+            aria-pressed={rail === 'favorites'}
+          >
+            <Icon name="star" size={17} />
+          </button>
+          <span className="mp-rail-rule" aria-hidden />
+          {byAgent.map(({ agent }) => (
+            <button
+              key={agent.id}
+              type="button"
+              className={cx('mp-rail-btn', rail === agent.id && !q && 'is-active')}
+              onClick={() => pickRail(agent.id)}
+              title={railLabel(agent)}
+              aria-pressed={rail === agent.id}
+            >
+              <VendorIcon agentId={agent.id} size={18} />
+            </button>
+          ))}
+        </nav>
 
-      {efforts.length > 0 ? (
-        <div className={cx('ws-model-effort', efforts.length > 3 && 'is-stacked')}>
-          <span className="ws-model-effort-label">
-            <Icon name="brain" size={13} />
-            Thinking effort
-          </span>
-          <Segmented<Effort>
-            size="sm"
-            block={efforts.length > 3}
-            label="Thinking effort"
-            value={activeEffort}
-            onChange={handleSetEffort}
-            options={[
-              { value: AUTO_EFFORT, label: 'Auto', title: "Use the agent's own default for this model" },
-              ...efforts.map((e) => ({ value: e.value, label: effortLabel(e.value, efforts), title: e.description })),
-            ]}
-          />
-          {autoHint && <div className="ws-model-effort-hint">{autoHint}</div>}
-        </div>
-      ) : (
-        <div className="ws-model-effort">
-          <span className="ws-model-effort-label">
-            <Icon name="brain" size={13} />
-            This model has no effort setting
-          </span>
-        </div>
-      )}
+        <div className="mp-main">
+          <label className="mp-search">
+            <Icon name="search" size={14} />
+            <input
+              ref={searchRef}
+              type="search"
+              placeholder="Search models…"
+              value={query}
+              aria-label="Search models"
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setShowLegacy(false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  listRef.current?.querySelector<HTMLButtonElement>('.mp-row-main:not(:disabled), .mp-legacy')?.focus();
+                } else if (e.key === 'Enter' && listed.length > 0) {
+                  e.preventDefault();
+                  handleInPlaceSwitch(listed[0].agent.id, listed[0].choice.value);
+                }
+              }}
+            />
+          </label>
 
-      <div className="ws-model-list" ref={listRef} onKeyDown={onListKeyDown} role="listbox" aria-label="Models">
-        {groups.map(({ agent, models }) => (
-          <div key={agent.id} className="ws-model-group" role="group" aria-label={agent.name}>
-            <div className="ws-group-label">
-              <VendorIcon agentId={agent.id} size={12} />
-              {agent.name.replace(/ \(ACP\)$/, '')}
-            </div>
-            {models.map((choice) => {
+          <div className="ws-model-list mp-list" ref={listRef} onKeyDown={onListKeyDown} role="listbox" aria-label="Models">
+            {showLegacy && (
+              <button type="button" className="mp-back" onClick={() => setShowLegacy(false)}>
+                <Icon name="chevronLeft" size={14} />
+                Legacy models
+              </button>
+            )}
+            {listed.length === 0 && (
+              <div className="mp-empty">
+                {q ? `No models match “${query.trim()}”` : rail === 'favorites' ? 'Star a model to keep it here.' : 'This agent lists no models.'}
+              </div>
+            )}
+            {listed.map(({ agent, choice }) => {
               const mId = choice.value;
               const meta = getModelMeta(mId);
               // Advertised models carry the agent's own name and description
               const advertised = choice.label !== choice.value;
               const label = advertised ? choice.label : meta.label;
               const description = advertised ? choice.description || '' : meta.description;
-              const isSelected =
-                agent.id === session.agentId &&
-                (sameModel(session.model, mId) ||
-                  session.agentOptions?.currentModel === mId ||
-                  (!session.model && mId === agent.defaultModel));
-              const hasEffort = effortChoices(agent, mId, isSelected ? session.agentOptions : undefined).length > 0;
+              const selected = isCurrent(agent, mId);
+              const starred = favorites.includes(favKey(agent.id, mId));
               const key = `${agent.id}:${mId}`;
               return (
-                <button
-                  key={key}
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  className={cx('ws-model-row', isSelected && 'is-selected')}
-                  disabled={switchingTo !== null}
-                  onClick={() => handleInPlaceSwitch(agent.id, mId)}
-                >
-                  <span className="ws-model-vendor">
-                    <VendorIcon agentId={agent.id} size={16} />
-                  </span>
-                  <span className="ws-model-text">
+                <div key={key} className={cx('ws-model-row mp-row', selected && 'is-selected')} role="option" aria-selected={selected}>
+                  <button
+                    type="button"
+                    className="mp-row-main"
+                    disabled={switchingTo !== null}
+                    onClick={() => handleInPlaceSwitch(agent.id, mId)}
+                  >
                     <span className="ws-model-name">
                       {label}
-                      {hasEffort && (
-                        <span className="ws-model-thinking" title="Supports thinking effort">
-                          <Icon name="brain" size={11} />
-                        </span>
-                      )}
+                      {choice.isNew && <Badge tone="info" className="mp-new">New</Badge>}
+                      {switchingTo === key && <span className="ws-model-switching">Switching…</span>}
                     </span>
-                    <span className="ws-model-desc">{description}</span>
-                  </span>
-                  <span className="ws-model-end">
-                    {switchingTo === key ? (
-                      <span className="ws-model-switching">Switching…</span>
-                    ) : isSelected ? (
-                      <Icon name="check" size={15} className="ws-model-check" />
-                    ) : (
-                      !advertised && meta.badge && <Badge className="ws-model-badge">{meta.badge.split(' · ')[0]}</Badge>
-                    )}
-                  </span>
-                </button>
+                    <span className="mp-row-sub">
+                      <VendorIcon agentId={agent.id} size={12} />
+                      <span className="mp-row-agent">{railLabel(agent)}</span>
+                      {description && <span className="ws-model-desc">· {description}</span>}
+                    </span>
+                  </button>
+                  {selected && <Icon name="check" size={15} className="ws-model-check" />}
+                  <button
+                    type="button"
+                    className={cx('mp-star', starred && 'is-on')}
+                    aria-pressed={starred}
+                    aria-label={starred ? `Unstar ${label}` : `Star ${label}`}
+                    title={starred ? 'Remove from starred' : 'Star this model'}
+                    onClick={() => toggleFavorite(agent.id, mId)}
+                  >
+                    <Icon name="star" size={15} />
+                  </button>
+                </div>
               );
             })}
+            {!showLegacy && legacyRows.length > 0 && (
+              <button type="button" className="mp-legacy" onClick={() => setShowLegacy(true)}>
+                <span className="mp-legacy-text">
+                  <span className="ws-model-name">Legacy models</span>
+                  <span className="ws-model-desc">
+                    {legacyRows.length} {legacyRows.length === 1 ? 'model' : 'models'}
+                  </span>
+                </span>
+                <Icon name="chevronRight" size={15} />
+              </button>
+            )}
           </div>
-        ))}
+        </div>
       </div>
 
       <div className="ws-model-advanced">

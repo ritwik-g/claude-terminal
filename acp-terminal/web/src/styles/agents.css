@@ -1,4 +1,4 @@
-/* ============================================================ Agents tab */
+/* ========================================================= Subagents tab */
 
 .agents-tab {
   flex: 1 1 auto;
@@ -223,6 +223,31 @@
 .agents-result { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 .agents-result .prose { font-size: var(--text-base); }
 .agents-note { margin: 0; color: var(--text-3); font-size: var(--text-sm); }
+
+.agents-row-agent { display: inline-flex; align-items: center; gap: 4px; }
+
+.agents-details { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.agents-detail-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px var(--space-4);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  font-size: var(--text-sm);
+}
+.agents-detail-row { display: contents; }
+.agents-detail-row dt { color: var(--text-3); line-height: 28px; }
+.agents-detail-row dd { display: flex; align-items: center; min-width: 0; margin: 0; color: var(--text-2); line-height: 28px; }
+.agents-detail-value { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.agents-detail-value > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-detail-value .mono { font-size: var(--text-xs); }
+@media (max-width: 768px) {
+  .agents-detail-list { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .agents-detail-row dt { line-height: 22px; margin-top: 6px; }
+}
 .agents-summary { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
 .agents-summary.is-failed { color: var(--danger); }
 
@@ -256,7 +281,7 @@
   .subagent-open-label { display: none; }
 }
 
-/* The Agents tab makes the session tab row one tab wider; on phones tighten
+/* The Subagents tab makes the session tab row one tab wider; on phones tighten
    it and let the context meter show just its bar so everything stays on screen. */
 @media (max-width: 480px) {
   .ws-root .ws-tabs-bar { gap: var(--space-2); padding: 0 var(--space-2); }
@@ -266,3 +291,40 @@
   .ws-root .ws-tabs-bar .ws-context-meter { flex-shrink: 0; }
   .ws-root .ws-tabs-bar .ws-context-value { display: none; }
 }
+
+/* ========================================================= Agents tab (agent sessions) */
+
+.agent-sessions-fresh {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.agent-sessions-fresh-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
+.agent-sessions-fresh-text strong { color: var(--text); font-size: var(--text-sm); font-weight: 600; }
+.agent-sessions-fresh-text span { color: var(--text-3); font-size: var(--text-sm); }
+.agent-sessions-fresh-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.agent-sessions-fresh .agents-note { flex-basis: 100%; }
+
+.agent-sessions-list { display: flex; flex-direction: column; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.agent-sessions-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+.agent-sessions-item.is-focused { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.agent-sessions-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.agent-sessions-name { color: var(--text); font-weight: 600; }
+.agent-sessions-model { color: var(--text-3); font-size: var(--text-sm); }
+.agent-sessions-badges { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.agent-sessions-when { margin-left: auto; color: var(--text-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }

@@ -119,6 +119,11 @@ const UserTurn: React.FC<{
           onClick={() => onRollback(turn.id, 'revert_to_this')}
         />
       </span>
+      {turn.keywords?.map((k) => (
+        <Badge key={k} tone="accent" icon={k === 'ultracode' ? 'layers' : 'brain'} title={`Sent to Claude with "${k}"`}>
+          {k === 'ultracode' ? 'Ultracode' : 'Ultrathink'}
+        </Badge>
+      ))}
       <time className="ws-time" dateTime={new Date(turn.timestamp).toISOString()}>
         {formatTime(turn.timestamp)}
       </time>

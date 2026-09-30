@@ -16,6 +16,10 @@ export interface SlashCommandItem {
   icon?: string;
   actionType?: 'insert' | 'immediate';
   agentIds?: string[];
+  /** Where an agent-reported command comes from: a plugin ("unstract") or "MCP". */
+  source?: string;
+  /** Reported by the running agent (a command or skill) rather than listed by this app. */
+  fromAgent?: boolean;
 }
 
 export interface AgentDescriptor {
@@ -42,6 +46,18 @@ export interface ConfigChoice {
   value: string;
   label: string;
   description?: string;
+  /** An approval mode's kind (ACP `_meta.kind`): standard, plan, auto_review or full_access. */
+  kind?: string;
+  /** A model this app first saw the agent offer in the last two weeks. */
+  isNew?: boolean;
+}
+
+/** A slash command or skill the agent offers (ACP available_commands_update). */
+export interface AgentCommand {
+  name: string;
+  description: string;
+  /** What to type after it, e.g. "[pr-number]". */
+  hint?: string;
 }
 
 /** The effort and model choices a running agent advertised (ACP config options). */
@@ -55,6 +71,12 @@ export interface AgentOptions {
   modelConfigId?: string;
   models: ConfigChoice[];
   currentModel?: string;
+  /** The agent's approval modes (ACP `mode` option), e.g. Claude's Manual, Accept edits, Auto. */
+  modeConfigId?: string;
+  modes?: ConfigChoice[];
+  currentMode?: string;
+  /** Fast mode, when the current model offers it (Claude's `fast` option, an on/off select). */
+  fast?: { configId: string; enabled: boolean; onValue: string; offValue: string; description?: string };
   updatedAt: number;
 }
 
@@ -138,6 +160,8 @@ export interface TurnMessage {
   model?: string;
   /** Set on the system turn that marks a context compaction (see server/types.ts). */
   compaction?: CompactionRecord;
+  /** Claude keywords CodePit added to a user message it sent (ultrathink, ultracode). */
+  keywords?: string[];
 }
 
 export interface CompactionRecord {
@@ -185,6 +209,26 @@ export interface UserAnnotations {
   autoApprove?: boolean;
 }
 
+/** One agent session (the agent's own conversation) behind a CodePit session. */
+export interface AgentSessionRecord {
+  /** The agent's session id: for Claude the Claude Code session, for Codex the thread. */
+  id: string;
+  agentId: string;
+  agentName: string;
+  model?: string;
+  startedAt: number;
+  /** When it was last started or continued; equals startedAt until it is resumed. */
+  lastStartedAt: number;
+  /** How many times it was continued after a restart or a stop. */
+  resumes: number;
+  endedAt?: number;
+  endReason?: string;
+  /** Why continuing the previous session failed, when this one replaced it. */
+  replacedBecause?: string;
+  /** The agent's own transcript on this machine, when known. */
+  transcriptPath?: string;
+}
+
 /** 'auto' (the agent's own default) or a level the agent advertised, e.g. 'xhigh'. */
 export type ThinkingEffort = string;
 export type ContextTransferMode = 'compact' | 'full' | 'none';
@@ -220,6 +264,24 @@ export interface AcpSession {
   turns: TurnMessage[];
   model?: string;
   effort?: ThinkingEffort;
+  /** The approval mode chosen here (an agentOptions.modes value), applied when the agent starts. */
+  mode?: string;
+  /** Fast mode chosen here, applied when the agent starts. */
+  fastMode?: boolean;
+  /** The slash commands and skills the agent last reported. */
+  agentCommands?: AgentCommand[];
+  /** The running agent's own session id (for Claude, its Claude Code session). */
+  agentSessionId?: string;
+  /** The agent session to continue on the next start (ACP session/resume); absent means start fresh. */
+  agentResume?: { agentId: string; sessionId: string; cwd: string; savedAt: number };
+  /** Every agent session that has served this conversation, oldest first. */
+  agentSessions?: AgentSessionRecord[];
+  /** Turns before this index are not handed to a new agent session ("Clean slate"). */
+  contextStartIndex?: number;
+  /** Claude's ultracode: multi-agent workflow orchestration on every message, at xhigh effort. */
+  ultracode?: boolean;
+  /** Claude's ultrathink on the next message only. */
+  ultrathinkNext?: boolean;
   contextMode?: ContextTransferMode;
   contextHandoffPending?: boolean;
   failoverFromId?: string;
@@ -227,6 +289,8 @@ export interface AcpSession {
   promptSuggestion?: string;
   rateLimits?: VendorRateLimits;
   isAgentRunning?: boolean;
+  /** The running agent can take a message into a turn in progress (ACP steering). */
+  canSteer?: boolean;
   agentStopped?: boolean;
   /** The agent's latest todo list. */
   plan?: PlanEntry[];
@@ -440,6 +504,21 @@ export interface EcosystemReport {
 export type AgentTaskKind = 'subagent' | 'background' | 'workflow';
 export type AgentTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
+/** Where an agent task came from (see server/types.ts). */
+export interface TaskAudit {
+  agentId?: string;
+  agentName?: string;
+  model?: string;
+  agentSessionId?: string;
+  subagentId?: string;
+  subagentModel?: string;
+  runId?: string;
+  scriptPath?: string;
+  transcriptPath?: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
+}
+
 /**
  * Work the session's agent handed off: a subagent (Claude's Agent/Task tool),
  * a background shell or monitor, or a workflow run. The tool calls and
@@ -466,6 +545,8 @@ export interface AgentTask {
   /** How it ended, or why it was cut off. */
   summary?: string;
   usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
+  /** Who ran it, for audit: recorded when the agent reported it and kept as it was. */
+  audit?: TaskAudit;
   /** Its own messages, reasoning and tool calls in the order they happened. */
   segments?: TurnSegment[];
 }

@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import { hasAgent, listAgents } from './agents/registry.js';
-import { AgentNotRunningError, NothingToCompactError, QueuedPromptNotFoundError, sessionManager } from './acp/session-mgr.js';
+import { AgentNotRunningError, InvalidOptionError, NothingToCompactError, QueuedPromptNotFoundError, sessionManager } from './acp/session-mgr.js';
 import { parseAutoCompact } from './compaction.js';
 import { TurnInFlightError } from './acp/client-host.js';
 import { searchSessions } from './search.js';
@@ -25,7 +25,7 @@ import { describeLanAddresses } from './network.js';
 import { getOrCreateToken, getUploadsDir } from './paths.js';
 import { isLocalClient } from './security.js';
 import { mcpRouter } from './mcp/routes.js';
-import { advertisedOptions, effortChoicesFor, effortError, isEffortValue } from './acp/agent-options.js';
+import { advertisedOptions, effortChoicesFor, effortError, isEffortValue, isFavoriteList, markNewModels, readFavoriteModels, writeFavoriteModels } from './acp/agent-options.js';
 import { refreshCodexRateLimitsAsync } from './codex-limits.js';
 
 export const apiRouter = Router();
@@ -44,7 +44,28 @@ apiRouter.get('/agents', (req: Request, res: Response) => {
   // Absent param -> undefined so the registry's env default (test mode / CODEPIT_ENABLE_MOCK) applies
   const includeMock = req.query.includeMock === undefined ? undefined : req.query.includeMock === 'true';
   // With the effort and model choices each agent last advertised, so pickers show them before a session starts
-  res.json({ agents: listAgents(includeMock).map((a) => ({ ...a, advertised: advertisedOptions(a.id) })) });
+  res.json({ agents: listAgents(includeMock).map((a) => ({ ...a, advertised: withNewModels(a.id, advertisedOptions(a.id)) })) });
+});
+
+// The "New" badge is worked out when served, so a cached list does not keep it past two weeks
+function withNewModels(agentId: string, byModel: ReturnType<typeof advertisedOptions>) {
+  if (!byModel) return byModel;
+  return Object.fromEntries(Object.entries(byModel).map(([model, opts]) => [model, markNewModels(agentId, opts)]));
+}
+
+// Favourite models, shared by every device: ["<agentId>:<model>", ...]
+apiRouter.get('/settings/favorite-models', (_req: Request, res: Response) => {
+  res.json({ favorites: readFavoriteModels() });
+});
+
+apiRouter.put('/settings/favorite-models', (req: Request, res: Response) => {
+  const { favorites } = req.body ?? {};
+  if (!isFavoriteList(favorites)) {
+    res.status(400).json({ error: 'favorites must be a list of "<agentId>:<model>" strings' });
+    return;
+  }
+  writeFavoriteModels(favorites);
+  res.json({ favorites: readFavoriteModels() });
 });
 
 // 2. List attention-ranked sessions
@@ -334,6 +355,62 @@ apiRouter.patch('/sessions/:id/effort', async (req: Request, res: Response) => {
     }
     const session = await sessionManager.setSessionEffort(sid(req), effort);
     res.json({ session });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Set the agent session aside: the next message starts a new one with a summary, recent turns or nothing
+apiRouter.post('/sessions/:id/agent-session/forget', async (req: Request, res: Response) => {
+  const { contextMode = 'compact' } = req.body ?? {};
+  if (!['compact', 'full', 'none'].includes(contextMode)) {
+    res.status(400).json({ error: 'contextMode must be compact, full or none' });
+    return;
+  }
+  try {
+    res.json({ session: await sessionManager.forgetAgentSession(sid(req), contextMode) });
+  } catch (err: any) {
+    res.status(err instanceof TurnInFlightError ? 409 : 500).json({ error: err.message });
+  }
+});
+
+// Claude's ultrathink (next message) and ultracode (every message, xhigh effort)
+apiRouter.put('/sessions/:id/ultra', async (req: Request, res: Response) => {
+  const { ultracode, ultrathinkNext } = req.body ?? {};
+  if ((ultracode !== undefined && typeof ultracode !== 'boolean') || (ultrathinkNext !== undefined && typeof ultrathinkNext !== 'boolean')) {
+    res.status(400).json({ error: 'ultracode and ultrathinkNext must be true or false' });
+    return;
+  }
+  try {
+    res.json({ session: await sessionManager.setSessionUltra(sid(req), { ultracode, ultrathinkNext }) });
+  } catch (err: any) {
+    res.status(err instanceof InvalidOptionError ? 400 : 500).json({ error: err.message });
+  }
+});
+
+// Approval mode: one of the modes the agent offers (agentOptions.modes)
+apiRouter.put('/sessions/:id/mode', async (req: Request, res: Response) => {
+  const { mode } = req.body ?? {};
+  if (typeof mode !== 'string' || !/^[a-z0-9._-]{1,64}$/i.test(mode)) {
+    res.status(400).json({ error: 'mode must be a mode id such as default or acceptEdits' });
+    return;
+  }
+  try {
+    res.json({ session: await sessionManager.setSessionMode(sid(req), mode) });
+  } catch (err: any) {
+    res.status(err instanceof InvalidOptionError ? 400 : 500).json({ error: err.message });
+  }
+});
+
+// Fast mode on or off
+apiRouter.put('/sessions/:id/fast-mode', async (req: Request, res: Response) => {
+  const { enabled } = req.body ?? {};
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be true or false' });
+    return;
+  }
+  try {
+    res.json({ session: await sessionManager.setSessionFastMode(sid(req), enabled) });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

@@ -17,7 +17,7 @@
     "dist:linux": "npm run build && npm run build:electron && npm run rebuild:electron && electron-builder --linux",
     "rebuild:electron": "npm_config_python=\"$(node ../scripts/find-python.mjs)\" electron-rebuild -f -w node-pty",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p web",
-    "test": "NODE_ENV=test tsx scripts/test-acp.ts && NODE_ENV=test tsx scripts/test-mcp.ts && NODE_ENV=test tsx scripts/test-lan.ts && NODE_ENV=test tsx scripts/test-lan-qr.ts && NODE_ENV=test tsx scripts/test-effort.ts && NODE_ENV=test tsx scripts/test-compact.ts && NODE_ENV=test tsx scripts/test-agent-tasks.ts && NODE_ENV=test tsx scripts/test-migration.ts",
+    "test": "NODE_ENV=test tsx scripts/test-acp.ts && NODE_ENV=test tsx scripts/test-mcp.ts && NODE_ENV=test tsx scripts/test-lan.ts && NODE_ENV=test tsx scripts/test-lan-qr.ts && NODE_ENV=test tsx scripts/test-effort.ts && NODE_ENV=test tsx scripts/test-compact.ts && NODE_ENV=test tsx scripts/test-agent-tasks.ts && NODE_ENV=test tsx scripts/test-migration.ts && NODE_ENV=test tsx scripts/test-resume.ts",
     "test:mcp": "NODE_ENV=test tsx scripts/test-mcp.ts",
     "test:lan": "NODE_ENV=test tsx scripts/test-lan.ts",
     "smoke": "NODE_ENV=test tsx scripts/smoke.ts",

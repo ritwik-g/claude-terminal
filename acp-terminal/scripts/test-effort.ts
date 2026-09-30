@@ -24,6 +24,7 @@ const {
   rememberAgentOptions,
   cachedAgentOptions,
   effortChoicesFor,
+  markNewModels,
 } = await import('../server/acp/agent-options.js');
 const { normalizeClaudeModel } = await import('../server/acp/client-host.js');
 const { reconcileEffort, sessionManager } = await import('../server/acp/session-mgr.js');
@@ -124,6 +125,27 @@ function unitTests(): void {
 
   const haiku = parseAgentOptions(CLAUDE_OPTIONS.filter((o) => o.id !== 'effort'))!;
   check('a model without an effort option has no levels', haiku.efforts.length === 0 && !haiku.effortConfigId);
+
+  console.log('1b. Approval modes, fast mode and new models');
+  const withModes = parseAgentOptions([
+    { id: 'mode', category: 'mode', type: 'select', currentValue: 'default', options: [
+      { value: 'default', name: 'Manual', _meta: { kind: 'standard' } },
+      { value: 'auto', name: 'Auto', description: 'Claude decides', _meta: { kind: 'auto_review' } },
+    ] },
+    { id: 'fast', category: 'model_config', type: 'select', currentValue: 'on', description: 'Faster', options: [{ value: 'on', name: 'On' }, { value: 'off', name: 'Off' }] },
+  ])!;
+  check('modes read with their kind', withModes.modeConfigId === 'mode' && withModes.modes?.map((m) => `${m.value}/${m.kind}`).join() === 'default/standard,auto/auto_review', withModes.modes);
+  check('current mode read', withModes.currentMode === 'default');
+  check('fast mode read from an on/off select', withModes.fast?.enabled === true && withModes.fast.configId === 'fast', withModes.fast);
+  check("Claude's fast option read as off", parseAgentOptions(CLAUDE_OPTIONS)!.fast?.enabled === false);
+  check('no fast option, no fast mode', parseAgentOptions(CODEX_OPTIONS)!.fast === undefined);
+  const day = 24 * 60 * 60 * 1000;
+  const listed = (values: string[]) => ({ efforts: [], models: values.map((value) => ({ value, label: value })), updatedAt: 0 });
+  const baseline = markNewModels('newtest', listed(['a', 'b']), 1_000 * day);
+  check('the first list seen is the baseline, nothing new', baseline.models.every((m) => !m.isNew));
+  const later = markNewModels('newtest', listed(['a', 'b', 'c']), 1_001 * day);
+  check('a model added later is new', later.models.find((m) => m.value === 'c')?.isNew === true && !later.models.find((m) => m.value === 'a')?.isNew);
+  check('and stops being new after two weeks', !markNewModels('newtest', listed(['a', 'b', 'c']), 1_016 * day).models.some((m) => m.isNew));
 
   console.log('2. Mapping auto and levels onto the agent');
   check('auto -> Claude default row', effortToSend('auto', claude).value === 'default');
@@ -272,12 +294,64 @@ async function liveTests(): Promise<void> {
   check('the reply to the next message is its own turn, after the message', answer > question, turns.map((t) => [t.role, t.content?.slice(0, 30)]));
   check('the earlier reply is left as it was', !report.content!.includes('pid='), report.content);
 
+  console.log('9b. Send now adds a queued message to the running turn instead of stopping it');
+  check('steering support read from initialize', sessionManager.getSession(id)!.canSteer === true);
+  const slow = sessionManager.sendPrompt(id, 'slow-turn please');
+  for (let i = 0; i < 100 && !sessionManager.isTurnInFlight(id); i++) await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, 200)); // let the agent reach its wait
+  await sessionManager.queuePrompt(id, 'also check the tests');
+  const queuedItem = sessionManager.getSession(id)!.queuedPrompts![0];
+  await sessionManager.sendQueuedNow(id, queuedItem.id);
+  await slow;
+  await waitForIdle(id);
+  const after = sessionManager.getSession(id)!;
+  const steerAt = after.turns.findIndex((t) => t.role === 'user' && t.content === 'also check the tests');
+  const steeredReply = after.turns.findIndex((t) => t.role === 'agent' && t.content?.includes('steered: also check the tests'));
+  check('the queue is empty', !after.queuedPrompts?.length, after.queuedPrompts);
+  check('the message is in the transcript', steerAt > 0);
+  check('the agent answered it within the same turn, below it', steeredReply > steerAt, after.turns.map((t) => [t.role, t.content?.slice(0, 40)]));
+  check('the turn was not stopped', !after.turns.some((t) => t.role === 'agent' && /cancel/i.test(t.content || '')) && after.state === 'needs_you', after.state);
+
+  console.log('9c. A message the agent could not take goes back to the queue and is sent next');
+  const refusing = sessionManager.sendPrompt(id, 'slow-refuse please');
+  for (let i = 0; i < 100 && !sessionManager.isTurnInFlight(id); i++) await new Promise((r) => setTimeout(r, 20));
+  await sessionManager.queuePrompt(id, 'send me after');
+  await sessionManager.sendQueuedNow(id, sessionManager.getSession(id)!.queuedPrompts![0].id);
+  const mid = sessionManager.getSession(id)!;
+  check('back at the front of the queue', mid.queuedPrompts?.[0]?.text === 'send me after', mid.queuedPrompts);
+  check('not left in the transcript', !mid.turns.some((t) => t.role === 'user' && t.content === 'send me after'));
+  await refusing;
+  const sentDeadline = Date.now() + 5_000;
+  const sentAfter = () => sessionManager.getSession(id)!.turns.some((t) => t.role === 'user' && t.content === 'send me after');
+  while (!sentAfter() && Date.now() < sentDeadline) await new Promise((r) => setTimeout(r, 50));
+  await waitForIdle(id);
+  check('sent as the next prompt once the turn ended', sentAfter() && !sessionManager.getSession(id)!.queuedPrompts?.length);
+
+  console.log('9d. Approval mode, fast mode and the agent\'s commands');
+  const live = sessionManager.getSession(id)!;
+  check('commands reported by the agent kept on the session', live.agentCommands?.map((c) => c.name).join() === 'review,unstract:review-deep', live.agentCommands);
+  check('with their argument hint', live.agentCommands?.[0].hint === '[pr-number]');
+  check('modes advertised', live.agentOptions?.modes?.length === 3 && live.agentOptions.currentMode === 'default');
+  await sessionManager.setSessionAgent(id, 'efforttest', 'big'); // the small model has no fast mode
+  sessionManager.updateAnnotations(id, { autoApprove: true });
+  await sessionManager.setSessionMode(id, 'acceptEdits');
+  await sessionManager.setSessionFastMode(id, true);
+  const moded = await ask(id, 'which mode?');
+  check('mode applied to the running agent', field(moded, 'mode') === 'acceptEdits', moded);
+  check('fast mode applied to the running agent', field(moded, 'fast') === 'true', moded);
+  check('choosing a mode turns off auto-approve', sessionManager.getSession(id)!.user.autoApprove === false);
+  check('the agent reports the new mode', sessionManager.getSession(id)!.agentOptions?.currentMode === 'acceptEdits');
+  let badMode = false;
+  await sessionManager.setSessionMode(id, 'nonsense').catch(() => (badMode = true));
+  check('a mode the agent lacks is refused', badMode && sessionManager.getSession(id)!.mode === 'acceptEdits');
+
   console.log('10. Stored for the next start when no agent runs');
   await sessionManager.stopSessionAgent(id);
   await sessionManager.setSessionAgent(id, 'efforttest', 'big');
   await sessionManager.setSessionEffort(id, 'low');
   const sixth = await ask(id, 'after restart');
   check('stored effort applied at start', field(sixth, 'effort') === 'low' && field(sixth, 'model') === 'big', sixth);
+  check('stored mode and fast mode applied at start', field(sixth, 'mode') === 'acceptEdits' && field(sixth, 'fast') === 'true', sixth);
   check('new process', field(sixth, 'pid') !== field(first, 'pid'));
 
   sessionManager.shutdown();

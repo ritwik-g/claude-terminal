@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { store } from '../store.js';
 import { getGitInfo } from '../git.js';
@@ -11,10 +12,11 @@ import { HANDOFF_SUMMARY_PROMPT, autoCompactDecision, capSummary, contextWindowF
 import { ptyManager } from '../pty-manager.js';
 import { getUploadsDir } from '../paths.js';
 import { getClaudeRateLimits, updateClaudeRateLimitsFromSdk } from '../subscriptions.js';
-import { cachedAgentOptions, effortLabel, rememberAgentOptions, resolveModelValue } from './agent-options.js';
+import { cachedAgentOptions, effortChoicesFor, effortLabel, markNewModels, rememberAgentOptions, resolveModelValue } from './agent-options.js';
+import { logQueueEvent } from '../queue-log.js';
 import { appendSubagentText, completeAsyncSubagent, endAgentTasks, stopAgentTask, stopTranscriptWatchers, syncAgentTasks, trackAsyncTask, trackTaskText, trackToolCall, trackToolCallUpdate, watchSubagentTranscript } from './agent-tasks.js';
 import { AUTO_EFFORT } from '../types.js';
-import type { AcpSession, AutoCompactSetting, CompactionRecord, AgentOptions, AgentTask, AgentTaskTextDelta, AsyncTaskUpdate, QueuedPrompt, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
+import type { AcpSession, AgentCommand, TaskAudit, AutoCompactSetting, CompactionRecord, AgentOptions, AgentTask, AgentTaskTextDelta, AsyncTaskUpdate, QueuedPrompt, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
 
 /**
  * Format conversation history into a structured briefing block for context transfer.
@@ -113,6 +115,8 @@ export class NothingToCompactError extends Error {
   }
 }
 
+export class InvalidOptionError extends Error {}
+
 export class AgentNotRunningError extends Error {
   constructor() {
     super('The agent is stopped. Start it first, or compact anyway to resend recent turns for the summary');
@@ -149,7 +153,9 @@ export class SessionManager extends EventEmitter {
   }
 
   /** Shut down the session's agent (running or still starting) and drop turn ownership. */
-  private dropHost(sessionId: string): void {
+  private dropHost(sessionId: string, reason = 'Stopped'): void {
+    const running = this.activeHosts.get(sessionId);
+    if (running?.sessionId) this.endAgentSession(sessionId, running.sessionId, reason);
     const run = this.compactionRuns.get(sessionId);
     if (run) this.finishCompaction(sessionId, run, { stopReason: 'cancelled' });
     this.settleAgentCompactions(sessionId, 'Stopped when the agent was stopped');
@@ -386,6 +392,7 @@ export class SessionManager extends EventEmitter {
       s.rateLimits = s.rateLimits || getClaudeRateLimits();
     }
     s.isAgentRunning = this.activeHosts.has(s.id);
+    s.canSteer = Boolean(this.activeHosts.get(s.id)?.supportsSteering);
     // Older sessions get their agent tasks built; undone or compacted turns take theirs along
     if (syncAgentTasks(s)) store.save(s, { touch: false });
     return s;
@@ -402,6 +409,25 @@ export class SessionManager extends EventEmitter {
   }
 
   private agentTasksChanged(sessionId: string, tasks: AgentTask[]): AgentTask[] | undefined {
+    const session = store.get(sessionId);
+    const host = this.activeHosts.get(sessionId) ?? this.startingHosts.get(sessionId)?.host;
+    for (const task of tasks) {
+      // Stamped once, when first seen: which agent, model and agent session it ran under. A task
+      // older than the running agent (e.g. stopped when it exited) came from another run: left as is
+      if (session && host && !task.audit?.agentId && task.startedAt >= host.createdAt) {
+        task.audit = {
+          ...task.audit,
+          agentId: session.agentId,
+          agentName: session.agentName,
+          model: host.options?.currentModel ?? session.model,
+          agentSessionId: host.sessionId ?? undefined,
+        };
+      }
+      if (session && task.audit && !task.audit.transcriptPath) {
+        const file = claudeSubagentTranscript(session, task.audit);
+        if (file) task.audit.transcriptPath = file;
+      }
+    }
     for (const task of tasks) {
       if (task.kind !== 'subagent' || task.status !== 'running' || !task.toolCallId) continue;
       const call = findToolCall(store.get(sessionId)!, task.toolCallId)?.call;
@@ -506,13 +532,20 @@ export class SessionManager extends EventEmitter {
     return session;
   }
 
-  private async ensureHost(session: AcpSession): Promise<AcpClientHost> {
+  /**
+   * The running agent for a session, starting it if needed. A new start continues the saved
+   * agent session when the agent can resume it; otherwise it is a new agent session, and
+   * the next prompt hands it the conversation (contextHandoffPending). `beforeTurnId` places
+   * the note about how it started before that turn (the prompt that caused the start).
+   */
+  private async ensureHost(session: AcpSession, opts: { beforeTurnId?: string } = {}): Promise<AcpClientHost> {
     const existing = this.activeHosts.get(session.id);
     if (existing) return existing;
     const starting = this.startingHosts.get(session.id);
     if (starting) return starting.promise;
 
     const host = this.createHost(session);
+    host.resumeSessionId = resumableSessionId(session) ?? adoptClaudeSession(session, opts.beforeTurnId);
     const promise = (async () => {
       try {
         await host.start();
@@ -526,9 +559,15 @@ export class SessionManager extends EventEmitter {
       if (host.isShutdown) throw new Error('Agent was stopped while starting');
       this.activeHosts.set(session.id, host);
       const current = store.get(session.id);
-      if (current && host.mcpInfo) {
-        current.mcp = host.mcpInfo;
+      if (current) {
+        if (host.mcpInfo) current.mcp = host.mcpInfo;
+        this.recordAgentStart(current, host, opts.beforeTurnId);
         store.save(current, { touch: false });
+        this.emit('sessionStream', {
+          sessionId: current.id,
+          type: 'agentSession',
+          session: { agentSessionId: current.agentSessionId, agentResume: current.agentResume, agentSessions: current.agentSessions, turns: current.turns },
+        });
       }
       return host;
     })();
@@ -549,6 +588,8 @@ export class SessionManager extends EventEmitter {
       session.model,
       session.effort
     );
+    host.mode = session.mode;
+    host.fastMode = session.fastMode;
 
     let activeAgentTurn: TurnMessage | null = null;
 
@@ -710,21 +751,32 @@ export class SessionManager extends EventEmitter {
       this.emit('sessionStream', { sessionId: s.id, type: 'plan', plan: entries, session: { plan: entries } });
     });
 
-    host.on('agentOptions', (options: AgentOptions) => {
+    host.on('agentOptions', (reported: AgentOptions) => {
       const s = store.get(session.id);
       if (!s) return;
+      const options = markNewModels(s.agentId, reported);
       s.agentOptions = options;
       // Cache under the stored model id only when the agent is actually running that model
       const runningStored = !options.currentModel || resolveModelValue(s.model, options.models) === options.currentModel;
       rememberAgentOptions(s.agentId, runningStored ? s.model : undefined, options);
       const note = reconcileEffort(s, options);
+      // Claude Code only runs ultracode on models with an xhigh level
+      if (s.ultracode && options.efforts.length > 0 && !options.efforts.some((e) => e.value === 'xhigh')) s.ultracode = false;
       store.save(s, { touch: false });
       this.emit('sessionStream', {
         sessionId: s.id,
         type: 'agentOptions',
-        session: { agentOptions: options, effort: s.effort },
+        session: { agentOptions: options, effort: s.effort, canSteer: host.supportsSteering, ultracode: s.ultracode },
         ...(note ? { turn: note } : {}),
       });
+    });
+
+    host.on('availableCommands', (commands: AgentCommand[]) => {
+      const s = store.get(session.id);
+      if (!s) return;
+      s.agentCommands = commands;
+      store.save(s, { touch: false });
+      this.emit('sessionStream', { sessionId: s.id, type: 'agentCommands', session: { agentCommands: commands } });
     });
 
     host.on('contextWindow', (size: number) => {
@@ -871,6 +923,7 @@ export class SessionManager extends EventEmitter {
     host.on('closed', () => {
       // Only the registered host may clear the session; a replaced host's exit must not orphan its successor
       if (this.activeHosts.get(session.id) !== host) return;
+      if (host.sessionId) this.endAgentSession(session.id, host.sessionId, 'The agent process exited');
       this.activeHosts.delete(session.id);
       this.activePrompts.delete(session.id);
       activeAgentTurn = null;
@@ -899,34 +952,7 @@ export class SessionManager extends EventEmitter {
     // This turn's own end decides about compaction now
     this.autoCompactAfterBackground.delete(sessionId);
 
-    // Process and save any attachments to disk
-    const savedAttachments: FileAttachment[] = [];
-    if (attachments && attachments.length > 0) {
-      const uploadDir = path.join(getUploadsDir(), sessionId);
-      fs.mkdirSync(uploadDir, { recursive: true });
-      for (const att of attachments) {
-        const safeName = (att.name || `file_${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
-        const filePath = path.join(uploadDir, safeName);
-        if (att.data) {
-          try {
-            const rawBase64 = att.data.replace(/^data:[^;]+;base64,/, '');
-            fs.writeFileSync(filePath, Buffer.from(rawBase64, 'base64'));
-          } catch (e) {
-            console.error(`[session-mgr] Failed to write attachment ${safeName}:`, e);
-          }
-        }
-        savedAttachments.push({
-          id: att.id || `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          name: att.name,
-          size: att.size || (fs.existsSync(filePath) ? fs.statSync(filePath).size : 0),
-          mimeType: att.mimeType,
-          path: filePath,
-          url: `/api/attachments/${sessionId}/${encodeURIComponent(safeName)}`,
-          data: att.data,
-          isImage: att.isImage ?? att.mimeType?.startsWith('image/'),
-        });
-      }
-    }
+    const savedAttachments = saveAttachments(sessionId, attachments);
 
     session.lastPrompt = promptText;
     session.turns.push({
@@ -943,45 +969,12 @@ export class SessionManager extends EventEmitter {
     session.state = 'working';
     session.agentStopped = false;
     session.promptSuggestion = undefined;
-    // If the host is not currently in memory (e.g. server daemon restarted or agent re-initialized),
-    // automatically seed the newly spawned agent process with the prior conversation history
-    if (!this.activeHosts.has(sessionId) && session.turns.length > 1) {
-      session.contextHandoffPending = true;
-    }
-
-    // Prepare prompt to deliver to host
-    let promptWithAttachments = promptText;
-    if (savedAttachments.length > 0) {
-      const attachmentSummaries: string[] = [];
-      for (const att of savedAttachments) {
-        if (att.isImage) {
-          attachmentSummaries.push(`[Attached Image: ${att.name} (Saved at: ${att.path})]`);
-        } else {
-          attachmentSummaries.push(`[Attached File: ${att.name} (Saved at: ${att.path})]`);
-          try {
-            if (att.path && fs.existsSync(att.path) && att.size < 50000) {
-              const textContent = fs.readFileSync(att.path, 'utf8');
-              attachmentSummaries.push(`--- Begin File Content: ${att.name} ---\n${textContent}\n--- End File Content: ${att.name} ---`);
-            }
-          } catch {}
-        }
-      }
-      promptWithAttachments = promptText
-        ? `${attachmentSummaries.join('\n\n')}\n\n${promptText}`
-        : attachmentSummaries.join('\n\n');
-    }
-
-    let promptToSendToHost = promptWithAttachments;
-    if (session.contextHandoffPending) {
-      const priorTurns = session.turns.slice(0, -1);
-      const historyBlock = formatSessionHistory(priorTurns, {
-        compact: session.contextMode !== 'full',
-      });
-      if (historyBlock) {
-        promptToSendToHost = `${historyBlock}\n\n[Active User Request]\n${promptWithAttachments}`;
-      }
-      session.contextHandoffPending = false;
-    }
+    // Claude's keywords go to the agent, not into the transcript; a slash command takes none
+    const keywords = isSlashCommand(promptText) ? [] : takeKeywords(session);
+    const userTurn = session.turns[session.turns.length - 1];
+    if (keywords.length > 0) userTurn.keywords = keywords;
+    // /clear empties Claude's own context: continuing that session later would not bring it back
+    if (promptText.trim() === '/clear') delete session.agentResume;
 
     store.save(session);
     this.emit('sessionsUpdated', this.listSessions());
@@ -989,7 +982,23 @@ export class SessionManager extends EventEmitter {
     let endedCleanly = false;
     let turnStopReason: string | undefined;
     try {
-      const host = await this.ensureHost(session);
+      const host = await this.ensureHost(session, { beforeTurnId: userTurn.id });
+      // Stopped or replaced while the agent was starting: the newer action owns the session now
+      if (this.activePrompts.get(sessionId) !== seq) return;
+      // A new agent session (not a continued one) gets the conversation so far with this prompt
+      const promptWithAttachments = withKeywords(withAttachmentNotes(promptText, savedAttachments), keywords);
+      let promptToSendToHost = promptWithAttachments;
+      const current = store.get(sessionId);
+      if (current?.contextHandoffPending) {
+        const historyBlock = formatSessionHistory(handoffTurns(current, userTurn.id), {
+          compact: current.contextMode !== 'full',
+        });
+        if (historyBlock) {
+          promptToSendToHost = `${historyBlock}\n\n[Active User Request]\n${promptWithAttachments}`;
+        }
+        current.contextHandoffPending = false;
+        store.save(current, { touch: false });
+      }
       const { stopReason } = await host.sendPrompt(promptToSendToHost, savedAttachments);
       turnStopReason = stopReason;
       endedCleanly = stopReason === 'end_turn';
@@ -1033,11 +1042,15 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  /** Queue a message behind the running turn, or send it straight away when nothing is running. */
+  /**
+   * Queue a message behind the running turn, or send it straight away when nothing is running.
+   * A queue paused by a stopped or failed turn (or a server restart) does not hold a new message
+   * back: it goes out now, and the paused queue follows once that turn ends cleanly.
+   */
   async queuePrompt(sessionId: string, text: string, attachments?: FileAttachment[]): Promise<{ queued: boolean }> {
     const session = store.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
-    if (!this.isTurnInFlight(sessionId) && !session.queuedPrompts?.length) {
+    if (!this.isTurnInFlight(sessionId)) {
       this.runPrompt(sessionId, text, attachments);
       return { queued: false };
     }
@@ -1049,6 +1062,7 @@ export class SessionManager extends EventEmitter {
     };
     session.queuedPrompts = [...(session.queuedPrompts || []), item];
     this.saveQueue(session);
+    logQueueEvent(sessionId, 'queued', item);
     return { queued: true };
   }
 
@@ -1056,25 +1070,93 @@ export class SessionManager extends EventEmitter {
     const session = this.requireQueued(sessionId, queueId);
     session.queuedPrompts = session.queuedPrompts!.map((q) => (q.id === queueId ? { ...q, text } : q));
     this.saveQueue(session);
+    logQueueEvent(sessionId, 'edited', { id: queueId, text });
     return session;
   }
 
   removeQueuedPrompt(sessionId: string, queueId: string): AcpSession {
     const session = this.requireQueued(sessionId, queueId);
+    const removed = session.queuedPrompts!.find((q) => q.id === queueId);
     session.queuedPrompts = session.queuedPrompts!.filter((q) => q.id !== queueId);
     this.saveQueue(session);
+    if (removed) logQueueEvent(sessionId, 'removed', removed);
     return session;
   }
 
-  /** Stop the running turn, if any, and send this queued message now. */
+  /**
+   * Send this queued message now. An agent that takes messages during a turn gets it added
+   * to the running turn; otherwise the running turn, if any, is stopped first.
+   */
   async sendQueuedNow(sessionId: string, queueId: string): Promise<void> {
     const session = this.requireQueued(sessionId, queueId);
     const item = session.queuedPrompts!.find((q) => q.id === queueId)!;
+    if (this.canSteer(sessionId)) {
+      await this.steerQueued(sessionId, item);
+      return;
+    }
+    // Taken out before anything is awaited, so a second "Send now" finds it gone instead of sending it twice
+    session.queuedPrompts = session.queuedPrompts!.filter((q) => q.id !== queueId);
+    this.saveQueue(session);
+    logQueueEvent(sessionId, 'sent-now', item);
     if (this.isTurnInFlight(sessionId)) await this.cancelPrompt(sessionId);
-    const fresh = store.get(sessionId)!;
-    fresh.queuedPrompts = (fresh.queuedPrompts || []).filter((q) => q.id !== queueId);
-    this.saveQueue(fresh);
-    this.runPrompt(sessionId, item.text, item.attachments);
+    this.runPrompt(sessionId, item.text, item.attachments, item);
+  }
+
+  /** A turn is running that the agent can take a message into (a compaction's run is not one). */
+  private canSteer(sessionId: string): boolean {
+    const host = this.activeHosts.get(sessionId);
+    return Boolean(host?.supportsSteering && host.isTurnInFlight && this.activePrompts.has(sessionId) && !this.compactionRuns.has(sessionId));
+  }
+
+  private async steerQueued(sessionId: string, item: QueuedPrompt): Promise<void> {
+    const host = this.activeHosts.get(sessionId)!;
+    const session = store.get(sessionId)!;
+    const saved = saveAttachments(sessionId, item.attachments);
+    const keywords = isSlashCommand(item.text) ? [] : takeKeywords(session);
+    // Recorded before it is sent, so the agent's answer to it lands below it
+    const turn: TurnMessage = {
+      id: `usr-${Date.now()}`,
+      role: 'user',
+      content: item.text,
+      attachments: saved.length > 0 ? saved : undefined,
+      timestamp: Date.now(),
+      agentId: session.agentId,
+      agentName: session.agentName,
+      model: session.model,
+      ...(keywords.length > 0 ? { keywords } : {}),
+    };
+    session.turns.push(turn);
+    session.lastPrompt = item.text;
+    session.queuedPrompts = (session.queuedPrompts || []).filter((q) => q.id !== item.id);
+    this.saveQueue(session);
+    this.emit('sessionStream', { sessionId, type: 'turnAdded', turn });
+
+    let outcome: Awaited<ReturnType<AcpClientHost['steer']>> | undefined;
+    let failure: unknown;
+    try {
+      outcome = await host.steer(withKeywords(withAttachmentNotes(item.text, saved), keywords), saved);
+    } catch (err) {
+      failure = err;
+    }
+    if (outcome === 'injected' || outcome === 'startedNewTurn') {
+      logQueueEvent(sessionId, 'steered', item, outcome);
+      return;
+    }
+    logQueueEvent(sessionId, 'requeued', item, failure ? String((failure as Error).message || failure) : 'no turn was running');
+
+    // Not delivered: take the message back out of the transcript and put it first in the queue
+    const s = store.get(sessionId);
+    if (s) {
+      s.turns = s.turns.filter((t) => t.id !== turn.id);
+      // Ultrathink was meant for this message, which has not gone out yet
+      if (keywords.includes('ultrathink')) s.ultrathinkNext = true;
+      s.queuedPrompts = [item, ...(s.queuedPrompts || []).filter((q) => q.id !== item.id)];
+      this.saveQueue(s);
+      this.emit('sessionStream', { sessionId, type: 'turnRemoved', session: { turns: s.turns } });
+    }
+    if (failure) throw failure;
+    // The turn ended as it was sent: it goes out as the next prompt
+    if (!this.isTurnInFlight(sessionId)) this.sendNextQueued(sessionId);
   }
 
   private sendNextQueued(sessionId: string): void {
@@ -1083,12 +1165,23 @@ export class SessionManager extends EventEmitter {
     if (!session || !next || this.isTurnInFlight(sessionId)) return;
     session.queuedPrompts = session.queuedPrompts!.slice(1);
     this.saveQueue(session);
-    this.runPrompt(sessionId, next.text, next.attachments);
+    logQueueEvent(sessionId, 'sent', next);
+    this.runPrompt(sessionId, next.text, next.attachments, next);
   }
 
-  private runPrompt(sessionId: string, text: string, attachments?: FileAttachment[]): void {
+  /**
+   * Send without waiting. A queued item that sendPrompt refused before recording it (a turn
+   * still in flight) goes back to the front of the queue instead of being lost.
+   */
+  private runPrompt(sessionId: string, text: string, attachments?: FileAttachment[], fromQueue?: QueuedPrompt): void {
     this.sendPrompt(sessionId, text, attachments).catch((err) => {
       console.error(`[session-mgr] Error executing prompt for ${sessionId}:`, err);
+      if (!fromQueue || !(err instanceof TurnInFlightError)) return;
+      const s = store.get(sessionId);
+      if (!s || s.queuedPrompts?.some((q) => q.id === fromQueue.id)) return;
+      s.queuedPrompts = [fromQueue, ...(s.queuedPrompts || [])];
+      this.saveQueue(s);
+      logQueueEvent(sessionId, 'requeued', fromQueue, 'a turn was still running');
     });
   }
 
@@ -1110,6 +1203,15 @@ export class SessionManager extends EventEmitter {
   async resolvePermission(sessionId: string, optionId: string): Promise<boolean> {
     const host = this.activeHosts.get(sessionId);
     if (!host) return false;
+    // Claude's "approve and clear context" plan options restart Claude under the same session
+    // id with an empty context; continuing that id later would bring the old context back
+    if (optionId.startsWith('exit-plan-clear-')) {
+      const s = store.get(sessionId);
+      if (s?.agentResume) {
+        delete s.agentResume;
+        store.save(s, { touch: false });
+      }
+    }
     return host.resolvePermission(optionId);
   }
 
@@ -1145,7 +1247,7 @@ export class SessionManager extends EventEmitter {
     if (host?.isTurnInFlight) {
       await host.cancel().catch(() => {});
     }
-    this.dropHost(sessionId);
+    this.dropHost(sessionId, 'Stopped');
     ptyManager.release(`session-term-${sessionId}`);
 
     session.state = 'parked';
@@ -1153,13 +1255,14 @@ export class SessionManager extends EventEmitter {
     session.pendingPermission = null;
     session.activeTerminalId = undefined;
     session.isAgentRunning = false;
-    session.contextHandoffPending = session.turns.length > 0;
     session.updatedAt = Date.now();
 
     session.turns.push({
       id: `sys-${Date.now()}`,
       role: 'system',
-      content: `🛑 Agent process stopped. Subprocess & terminal resources released. The agent will automatically re-spawn when you send your next message.`,
+      content: resumableSessionId(session)
+        ? `🛑 Agent process stopped. Your next message starts it again and continues the same agent session.`
+        : `🛑 Agent process stopped. Your next message starts a new agent session with a summary of this conversation.`,
       timestamp: Date.now(),
     });
 
@@ -1222,8 +1325,9 @@ export class SessionManager extends EventEmitter {
       targetModel = normalizeClaudeModel(targetModel);
     }
 
-    // Same agent, and it can switch models while running: keep the process and its conversation
-    const liveHost = targetAgent.id === session.agentId ? this.activeHosts.get(sessionId) : undefined;
+    // Same agent, and it can switch models while running: keep the process and its conversation.
+    // A clean slate is the exception: it asks for a new agent session
+    const liveHost = targetAgent.id === session.agentId && contextMode !== 'none' ? this.activeHosts.get(sessionId) : undefined;
     if (liveHost?.canSwitchModel) {
       try {
         return await this.switchModelLive(session, liveHost, targetModel, newEffort);
@@ -1236,7 +1340,7 @@ export class SessionManager extends EventEmitter {
     }
 
     // Shutdown previous host process so new host can be spun up on next turn
-    this.dropHost(sessionId);
+    this.dropHost(sessionId, 'Model or agent switched');
     if (targetAgent.id !== session.agentId || targetModel !== session.model) {
       // Choices and window belong to the old model; the new one reports its own when it starts
       session.agentOptions = cachedAgentOptions(targetAgent.id, targetModel);
@@ -1251,8 +1355,14 @@ export class SessionManager extends EventEmitter {
     }
 
     session.contextMode = contextMode;
-    const hasPriorTurns = session.turns.some((t) => t.role === 'user' || t.role === 'agent') || latestCompaction(session.turns) !== null;
-    session.contextHandoffPending = contextMode !== 'none' && hasPriorTurns;
+    // Another agent cannot continue this one's session, and a clean slate means a new one
+    if (session.agentResume && (session.agentResume.agentId !== targetAgent.id || contextMode === 'none')) delete session.agentResume;
+    if (contextMode === 'none') {
+      session.contextStartIndex = session.turns.length;
+      session.skipClaudeAdoption = true;
+    }
+    session.contextHandoffPending = false;
+    const handover = contextMode === 'none' || !hasHandoffContext(session) ? '' : resumableSessionId(session) ? 'kept' : contextMode;
 
     // Reset crashed, blocked, or working state since old host is shutdown
     if (session.state === 'crashed' || session.state === 'blocked' || session.state === 'working') {
@@ -1263,7 +1373,7 @@ export class SessionManager extends EventEmitter {
     // A level the new model is known not to offer falls back to Auto (the agent's report settles unknown models)
     const effortNote = session.agentOptions ? reconcileEffort(session, session.agentOptions) : null;
     const effortLabel = session.effort && session.effort !== AUTO_EFFORT ? ` [Effort: ${session.effort}]` : '';
-    const contextLabel = session.contextHandoffPending ? ` [Context: ${contextMode}]` : '';
+    const contextLabel = handover ? ` [Context: ${handover}]` : '';
     // Record an informative system event in the conversation
     session.turns.push({
       id: `sys-${Date.now()}`,
@@ -1354,6 +1464,161 @@ export class SessionManager extends EventEmitter {
     return session;
   }
 
+  /** Record how the agent started: a continued or a new agent session, and what the next prompt must carry. */
+  private recordAgentStart(s: AcpSession, host: AcpClientHost, beforeTurnId?: string): void {
+    const id = host.sessionId ?? undefined;
+    const tried = host.resumeSessionId;
+    const now = Date.now();
+    s.agentSessionId = id;
+    if (id && host.canResume) s.agentResume = { agentId: s.agentId, sessionId: id, cwd: s.cwd, savedAt: now };
+    else delete s.agentResume;
+
+    const records = (s.agentSessions ??= []);
+    // Any still marked open were cut off without a stop (CodePit itself was restarted)
+    for (const r of records) if (r.id !== id && !r.endedAt && !r.endReason) r.endReason = 'Ended when CodePit restarted';
+    const model = host.options?.currentModel ?? s.model;
+    const known = id ? records.find((r) => r.id === id) : undefined;
+    if (known && host.resumed) {
+      Object.assign(known, { lastStartedAt: now, resumes: known.resumes + 1, model });
+      delete known.endedAt;
+      delete known.endReason;
+    } else if (id) {
+      records.push({
+        id,
+        agentId: s.agentId,
+        agentName: s.agentName,
+        model,
+        startedAt: now,
+        lastStartedAt: now,
+        resumes: host.resumed ? 1 : 0,
+        ...(tried && !host.resumed ? { replacedBecause: host.resumeError ?? `${s.agentName} cannot continue sessions` } : {}),
+        ...(s.agentId === 'claude' ? { transcriptPath: claudeSessionTranscript(s.cwd, id) } : {}),
+      });
+    }
+
+    // A new agent session gets the conversation with the next prompt; a continued one has it
+    // (a continued one that was started but never sent a prompt still owes it)
+    s.contextHandoffPending = host.resumed ? Boolean(s.contextHandoffPending) : hasHandoffContext(s, beforeTurnId);
+    let note: string | undefined;
+    if (host.resumed) note = `↪️ Continued agent session ${shortId(id)}: the agent still has the whole conversation.`;
+    else if (tried) {
+      note = `⚠️ Could not continue agent session ${shortId(tried)} (${host.resumeError ?? 'not supported'}). Started a new one${
+        s.contextHandoffPending ? ', which gets a summary of this conversation' : ''
+      }.`;
+    }
+    if (!note) return;
+    const turn: TurnMessage = { id: `sys-${now}-agent`, role: 'system', content: note, timestamp: now };
+    const at = beforeTurnId ? s.turns.findIndex((t) => t.id === beforeTurnId) : -1;
+    if (at === -1) s.turns.push(turn);
+    else s.turns.splice(at, 0, turn);
+  }
+
+  /** Mark an agent session as ended (its process stopped or exited). */
+  private endAgentSession(sessionId: string, agentSessionId: string, reason: string): void {
+    const rec = store.get(sessionId)?.agentSessions?.find((r) => r.id === agentSessionId);
+    if (!rec || rec.endedAt) return;
+    rec.endedAt = Date.now();
+    rec.endReason = reason;
+  }
+
+  /**
+   * Set the current agent session aside: the next message starts a new one, handed a summary
+   * of the conversation (or recent turns, or nothing for a clean slate). The agent's own
+   * transcript files are left where they are.
+   */
+  async forgetAgentSession(sessionId: string, contextMode: ContextTransferMode = 'compact'): Promise<AcpSession> {
+    const session = store.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    if (this.isTurnInFlight(sessionId) || this.startingHosts.has(sessionId)) {
+      throw new TurnInFlightError('Wait for the current turn to finish before starting a fresh agent session');
+    }
+    this.dropHost(sessionId, 'Set aside for a fresh agent session');
+    ptyManager.release(`session-term-${sessionId}`);
+    delete session.agentResume;
+    session.skipClaudeAdoption = true;
+    session.contextMode = contextMode;
+    session.contextHandoffPending = false;
+    if (contextMode === 'none') session.contextStartIndex = session.turns.length;
+    session.isAgentRunning = false;
+    session.activeTerminalId = undefined;
+    session.turns.push({
+      id: `sys-${Date.now()}`,
+      role: 'system',
+      content:
+        contextMode === 'none'
+          ? '🆕 Agent session set aside. Your next message starts a new agent session with a clean slate.'
+          : `🆕 Agent session set aside. Your next message starts a new agent session with ${contextMode === 'full' ? 'the recent turns' : 'a summary'} of this conversation.`,
+      timestamp: Date.now(),
+    });
+    session.updatedAt = Date.now();
+    store.save(session);
+    this.emit('sessionsUpdated', this.listSessions());
+    this.emit('sessionStream', { sessionId, type: 'sessionStopped', session });
+    return session;
+  }
+
+  /**
+   * Claude's ultrathink (deeper reasoning on the next message) and ultracode (multi-agent
+   * workflow orchestration on every message, at xhigh effort). Both are keywords Claude Code
+   * reads in the prompt; CodePit adds them to what it sends, not to the transcript.
+   */
+  async setSessionUltra(sessionId: string, opts: { ultracode?: boolean; ultrathinkNext?: boolean }): Promise<AcpSession> {
+    const session = store.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    if (session.agentId !== 'claude') throw new InvalidOptionError('Ultrathink and ultracode are Claude Code features');
+    if (opts.ultrathinkNext !== undefined) session.ultrathinkNext = opts.ultrathinkNext;
+    if (opts.ultracode === true && !session.ultracode) {
+      // Claude Code offers ultracode on the models with an xhigh effort level
+      const levels = effortChoicesFor(session.agentId, session.model, session.agentOptions);
+      if (!levels.some((e) => e.value === 'xhigh')) throw new InvalidOptionError(`${session.model || 'This model'} does not support ultracode`);
+      await this.setSessionEffort(sessionId, 'xhigh');
+    }
+    if (opts.ultracode !== undefined) session.ultracode = opts.ultracode;
+    return this.saveSettingChange(session, 'sessionUltraUpdated', {
+      ultracode: session.ultracode,
+      ultrathinkNext: session.ultrathinkNext,
+      effort: session.effort,
+    });
+  }
+
+  /**
+   * Set the agent's approval mode (one of agentOptions.modes). It replaces this app's
+   * auto-approve, which would otherwise answer every prompt whatever the mode says.
+   */
+  async setSessionMode(sessionId: string, mode: string): Promise<AcpSession> {
+    const session = store.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    const known = session.agentOptions?.modes;
+    if (known?.length && !known.some((m) => m.value === mode)) throw new InvalidOptionError(`${session.agentName} has no "${mode}" mode`);
+    const host = this.activeHosts.get(sessionId);
+    if (host?.options?.modeConfigId) await host.applyMode(mode);
+    else if (host) host.mode = mode;
+    else this.startingHosts.get(sessionId)?.promise.then((h) => (store.get(sessionId)?.mode === mode ? h.applyMode(mode) : undefined)).catch((err) => console.warn(`[session-mgr] Mode not applied to ${sessionId}: ${err.message}`));
+    session.mode = mode;
+    session.user = { ...session.user, autoApprove: false };
+    return this.saveSettingChange(session, 'sessionModeUpdated', { mode, user: session.user });
+  }
+
+  /** Turn fast mode on or off; applied now when the agent runs, else when it starts. */
+  async setSessionFastMode(sessionId: string, enabled: boolean): Promise<AcpSession> {
+    const session = store.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    const host = this.activeHosts.get(sessionId);
+    if (host?.options?.fast) await host.applyFastMode(enabled);
+    else if (host) host.fastMode = enabled;
+    session.fastMode = enabled;
+    return this.saveSettingChange(session, 'sessionFastModeUpdated', { fastMode: enabled });
+  }
+
+  private saveSettingChange(session: AcpSession, type: string, patch: Partial<AcpSession>): AcpSession {
+    session.updatedAt = Date.now();
+    store.save(session);
+    this.emit('sessionsUpdated', this.listSessions());
+    // The agent's updated options (current mode, fast on/off) go out with it
+    this.emit('sessionStream', { sessionId: session.id, type, session: { ...patch, agentOptions: session.agentOptions } });
+    return session;
+  }
+
   /**
    * Compact the session's context. An agent with its own compaction (it offers a `compact`
    * command, as Claude Code and Codex do) runs it inside the same agent session. Any other
@@ -1414,15 +1679,16 @@ export class SessionManager extends EventEmitter {
     try {
       const session = store.get(sessionId);
       if (!session) return;
-      const needsHistory = !this.activeHosts.has(sessionId) || Boolean(session.contextHandoffPending);
       const host = await this.ensureHost(session);
       if (this.compactionRuns.get(sessionId) !== run) return;
+      // A new agent session has none of the conversation; a continued one has all of it
+      const needsHistory = Boolean(store.get(sessionId)?.contextHandoffPending);
       let prompt = '/compact';
       if (run.method === 'handoff') {
         prompt = HANDOFF_SUMMARY_PROMPT;
         // A freshly started agent has none of the conversation yet: give it what there is to summarise
         if (needsHistory) {
-          const history = formatSessionHistory(session.turns.filter((t) => t.id !== run.turnId), { compact: false, maxTurns: 20 });
+          const history = formatSessionHistory(handoffTurns(session, run.turnId), { compact: false, maxTurns: 20 });
           if (history) prompt = `${history}\n\n${prompt}`;
         }
         // The agent now has the history; the next prompt must not send it again
@@ -1483,8 +1749,10 @@ export class SessionManager extends EventEmitter {
       turn.content = compactionLabel(c);
     }
     if (c?.status === 'completed' && run.method === 'handoff') {
-      // Restart: the next prompt starts a fresh agent with the summary as its first context
-      this.dropHost(sessionId);
+      // Restart: the next prompt starts a fresh agent with the summary as its first context.
+      // The old agent session still holds everything the summary replaces: never continue it
+      this.dropHost(sessionId, 'Replaced by a summary (compaction)');
+      delete s.agentResume;
       s.contextHandoffPending = true;
       s.usage = { ...s.usage, contextTokens: c.postTokens ?? 0 };
     }
@@ -1729,8 +1997,13 @@ export class SessionManager extends EventEmitter {
       throw new Error('turnId is required for revert_to_this and revert_before_this');
     }
 
-    // Terminate running host process so old conversation state is cleared from process memory
-    this.dropHost(sessionId);
+    // Terminate running host process so old conversation state is cleared from process memory.
+    // Its own transcript still holds the undone turns, so it is not continued either
+    this.dropHost(sessionId, 'Conversation rewound');
+    delete session.agentResume;
+    session.skipClaudeAdoption = true;
+    // Rewound to before a clean slate: that clean slate is undone too
+    if ((session.contextStartIndex ?? 0) > session.turns.length) delete session.contextStartIndex;
 
     // Recalculate session properties based on remaining turns
     const lastUserTurn = [...session.turns].reverse().find((t) => t.role === 'user');
@@ -1762,7 +2035,7 @@ export class SessionManager extends EventEmitter {
   }
 
   deleteSession(sessionId: string): boolean {
-    this.dropHost(sessionId);
+    this.dropHost(sessionId, 'Session deleted');
     ptyManager.release(`session-term-${sessionId}`);
     const res = store.delete(sessionId);
     if (res) {
@@ -1908,4 +2181,205 @@ function findToolCall(s: AcpSession, toolCallId: string): { turn: TurnMessage; c
     if (call) return { turn, call };
   }
   return null;
+}
+
+/** Write a prompt's attachments under the session's uploads, as the transcript records them. */
+function saveAttachments(sessionId: string, attachments?: FileAttachment[]): FileAttachment[] {
+  if (!attachments?.length) return [];
+  const uploadDir = path.join(getUploadsDir(), sessionId);
+  fs.mkdirSync(uploadDir, { recursive: true });
+  return attachments.map((att) => {
+    const safeName = (att.name || `file_${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const filePath = path.join(uploadDir, safeName);
+    if (att.data) {
+      try {
+        const rawBase64 = att.data.replace(/^data:[^;]+;base64,/, '');
+        fs.writeFileSync(filePath, Buffer.from(rawBase64, 'base64'));
+      } catch (e) {
+        console.error(`[session-mgr] Failed to write attachment ${safeName}:`, e);
+      }
+    }
+    return {
+      id: att.id || `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: att.name,
+      size: att.size || (fs.existsSync(filePath) ? fs.statSync(filePath).size : 0),
+      mimeType: att.mimeType,
+      path: filePath,
+      url: `/api/attachments/${sessionId}/${encodeURIComponent(safeName)}`,
+      data: att.data,
+      isImage: att.isImage ?? att.mimeType?.startsWith('image/'),
+    };
+  });
+}
+
+/** The prompt text with a note per attachment (and the content of small text files) in front. */
+function withAttachmentNotes(text: string, saved: FileAttachment[]): string {
+  if (saved.length === 0) return text;
+  const notes: string[] = [];
+  for (const att of saved) {
+    if (att.isImage) {
+      notes.push(`[Attached Image: ${att.name} (Saved at: ${att.path})]`);
+    } else {
+      notes.push(`[Attached File: ${att.name} (Saved at: ${att.path})]`);
+      try {
+        if (att.path && fs.existsSync(att.path) && att.size < 50000) {
+          const textContent = fs.readFileSync(att.path, 'utf8');
+          notes.push(`--- Begin File Content: ${att.name} ---\n${textContent}\n--- End File Content: ${att.name} ---`);
+        }
+      } catch {}
+    }
+  }
+  return text ? `${notes.join('\n\n')}\n\n${text}` : notes.join('\n\n');
+}
+
+/** Where Claude Code keeps a subagent's transcript: <project>/<session id>/subagents/agent-<id>.jsonl, when it is there. */
+function claudeSubagentTranscript(s: AcpSession, audit: TaskAudit): string | undefined {
+  if (audit.agentId !== 'claude' || !audit.agentSessionId || !audit.subagentId) return undefined;
+  if (!/^[\w-]+$/.test(audit.agentSessionId) || !/^[\w-]+$/.test(audit.subagentId)) return undefined;
+  return claudeProjectDirs(s.cwd)
+    .map((d) => path.join(d, audit.agentSessionId!, 'subagents', `agent-${audit.subagentId}.jsonl`))
+    .find((f) => fs.existsSync(f));
+}
+
+// ---------------------------------------------------------------------------
+// Continuing agent sessions and Claude keywords
+
+/** The saved agent session this session may continue: same agent, same folder. */
+function resumableSessionId(s: AcpSession): string | undefined {
+  const r = s.agentResume;
+  return r && r.agentId === s.agentId && r.cwd === s.cwd ? r.sessionId : undefined;
+}
+
+/** The turns a new agent session is told about: after a clean slate only later ones, never `excludeId`. */
+function handoffTurns(s: AcpSession, excludeId?: string): TurnMessage[] {
+  return s.turns.slice(s.contextStartIndex ?? 0).filter((t) => t.id !== excludeId);
+}
+
+/** Whether there is a conversation a new agent session needs to be handed. */
+function hasHandoffContext(s: AcpSession, excludeId?: string): boolean {
+  const turns = handoffTurns(s, excludeId);
+  return turns.some((t) => t.role === 'agent') || latestCompaction(turns) !== null;
+}
+
+const shortId = (id: string | undefined) => (id ? id.slice(0, 8) : 'unknown');
+
+const isSlashCommand = (text: string) => text.trim().startsWith('/');
+
+/** Claude's keywords due on this message; ultrathink is used up by it. */
+function takeKeywords(s: AcpSession): string[] {
+  if (s.agentId !== 'claude') return [];
+  const keywords: string[] = [];
+  if (s.ultrathinkNext) {
+    keywords.push('ultrathink');
+    s.ultrathinkNext = false;
+  }
+  if (s.ultracode) keywords.push('ultracode');
+  return keywords;
+}
+
+/** Claude Code reads the keywords as bare words; outside quotes or code they take effect. */
+function withKeywords(text: string, keywords: string[]): string {
+  return keywords.length > 0 ? `${text}\n\n${keywords.join(' ')}` : text;
+}
+
+const claudeConfigDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+
+/** Claude Code's project folders for a cwd: it names them after the real path, so both are tried. */
+function claudeProjectDirs(cwd: string): string[] {
+  let real = cwd;
+  try {
+    real = fs.realpathSync(cwd);
+  } catch {
+    // folder gone; the recorded path is all there is
+  }
+  return [...new Set([real, cwd])].map((d) => path.join(claudeConfigDir(), 'projects', d.replace(/[^a-zA-Z0-9]/g, '-')));
+}
+
+/** Where Claude Code keeps a session's transcript (it may not exist before the first prompt). */
+function claudeSessionTranscript(cwd: string, sessionId: string): string {
+  const dirs = claudeProjectDirs(cwd);
+  return dirs.map((d) => path.join(d, `${sessionId}.jsonl`)).find((f) => fs.existsSync(f)) ?? path.join(dirs[0], `${sessionId}.jsonl`);
+}
+
+/** The user's own text in a prompt CodePit sent: without the handoff history or attachment notes. */
+function promptCore(text: string): string {
+  const marker = '[Active User Request]\n';
+  const at = text.lastIndexOf(marker);
+  const own = at === -1 ? text : text.slice(at + marker.length);
+  return own
+    .split('\n')
+    .filter((line) => !line.startsWith('[Attached '))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** The last prompt a person sent in a Claude Code transcript, read from the end of the file. */
+export function lastHumanPrompt(file: string): string | undefined {
+  const CHUNK = 1 << 20;
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'r');
+  } catch {
+    return undefined;
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    let end = size;
+    let carry = '';
+    // Up to 16 MB back: a long turn can write a lot of tool output after its prompt
+    while (end > 0 && size - end < 16 * CHUNK) {
+      const start = Math.max(0, end - CHUNK);
+      const buf = Buffer.alloc(end - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      const lines = (buf.toString('utf8') + carry).split('\n');
+      carry = start > 0 ? lines.shift() ?? '' : '';
+      for (let i = lines.length - 1; i >= 0; i--) {
+        let e: any;
+        try {
+          e = JSON.parse(lines[i]);
+        } catch {
+          continue;
+        }
+        if (e?.type !== 'user' || e.isMeta || e.isSidechain || e.message?.role !== 'user') continue;
+        const content = e.message.content;
+        const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
+        if (blocks.some((b: any) => b?.type === 'tool_result')) continue;
+        const text = blocks.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('\n');
+        if (!text.trim() || /^(<task-notification|<command-|<local-command|\[Request interrupted)/.test(text.trim())) continue;
+        return text;
+      }
+      end = start;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return undefined;
+}
+
+/**
+ * Sessions from before CodePit kept agent sessions have no record of theirs. For Claude, find
+ * it once: the recent transcript in this folder whose last prompt is the session's last message.
+ */
+export function adoptClaudeSession(s: AcpSession, excludeTurnId?: string): string | undefined {
+  if (s.agentId !== 'claude' || s.skipClaudeAdoption || s.agentSessions?.length || s.agentResume) return undefined;
+  const last = [...s.turns].reverse().find((t) => t.role === 'user' && t.id !== excludeTurnId && t.content?.trim());
+  const want = last ? promptCore(last.content!).slice(0, 200) : '';
+  if (want.length < 8) return undefined;
+  for (const dir of claudeProjectDirs(s.cwd)) {
+    let files: Array<{ file: string; mtime: number }>;
+    try {
+      files = fs
+        .readdirSync(dir)
+        .filter((f) => /^[0-9a-f-]{36}\.jsonl$/.test(f))
+        .map((f) => ({ file: path.join(dir, f), mtime: fs.statSync(path.join(dir, f)).mtimeMs }));
+    } catch {
+      continue;
+    }
+    for (const { file } of files.sort((a, b) => b.mtime - a.mtime).slice(0, 8)) {
+      const prompt = lastHumanPrompt(file);
+      if (prompt && promptCore(prompt).includes(want)) return path.basename(file, '.jsonl');
+    }
+  }
+  return undefined;
 }

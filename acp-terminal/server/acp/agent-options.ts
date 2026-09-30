@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getAppDir } from '../paths.js';
+import { ensurePrivateDir, FILE_MODE, getAppDir, getSettingsFile } from '../paths.js';
 import { getAgent } from '../agents/registry.js';
 import { AUTO_EFFORT, type AgentOptions, type ConfigChoice } from '../types.js';
 
@@ -47,6 +47,7 @@ function selectChoices(option: any): ConfigChoice[] {
       value: o.value,
       label: typeof o.name === 'string' && o.name ? o.name : o.value,
       ...(typeof o.description === 'string' && o.description ? { description: o.description } : {}),
+      ...(typeof o._meta?.kind === 'string' ? { kind: o._meta.kind } : {}),
     }));
 }
 
@@ -90,6 +91,26 @@ export function parseAgentOptions(configOptions: unknown, now = Date.now()): Age
     opts.modelConfigId = model.id;
     opts.models = selectChoices(model).filter((m) => m.value !== 'default');
     if (typeof model.currentValue === 'string') opts.currentModel = model.currentValue;
+  }
+
+  const mode = findOption(configOptions, 'mode', ['mode']);
+  if (mode) {
+    opts.modeConfigId = mode.id;
+    opts.modes = selectChoices(mode);
+    if (typeof mode.currentValue === 'string') opts.currentMode = mode.currentValue;
+  }
+
+  // Claude's Fast mode: an on/off select (a boolean option only goes to clients that ask for one)
+  const fast = configOptions.find((o: any) => o?.id === 'fast' && Array.isArray(o.options));
+  const fastValues = fast ? selectChoices(fast).map((c) => c.value) : [];
+  if (fast && fastValues.includes('on') && fastValues.includes('off')) {
+    opts.fast = {
+      configId: fast.id,
+      enabled: fast.currentValue === 'on',
+      onValue: 'on',
+      offValue: 'off',
+      ...(typeof fast.description === 'string' && fast.description ? { description: fast.description } : {}),
+    };
   }
   return opts;
 }
@@ -198,6 +219,49 @@ export function rememberAgentOptions(agentId: string, model: string | undefined,
   }
 }
 
+// A model the agent started offering this recently gets a "New" badge
+const NEW_FOR_MS = 14 * 24 * 60 * 60 * 1000;
+type FirstSeen = Record<string, Record<string, number>>;
+const firstSeenFile = () => path.join(getAppDir(), 'models-first-seen.json');
+
+/**
+ * Mark the models first seen in the last two weeks as new. The first list ever seen from
+ * an agent is the baseline, so only models added after it count (stored as 0 otherwise).
+ */
+export function markNewModels(agentId: string, opts: AgentOptions, now = Date.now()): AgentOptions {
+  let seen: FirstSeen = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(firstSeenFile(), 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) seen = parsed;
+  } catch {
+    // no record yet
+  }
+  const baseline = !seen[agentId];
+  const byModel = (seen[agentId] ??= {});
+  let changed = baseline;
+  for (const m of opts.models) {
+    if (byModel[m.value] === undefined) {
+      byModel[m.value] = baseline ? 0 : now;
+      changed = true;
+    }
+  }
+  if (changed) {
+    try {
+      fs.mkdirSync(path.dirname(firstSeenFile()), { recursive: true });
+      fs.writeFileSync(firstSeenFile(), JSON.stringify(seen, null, 2), { mode: 0o600 });
+    } catch (err: any) {
+      console.warn(`[agent-options] Could not save ${firstSeenFile()}: ${err.message}`);
+    }
+  }
+  return {
+    ...opts,
+    models: opts.models.map((m) => {
+      const { isNew: _stale, ...rest } = m;
+      return byModel[m.value] > 0 && now - byModel[m.value] < NEW_FOR_MS ? { ...rest, isNew: true } : rest;
+    }),
+  };
+}
+
 /** Everything the agent advertised, keyed by model id (for the /agents listing). */
 export function advertisedOptions(agentId: string): Record<string, AgentOptions> | undefined {
   const byModel = loadCache()[agentId];
@@ -221,4 +285,36 @@ export function effortChoicesFor(agentId: string, model: string | undefined, ses
   const cached = cachedAgentOptions(agentId, model);
   if (cached) return cached.efforts;
   return getAgent(agentId).efforts ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Favourite models, as "<agentId>:<model>", kept in settings.json so every device shares them
+// ---------------------------------------------------------------------------
+
+const FAVORITE = /^[a-z0-9._-]{1,64}:[^\s]{1,128}$/i;
+
+export function isFavoriteList(v: unknown): v is string[] {
+  return Array.isArray(v) && v.length <= 200 && v.every((x) => typeof x === 'string' && FAVORITE.test(x));
+}
+
+export function readFavoriteModels(): string[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(getSettingsFile(), 'utf8'));
+    return isFavoriteList(parsed?.favoriteModels) ? parsed.favoriteModels : [];
+  } catch {
+    return [];
+  }
+}
+
+export function writeFavoriteModels(list: string[]): void {
+  ensurePrivateDir(getAppDir());
+  const file = getSettingsFile();
+  let current: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed && typeof parsed === 'object') current = parsed;
+  } catch {
+    // no settings yet
+  }
+  fs.writeFileSync(file, JSON.stringify({ ...current, favoriteModels: [...new Set(list)] }, null, 2), { mode: FILE_MODE });
 }
