@@ -546,6 +546,12 @@ export class SessionManager extends EventEmitter {
     let activeAgentTurn: TurnMessage | null = null;
 
     const ensureAgentTurn = (s: AcpSession): TurnMessage => {
+      // A reply the agent started on its own (e.g. after a background task finished) has no
+      // prompt whose end closes it, so a message sent since then starts the next reply
+      if (activeAgentTurn) {
+        const at = s.turns.findIndex((t) => t.id === activeAgentTurn!.id);
+        if (at === -1 || s.turns.slice(at + 1).some((t) => t.role === 'user')) activeAgentTurn = null;
+      }
       if (!activeAgentTurn) {
         activeAgentTurn = {
           id: `msg-${Date.now()}`,

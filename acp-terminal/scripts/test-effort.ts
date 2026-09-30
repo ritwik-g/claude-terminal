@@ -258,7 +258,21 @@ async function liveTests(): Promise<void> {
   }
   check('a model the agent rejects is an error, not a silent restart', rejected && sessionManager.getSession(id)!.model === 'small');
 
-  console.log('9. Stored for the next start when no agent runs');
+  console.log('9. A reply the agent starts on its own does not swallow the next one');
+  await ask(id, 'start work, report-later');
+  const deadline = Date.now() + 5_000;
+  const hasReport = () => sessionManager.getSession(id)!.turns.some((t) => t.role === 'agent' && t.content?.includes('background report'));
+  while (!hasReport() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  check('the agent-initiated reply is recorded', hasReport());
+  await ask(id, 'next question');
+  const turns = sessionManager.getSession(id)!.turns;
+  const report = turns.find((t) => t.role === 'agent' && t.content?.includes('background report'))!;
+  const question = turns.map((t) => t.role === 'user' && t.content === 'next question').lastIndexOf(true);
+  const answer = turns.findIndex((t, i) => i > question && t.role === 'agent');
+  check('the reply to the next message is its own turn, after the message', answer > question, turns.map((t) => [t.role, t.content?.slice(0, 30)]));
+  check('the earlier reply is left as it was', !report.content!.includes('pid='), report.content);
+
+  console.log('10. Stored for the next start when no agent runs');
   await sessionManager.stopSessionAgent(id);
   await sessionManager.setSessionAgent(id, 'efforttest', 'big');
   await sessionManager.setSessionEffort(id, 'low');

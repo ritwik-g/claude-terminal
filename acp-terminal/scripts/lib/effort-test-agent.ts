@@ -92,6 +92,12 @@ async function main() {
         content: { type: 'text', text: `pid=${process.pid} model=${s.model} effort=${s.effort} seen=${s.prompts.length} first=${s.prompts[0]}` },
       });
       await send({ sessionUpdate: 'usage_update', used: 1000 * s.prompts.length, size: s.model.endsWith('[1m]') ? 1_000_000 : 200_000 });
+      // Like Claude reporting a finished background task: a reply with no prompt behind it
+      if (text.includes('report-later')) {
+        setTimeout(() => {
+          void send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'background report' } });
+        }, 100);
+      }
       return { stopReason: 'end_turn' };
     })
     .onNotification('session/cancel', () => {})
