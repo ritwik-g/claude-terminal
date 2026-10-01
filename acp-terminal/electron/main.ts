@@ -112,6 +112,16 @@ async function createWindow(): Promise<void> {
   });
 
   win.once('ready-to-show', () => win?.show());
+  // The traffic lights are gone in full screen; the page drops the room it keeps for them
+  const markFullScreen = () => {
+    if (!win) return;
+    void win.webContents
+      .executeJavaScript(`document.documentElement.toggleAttribute('data-fullscreen', ${win.isFullScreen()})`)
+      .catch(() => {});
+  };
+  win.on('enter-full-screen', markFullScreen);
+  win.on('leave-full-screen', markFullScreen);
+  win.webContents.on('did-finish-load', markFullScreen);
   // Closing the window quits the app, so route it through the quit confirmation
   win.on('close', (e) => {
     if (quitting) return;

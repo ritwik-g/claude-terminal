@@ -5,6 +5,7 @@
  *   build/icon.png                 1024 px, the Linux AppImage icon
  *   build/icon.icns                every macOS size, 16 to 1024 incl. @2x
  *   web/public/apple-touch-icon.png  180 px, full bleed (iOS rounds it itself)
+ *   web/public/icon-192.png, icon-512.png  the same, for the web app manifest (Android)
  *
  * Every size comes from build/icon.svg. web/public/favicon.svg is the same
  * drawing cropped to the rounded square without its shadow, kept by hand.
@@ -42,8 +43,10 @@ try {
   const bleed = path.join(work, 'bleed.svg');
   writeFileSync(bleed, readFileSync(FULL, 'utf8').replace('viewBox="0 0 1024 1024"', 'viewBox="100 100 824 824"'));
   render(bleed, 180, 'web/public/apple-touch-icon.png');
+  render(bleed, 192, 'web/public/icon-192.png');
+  render(bleed, 512, 'web/public/icon-512.png');
 
-  console.log('Wrote build/icon.png, build/icon.icns and web/public/apple-touch-icon.png');
+  console.log('Wrote build/icon.png, build/icon.icns and the web icons in web/public');
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

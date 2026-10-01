@@ -66,9 +66,15 @@
   -webkit-user-drag: none;
 }
 
-/* Desktop app on macOS: clear the traffic lights and let the header strips drag the window */
+/* Desktop app on macOS: clear the traffic lights and let the header strips drag the window.
+   In full screen the traffic lights are gone, so the brand moves back to the left edge. */
 [data-shell='desktop-mac'] .sb-head {
   padding-left: 84px;
+  transition: padding-left 180ms ease;
+}
+
+[data-shell='desktop-mac'][data-fullscreen] .sb-head {
+  padding-left: var(--space-4);
 }
 
 [data-shell='desktop-mac'] .sb-head,

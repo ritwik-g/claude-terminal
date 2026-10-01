@@ -9,6 +9,7 @@ import { sessionManager } from './acp/session-mgr.js';
 import { getOrCreateToken, initStorage } from './paths.js';
 import { loadStoredCredentials } from './subscriptions.js';
 import { checkAccess, headerToken } from './security.js';
+import { webManifest } from './manifest.js';
 import { resolveStartupNetwork } from './network.js';
 import { lanAccess, readStoredLanEnabled, type LanStatus } from './lan.js';
 
@@ -70,6 +71,15 @@ export async function startServer(opts: StartServerOptions = {}): Promise<Server
   });
 
   app.use('/api', apiRouter);
+
+  // Asked for with the page's own token, which goes back in the start link only when it is valid
+  app.get('/manifest.webmanifest', (req, res) => {
+    const asked = typeof req.query.token === 'string' ? req.query.token : undefined;
+    res
+      .type('application/manifest+json')
+      .set('Cache-Control', 'no-store')
+      .send(JSON.stringify(webManifest(asked && asked === token ? asked : undefined)));
+  });
 
   const staticDir = opts.staticDir;
   if (staticDir && fs.existsSync(staticDir)) {

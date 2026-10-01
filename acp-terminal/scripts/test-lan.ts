@@ -99,6 +99,18 @@ async function runTests() {
     expect(initial.body.canToggle === true, 'Loopback client should be allowed to toggle');
     console.log('   ✅ LAN off, loopback client can toggle\n');
 
+    // 2b. The web app manifest (home-screen install): open to anyone, start link signed only with a valid token
+    console.log('2️⃣b Serving the web app manifest...');
+    const remote = { 'x-test-remote-ip': '192.168.1.50' };
+    const plain = await call(port, 'GET', '/manifest.webmanifest', { headers: remote });
+    expect(plain.status === 200 && plain.body.start_url === '/' && plain.body.display === 'standalone', `Manifest without a token: ${plain.status} ${JSON.stringify(plain.body)}`);
+    expect(plain.body.icons?.some((i: { sizes: string }) => i.sizes === '512x512'), 'Manifest should list a 512 px icon');
+    const signed = await call(port, 'GET', `/manifest.webmanifest?token=${token}`, { headers: remote });
+    expect(signed.body.start_url === `/?token=${token}`, `A valid token should go in the start link: ${signed.body.start_url}`);
+    const forged = await call(port, 'GET', '/manifest.webmanifest?token=not-the-token', { headers: remote });
+    expect(forged.body.start_url === '/', `An invalid token must not be echoed: ${forged.body.start_url}`);
+    console.log('   ✅ Manifest served, start link carries only a valid token\n');
+
     // 3. A LAN client (valid token, same-origin) cannot switch it or see the switch as usable
     console.log('3️⃣ Rejecting the switch from a LAN client...');
     const lanInfo = await call(port, 'GET', '/api/network', { host: `192.168.1.5:${port}`, headers: lan });
