@@ -115,7 +115,7 @@ const exploreChildren = [
 const s1 = session({
   title: 'Harden auth middleware',
   agentId: 'claude',
-  agentName: 'Claude Code (ACP)',
+  agentName: 'Claude Code',
   model: 'sonnet',
   cwd: repo('api-server', true),
   git: { branch: 'fix/auth-cookie', uncommittedFiles: 3, unpushedCommits: 1 } as AcpSession['git'],
@@ -144,7 +144,7 @@ const s1 = session({
         '## Done\n\n- `src/ws/upgrade.ts` now verifies the cookie signature, matching the HTTP path.\n- `test/ws.test.ts` covers an unsigned cookie being rejected.\n\n| Check | Result |\n| --- | --- |\n| Auth tests | 24 passed |\n| Lint | clean |\n\nNext I can add the README note on cookie signing. Want me to?',
       ],
       t1 + 5_000,
-      { agentId: 'claude', agentName: 'Claude Code (ACP)', model: 'sonnet' }
+      { agentId: 'claude', agentName: 'Claude Code', model: 'sonnet' }
     ),
   ],
 });
@@ -154,7 +154,7 @@ const t2 = now - 2 * 60 * min;
 const s2 = session({
   title: 'Fix flaky checkout e2e test',
   agentId: 'codex',
-  agentName: 'Codex CLI (ACP)',
+  agentName: 'Codex CLI',
   model: '5.6-terra',
   cwd: repo('storefront', true),
   git: { branch: 'main', uncommittedFiles: 0, unpushedCommits: 2 } as AcpSession['git'],
@@ -178,7 +178,7 @@ const t3 = now - 26 * 60 * min;
 const s3 = session({
   title: 'Draft release notes for 0.17',
   agentId: 'antigravity',
-  agentName: 'Google Antigravity (ACP)',
+  agentName: 'Google Antigravity',
   model: 'gemini-3.1-pro',
   cwd: repo('notes', false),
   state: 'quiet',
@@ -194,7 +194,7 @@ const t4 = now - 5 * 60 * min;
 const s4 = session({
   title: 'Investigate memory growth in worker',
   agentId: 'claude',
-  agentName: 'Claude Code (ACP)',
+  agentName: 'Claude Code',
   model: 'opus',
   cwd: repo('worker', true),
   git: { branch: 'perf/heap', uncommittedFiles: 0, unpushedCommits: 0 } as AcpSession['git'],
@@ -208,7 +208,7 @@ const t5 = now - 3 * 24 * 60 * min;
 const s5 = session({
   title: 'Try the demo agent',
   agentId: 'mock',
-  agentName: 'Built-in ACP Demo Agent',
+  agentName: 'Built-in Demo Agent',
   model: 'mock-model-v1',
   cwd: repo('scratch', false),
   state: 'quiet',
@@ -235,7 +235,7 @@ for (let i = 0; i < 80; i++) {
 const s6 = session({
   title: 'Migrate modules to strict mode',
   agentId: 'claude',
-  agentName: 'Claude Code (ACP)',
+  agentName: 'Claude Code',
   model: 'haiku',
   cwd: repo('monorepo', true),
   git: { branch: 'chore/strict', uncommittedFiles: 12, unpushedCommits: 0 } as AcpSession['git'],
@@ -279,7 +279,7 @@ const failedAgent = tool({ title: 'Update the retry docs', kind: 'think', toolNa
 const s7 = session({
   title: 'Stop double charges on retry',
   agentId: 'claude',
-  agentName: 'Claude Code (ACP)',
+  agentName: 'Claude Code',
   model: 'sonnet',
   cwd: repo('payments', true),
   git: { branch: 'fix/double-charge', uncommittedFiles: 2, unpushedCommits: 0 } as AcpSession['git'],

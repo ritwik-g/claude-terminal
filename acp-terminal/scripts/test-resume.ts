@@ -342,6 +342,20 @@ async function main(): Promise<void> {
   check('a title the user set is left alone', title(imported.id) === `Resume test agent in ${folder}`, title(imported.id));
   check('another folder is left alone', title(claudeSession.id) === 'Resume test agent in another-folder', title(claudeSession.id));
   check('a title that does not name an agent is left alone', title(sw.id) === `Fix the login in ${folder}`, title(sw.id));
+  {
+    // Agent names saved with the old "(ACP)" suffix take the agent's current name
+    const s = store.get(sw.id)!;
+    const ownName = s.agentName;
+    s.agentName = `${ownName} (ACP)`;
+    const turn = s.turns.find((t) => t.role === 'agent');
+    if (turn) turn.agentName = 'Somebody Else (ACP)';
+    store.save(s, { touch: false });
+    sessionManager.init();
+    const after = sessionManager.getSession(sw.id)!;
+    check('an old "(ACP)" agent name is renamed', after.agentName === ownName, after.agentName);
+    const turnName = turn && after.turns.find((t) => t.id === turn.id)!.agentName;
+    check('a turn takes its own agent\'s current name', !turn || turnName === AGENT_REGISTRY[turn.agentId!]?.name, String(turnName));
+  }
 
   console.log('17. An agent session started but never sent the conversation still gets it after a model change');
   const ks = await sessionManager.createSession({ agentId: 'resumetest', cwd, model: 'big' });

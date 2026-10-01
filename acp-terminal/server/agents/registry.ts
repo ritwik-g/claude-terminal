@@ -55,7 +55,7 @@ const parseEnvModels = (envVal?: string, defaults: string[] = []): string[] => {
 export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
   claude: {
     id: 'claude',
-    name: 'Claude Code (ACP)',
+    name: 'Claude Code',
     provider: 'anthropic',
     description: 'Anthropic Claude Code connected via Agent Client Protocol (uses Claude Max/Pro subscription)',
     command: process.env.CLAUDE_ACP_CMD || (fs.existsSync(CLAUDE_ACP_BIN) ? CLAUDE_ACP_BIN : 'npx'),
@@ -84,7 +84,7 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
   },
   codex: {
     id: 'codex',
-    name: 'Codex CLI (ACP)',
+    name: 'Codex CLI',
     provider: 'openai',
     description: 'OpenAI Codex agent connected via Agent Client Protocol (supports ChatGPT Plus/Pro subscription)',
     command: process.env.CODEX_ACP_CMD || (fs.existsSync(CODEX_ACP_BIN) ? CODEX_ACP_BIN : 'npx'),
@@ -114,7 +114,7 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
   },
   antigravity: {
     id: 'antigravity',
-    name: 'Google Antigravity (ACP)',
+    name: 'Google Antigravity',
     provider: 'google',
     description: 'Google Antigravity through its agy CLI (uses your Antigravity sign-in)',
     command: fs.existsSync(TSX_BIN) ? TSX_BIN : 'tsx',
@@ -141,7 +141,7 @@ export const AGENT_REGISTRY: Record<string, AgentDescriptor> = {
   },
   mock: {
     id: 'mock',
-    name: 'Built-in ACP Demo Agent',
+    name: 'Built-in Demo Agent',
     provider: 'mock',
     description: 'Built-in protocol-compliant ACP agent for instant testing, permissions demos, and offline usage',
     command: fs.existsSync(TSX_BIN) ? TSX_BIN : 'tsx',

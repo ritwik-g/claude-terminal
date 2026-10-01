@@ -274,6 +274,8 @@ export class SessionManager extends EventEmitter {
         session.title = path.basename(session.cwd);
         store.save(session, { touch: false });
       }
+      // Agent names used to end in "(ACP)", which told the user nothing
+      if (renameOldAgentNames(session)) store.save(session, { touch: false });
       // Backfill historical agentId and model on turns so model switching never erases history
       let sessionChanged = false;
       let runningAgentId = session.agentId;
@@ -287,15 +289,15 @@ export class SessionManager extends EventEmitter {
             const target = match[1];
             if (target.includes('sonnet') || target.includes('opus') || target.includes('haiku')) {
               runningAgentId = 'claude';
-              runningAgentName = 'Claude Code (ACP)';
+              runningAgentName = 'Claude Code';
               runningModel = target.includes('opus') ? 'opus' : target.includes('haiku') ? 'haiku' : 'sonnet';
             } else if (target.includes('gemini') || target.includes('antigravity')) {
               runningAgentId = 'antigravity';
-              runningAgentName = 'Google Antigravity (ACP)';
+              runningAgentName = 'Google Antigravity';
               runningModel = target;
             } else if (target.includes('codex') || target.includes('luna') || target.includes('terra')) {
               runningAgentId = 'codex';
-              runningAgentName = 'Codex CLI (ACP)';
+              runningAgentName = 'Codex CLI';
               runningModel = target;
             }
           }
@@ -2603,13 +2605,38 @@ function hasHandoffContext(s: AcpSession, excludeId?: string): boolean {
 const shortId = (id: string | undefined) => (id ? id.slice(0, 8) : 'unknown');
 
 /** A title CodePit generated before default titles were just the folder: "<agent>[ (from <agent>)] in <folder>". */
+const OLD_AGENT_NAMES = new Set(['Built-in ACP Demo Agent']);
+
+/** The agent's current name for a name saved before the "(ACP)" suffix was dropped. */
+function currentAgentName(name: string | undefined, agentId: string | undefined): string | undefined {
+  if (!name || !(name.endsWith('(ACP)') || OLD_AGENT_NAMES.has(name))) return name;
+  return agentId && hasAgent(agentId) ? getAgent(agentId).name : name.replace(/\s*\(ACP\)$/, '');
+}
+
+/** Rename saved agent names on the session, its turns and its agent sessions. Returns whether any changed. */
+export function renameOldAgentNames(s: AcpSession): boolean {
+  let changed = false;
+  const rename = <T extends { agentName?: string; agentId?: string }>(o: T, agentId = o.agentId) => {
+    const next = currentAgentName(o.agentName, agentId);
+    if (next !== o.agentName) {
+      o.agentName = next;
+      changed = true;
+    }
+  };
+  rename(s);
+  for (const t of s.turns) if (t.agentName) rename(t);
+  for (const r of s.agentSessions ?? []) rename(r);
+  for (const p of s.parkedAgentResumes ?? []) rename(p);
+  return changed;
+}
+
 export function isOldDefaultTitle(title: string, cwd: string): boolean {
   const folder = path.basename(cwd);
   const suffix = ` in ${folder}`;
   if (!folder || !title.endsWith(suffix)) return false;
   const head = title.slice(0, -suffix.length);
   const names = new Set(listAgents(true).map((a) => a.name));
-  const isAgentName = (n: string) => names.has(n) || n.endsWith('(ACP)');
+  const isAgentName = (n: string) => names.has(n) || OLD_AGENT_NAMES.has(n) || n.endsWith('(ACP)');
   const from = head.match(/^(.+?) \(from .+\)$/);
   return isAgentName(head) || Boolean(from && isAgentName(from[1]));
 }
