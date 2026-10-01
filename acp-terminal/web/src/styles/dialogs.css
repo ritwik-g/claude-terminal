@@ -381,6 +381,22 @@
 .ns-cwd-row { display: flex; gap: var(--space-2); align-items: center; }
 .ns-cwd-row .ui-btn { flex-shrink: 0; height: 34px; }
 .ns-cwd-group { display: flex; flex-direction: column; gap: 10px; }
+.ns-import-status { display: inline-flex; align-items: center; gap: 6px; margin-top: 7px; color: var(--text-3); font-size: var(--text-xs); }
+.ns-import-status > .icon { color: var(--text-3); }
+.ns-import-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 220px; overflow: auto; }
+.ns-import-option {
+  width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-1);
+  color: var(--text); text-align: left; cursor: pointer; transition: border-color var(--dur-fast), background var(--dur-fast);
+}
+.ns-import-option:hover:not(:disabled), .ns-import-option:focus-visible { border-color: var(--accent-border); background: var(--accent-soft); outline: none; }
+.ns-import-option.is-selected { border-color: var(--accent-border); background: var(--accent-soft); }
+.ns-import-option > .icon { flex: none; color: var(--text-3); }
+.ns-import-option.is-selected > .icon { color: var(--accent); }
+.ns-import-option > .icon:last-child { margin-left: auto; color: var(--accent); }
+.ns-import-option-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.ns-import-option-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); font-weight: 500; }
+.ns-import-option-copy span { color: var(--text-3); font-family: var(--font-mono); font-size: var(--text-xs); }
 
 /* =========================================================== Switch agent */
 .sw-from {

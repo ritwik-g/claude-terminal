@@ -21,6 +21,7 @@ import {
   trackToolCallUpdate,
 } from '../server/acp/agent-tasks.js';
 import { parseAsyncTaskUpdate } from '../server/acp/client-host.js';
+import { rankSession } from '../server/rank.js';
 
 let passed = 0;
 function test(name: string, fn: () => void): void {
@@ -292,6 +293,22 @@ test("what the agent reports about a subagent (id, model, worktree) goes on the 
   assert.equal(audit.subagentModel, 'claude-haiku-4-5');
   assert.equal(audit.worktreeBranch, 'wt-1');
   assert.equal(audit.agentSessionId, 'sess-1', 'the session stamp is kept');
+});
+
+test('a finished turn with background work still running ranks as working, not waiting for the user', () => {
+  const s = session([agentTurn()]);
+  s.state = 'needs_you';
+  s.agentTasks = [{ id: 'w1', kind: 'workflow', title: 'Review', status: 'running', startedAt: 1, toolCallId: 'w1' }];
+  const busy = rankSession(s);
+  assert.equal(busy.state, 'needs_you', 'state stays needs_you so a new message is sent, not queued');
+  assert.equal(busy.factors[0].label, 'Working in the background');
+  s.agentTasks[0].status = 'completed';
+  const idle = rankSession(s);
+  assert.equal(idle.factors[0].label, 'Waiting for your reply');
+  assert.ok(idle.score > busy.score, 'waiting for the user ranks above working in the background');
+  s.agentTasks[0].status = 'running';
+  s.pendingPermission = { requestId: 'r', toolCallId: 't', title: 'Run', options: [], createdAt: 0 } as any;
+  assert.equal(rankSession(s).state, 'blocked', 'a question from the agent still needs the user');
 });
 
 console.log(`\n${passed} passed`);

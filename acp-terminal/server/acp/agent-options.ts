@@ -90,6 +90,8 @@ export function parseAgentOptions(configOptions: unknown, now = Date.now()): Age
   if (model) {
     opts.modelConfigId = model.id;
     opts.models = selectChoices(model).filter((m) => m.value !== 'default');
+    // Only what the agent lists: Codex lists a custom model it runs itself, and Claude's
+    // unlisted current model (a resumed, pinned id) is not one to offer in every picker
     if (typeof model.currentValue === 'string') opts.currentModel = model.currentValue;
   }
 
@@ -274,6 +276,22 @@ export function cachedAgentOptions(agentId: string, model: string | undefined): 
   if (model && byModel[model]) return byModel[model];
   const key = resolveModelValue(model, Object.keys(byModel).map((value) => ({ value, label: value })));
   return key ? byModel[key] : undefined;
+}
+
+/**
+ * The model to put in the agent's launch config (AgentDescriptor.modelConfigEnv), or none.
+ * Only for a model the agent does not offer: one it lists, or listed once and has since
+ * retired, is left to set_config_option, which takes it or says it was refused, rather than
+ * launching on a model that no longer runs. A registry id ("6-luna") is left to it too.
+ */
+export function launchModelValue(agentId: string, model: string | undefined): string | undefined {
+  if (!model) return undefined;
+  const reports = Object.values(loadCache()[agentId] ?? {});
+  // A report also lists the model it ran (Codex adds a custom one), so that row alone is no offer
+  const offered = reports.flatMap((o) => o.models.filter((m) => m.value !== o.currentModel));
+  if (resolveModelValue(model, offered) || getAgent(agentId).availableModels?.includes(model)) return undefined;
+  // A custom model run before goes in the spelling the agent reported for it
+  return resolveModelValue(model, reports.flatMap((o) => o.models)) ?? model;
 }
 
 /**

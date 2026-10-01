@@ -22,6 +22,10 @@ const looksAbsolute = (p: string) => /^(\/|~|[A-Za-z]:[\\/]|\\\\)/.test(p);
 /** Server errors about the folder belong on the folder field, not in the banner. */
 const isFolderError = (msg: string) => /working directory|cwd|no such file|not a directory|ENOENT/i.test(msg);
 
+type ImportCandidate = { id: string; agentId: string; label: string; updatedAt: number; transcriptPath?: string };
+
+const importTime = (timestamp: number) => new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(timestamp);
+
 export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   agents,
   onClose,
@@ -33,6 +37,10 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   const [cwd, setCwd] = useState<string>('');
   const [title, setTitle] = useState<string>('');
   const [initialPrompt, setInitialPrompt] = useState<string>('');
+  const [importAgentSessionId, setImportAgentSessionId] = useState('');
+  const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
+  const [loadingImports, setLoadingImports] = useState(false);
+  const [manualImportSupported, setManualImportSupported] = useState(false);
   const [suggestedFolders, setSuggestedFolders] = useState<{ name: string; path: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +64,43 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       setSelectedModel(currentAgent.defaultModel);
     }
   }, [selectedAgent]);
+
+  // Changing agent means an id belongs to a different vendor. Keep a typed id while
+  // changing folders, though: some agents only expose a conversation id manually.
+  useEffect(() => {
+    setImportAgentSessionId('');
+  }, [selectedAgent]);
+
+  useEffect(() => {
+    if (selectedAgent === 'mock' || !cwd.trim() || !looksAbsolute(cwd.trim())) {
+      setImportCandidates([]);
+      setManualImportSupported(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setLoadingImports(true);
+      api.getImportableAgentSessions(selectedAgent, cwd.trim())
+        .then((res) => {
+          if (cancelled) return;
+          setImportCandidates(res.sessions);
+          setManualImportSupported(res.supportsManualId);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setImportCandidates([]);
+            setManualImportSupported(true);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingImports(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [selectedAgent, cwd]);
 
   useEffect(() => {
     api.getFolders().then((res) => {
@@ -113,6 +158,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
         cwd: path,
         title: title.trim() || undefined,
         initialPrompt: initialPrompt.trim() || undefined,
+        importAgentSessionId: importAgentSessionId.trim() || undefined,
       });
       onCreated(res.session.id);
     } catch (err: any) {
@@ -269,6 +315,55 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
               </div>
             )}
           </div>
+
+          {selectedAgent !== 'mock' && (
+            <Field
+              label="Continue an existing conversation"
+              htmlFor="ns-import-session"
+              aside="Optional"
+              hint="CodePit creates a new workspace here, then asks the selected agent to resume its own conversation. The source transcript is never copied or changed."
+            >
+              <div className="dlg-input-icon">
+                <Icon name="clock" size={14} />
+                <Input
+                  id="ns-import-session"
+                  mono
+                  value={importAgentSessionId}
+                  onChange={(e) => setImportAgentSessionId(e.target.value)}
+                  placeholder={manualImportSupported ? `Paste a ${currentAgent?.name || 'agent'} session ID` : 'Choose a project folder to find sessions'}
+                  spellCheck={false}
+                  autoComplete="off"
+                  disabled={loading || (!manualImportSupported && !loadingImports)}
+                />
+              </div>
+              {loadingImports && <span className="ns-import-status"><Icon name="refresh" size={12} /> Looking for local conversations…</span>}
+              {!loadingImports && importCandidates.length > 0 && (
+                <div className="ns-import-list" role="list" aria-label={`Existing ${currentAgent?.name || 'agent'} conversations in this project`}>
+                  {importCandidates.slice(0, 8).map((candidate) => (
+                    <button
+                      key={candidate.id}
+                      type="button"
+                      className={`ns-import-option${importAgentSessionId === candidate.id ? ' is-selected' : ''}`}
+                      aria-pressed={importAgentSessionId === candidate.id}
+                      onClick={() => setImportAgentSessionId(candidate.id)}
+                      disabled={loading}
+                      title={candidate.transcriptPath ? `Local transcript: ${candidate.transcriptPath}` : undefined}
+                    >
+                      <Icon name="clock" size={14} />
+                      <span className="ns-import-option-copy">
+                        <strong>{candidate.label}</strong>
+                        <span>{importTime(candidate.updatedAt)} · {candidate.id.slice(0, 8)}</span>
+                      </span>
+                      {importAgentSessionId === candidate.id && <Icon name="check" size={14} />}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {!loadingImports && manualImportSupported && importCandidates.length === 0 && cwd.trim() && (
+                <span className="ns-import-status">No local conversations found for this folder. You can still paste a session ID.</span>
+              )}
+            </Field>
+          )}
 
           <Field label="Title" htmlFor="ns-title" aside="Optional">
             <Input

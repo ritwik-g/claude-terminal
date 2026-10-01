@@ -5,8 +5,8 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { store } from '../store.js';
 import { getGitInfo } from '../git.js';
-import { rankSession, sortSessions } from '../rank.js';
-import { getAgent, hasAgent } from '../agents/registry.js';
+import { hasRunningBackground, isWorkingInBackground, rankSession, sortSessions } from '../rank.js';
+import { getAgent, hasAgent, listAgents } from '../agents/registry.js';
 import { AcpClientHost, HostClosedError, TurnInFlightError, capToolOutput, normalizeClaudeModel, type ChunkMeta, type CompactionEvent } from './client-host.js';
 import { HANDOFF_SUMMARY_PROMPT, autoCompactDecision, capSummary, contextWindowFor, latestCompaction, readAutoCompactDefault, writeAutoCompactDefault } from '../compaction.js';
 import { ptyManager } from '../pty-manager.js';
@@ -16,16 +16,18 @@ import { cachedAgentOptions, effortChoicesFor, effortLabel, markNewModels, remem
 import { logQueueEvent } from '../queue-log.js';
 import { appendSubagentText, completeAsyncSubagent, endAgentTasks, stopAgentTask, stopTranscriptWatchers, syncAgentTasks, trackAsyncTask, trackTaskText, trackToolCall, trackToolCallUpdate, watchSubagentTranscript } from './agent-tasks.js';
 import { AUTO_EFFORT } from '../types.js';
-import type { AcpSession, AgentCommand, TaskAudit, AutoCompactSetting, CompactionRecord, AgentOptions, AgentTask, AgentTaskTextDelta, AsyncTaskUpdate, QueuedPrompt, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
+import type { AcpSession, ParkedAgentResume, AgentCommand, TaskAudit, AutoCompactSetting, CompactionRecord, AgentOptions, AgentTask, AgentTaskTextDelta, AsyncTaskUpdate, QueuedPrompt, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
 
 /**
  * Format conversation history into a structured briefing block for context transfer.
  * In 'compact' mode, internal thoughts and raw tool outputs are omitted, and responses
  * are distilled into key decisions, file changes, and instructions to save token context.
+ * `catchUp` is for an agent session continued after other agents (`by`) handled the
+ * conversation: the turns are only the ones it missed, and the header says so.
  */
 export function formatSessionHistory(
   turns: TurnMessage[],
-  opts?: { compact?: boolean; maxTurns?: number }
+  opts?: { compact?: boolean; maxTurns?: number; catchUp?: { by: string[] } }
 ): string {
   const compact = opts?.compact !== false;
   const maxTurns = opts?.maxTurns ?? (compact ? 6 : 4);
@@ -39,10 +41,21 @@ export function formatSessionHistory(
   if (relevantTurns.length === 0 && !checkpoint) return '';
 
   const slice = relevantTurns.slice(-maxTurns);
-  const lines: string[] = [
-    `[Prior Conversation Context (${compact ? 'Compacted' : 'Recent Turns'})]`,
-    `The following is context from prior turns in this session to maintain continuity:`,
-  ];
+  const catchUpBy = opts?.catchUp && (opts.catchUp.by.length > 0 ? opts.catchUp.by.join(' and ') : 'another agent');
+  // A catch-up claims to cover everything since; when it is cut, it says how much is left out
+  const leftOut = relevantTurns.length - slice.length;
+  const catchUpTurns = leftOut > 0
+    ? `These are the last ${slice.length} of the ${relevantTurns.length} turns since then (the ${leftOut} before them are left out)`
+    : 'These are the turns since then';
+  const lines: string[] = catchUpBy
+    ? [
+        `[Catch-up Since You Last Took Part (${compact ? 'Compacted' : 'Recent Turns'})]`,
+        `You still have this conversation up to where you last took part. ${catchUpTurns}, while ${catchUpBy} handled the conversation:`,
+      ]
+    : [
+        `[Prior Conversation Context (${compact ? 'Compacted' : 'Recent Turns'})]`,
+        `The following is context from prior turns in this session to maintain continuity:`,
+      ];
   if (checkpoint) {
     lines.push('Summary of the conversation so far (written when its context was compacted):', checkpoint.summary);
     if (slice.length > 0) lines.push('Turns since that summary:');
@@ -75,6 +88,32 @@ export function formatSessionHistory(
 
   lines.push('---');
   return lines.join('\n');
+}
+
+/** The model to stamp on an agent turn: the one the agent runs when it refused the chosen one. */
+function stampedModel(s: AcpSession, host: AcpClientHost): string | undefined {
+  return host.modelRefused ? host.options?.currentModel ?? s.model : s.model;
+}
+
+/**
+ * Say in the conversation that the agent refused the chosen model and which one it runs
+ * instead. The choice stays on the session, so the next start tries it again; the note is
+ * not repeated until the model is switched. Returns the note it added, or null.
+ */
+export function noteModelRefused(s: AcpSession, host: AcpClientHost, beforeTurnId?: string): TurnMessage | null {
+  const refused = host.modelRefused;
+  if (!refused) return null;
+  const opts = host.options;
+  const running = opts?.models.find((m) => m.value === opts.currentModel)?.label || opts?.currentModel || 'its default model';
+  const content = `⚠️ ${s.agentName.replace(/ \(ACP\)$/, '')} did not accept model ${refused.model} (${refused.reason}), so it is running ${running}.`;
+  const last = [...s.turns].reverse().find((t) => t.role === 'system' && (t.id.endsWith('-model') || t.content?.startsWith('Switched model to')));
+  if (last?.content === content) return null;
+  const now = Date.now();
+  const note: TurnMessage = { id: `sys-${now}-model`, role: 'system', content, timestamp: now };
+  const at = beforeTurnId ? s.turns.findIndex((t) => t.id === beforeTurnId) : -1;
+  if (at === -1) s.turns.push(note);
+  else s.turns.splice(at, 0, note);
+  return note;
 }
 
 /**
@@ -123,6 +162,9 @@ export class AgentNotRunningError extends Error {
   }
 }
 
+/** The running agent refused the model itself (set_config_option), as opposed to any later step of a switch. */
+class ModelRefusedError extends Error {}
+
 export class SessionManager extends EventEmitter {
   private activeHosts = new Map<string, AcpClientHost>();
   // Hosts still in start(): concurrent ensureHost() calls share one spawn
@@ -137,6 +179,8 @@ export class SessionManager extends EventEmitter {
   private agentCompactions = new Map<string, string>();
   // "Compact when finished" held back by background work: the stop reason of the turn it follows
   private autoCompactAfterBackground = new Map<string, string | undefined>();
+  /** Whether the sidebar was last told a session is working in the background. */
+  private inBackground = new Map<string, boolean>();
 
   constructor() {
     super();
@@ -201,6 +245,7 @@ export class SessionManager extends EventEmitter {
     if (!s || !endBackgroundWork(s, reason)) return;
     store.save(s, { touch: false });
     this.emit('sessionStream', { sessionId, type: 'backgroundSettled' });
+    this.refreshBackgroundStatus(sessionId);
   }
 
   init(): void {
@@ -209,11 +254,17 @@ export class SessionManager extends EventEmitter {
     const sessions = store.getAll();
     for (const session of sessions) {
       if (session.agentId === 'claude' && session.model) {
-        const normalized = normalizeClaudeModel(session.model);
+        // A custom id is kept: the agent says at start whether it takes it
+        const normalized = normalizeClaudeModel(session.model, session.model);
         if (session.model !== normalized) {
           session.model = normalized;
           store.save(session, { touch: false });
         }
+      }
+      // Default titles used to name the agent too; its icon says that now, so just the folder
+      if (session.titleSource === 'auto' && isOldDefaultTitle(session.title, session.cwd)) {
+        session.title = path.basename(session.cwd);
+        store.save(session, { touch: false });
       }
       // Backfill historical agentId and model on turns so model switching never erases history
       let sessionChanged = false;
@@ -378,6 +429,7 @@ export class SessionManager extends EventEmitter {
       model: s.model || getAgent(s.agentId)?.defaultModel,
       isAgentRunning: this.activeHosts.has(s.id),
       compacting: this.compactionRuns.has(s.id) || s.turns.some((t) => t.compaction?.status === 'running'),
+      workingInBackground: isWorkingInBackground(s, s.state),
     }));
   }
 
@@ -466,17 +518,27 @@ export class SessionManager extends EventEmitter {
     model?: string;
     failoverFromId?: string;
     initialPrompt?: string;
+    /** An existing conversation owned by this agent to continue in this new CodePit session. */
+    importAgentSessionId?: string;
   }): Promise<AcpSession> {
     if (!hasAgent(opts.agentId)) throw new Error(`Unknown agent: ${opts.agentId}`);
     const id = `acp-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     const agent = getAgent(opts.agentId);
     let model = opts.model || agent.defaultModel;
     if (agent.id === 'claude') {
-      model = normalizeClaudeModel(model);
+      model = normalizeClaudeModel(model, model);
     }
     const git = await getGitInfo(opts.cwd);
     const folderName = path.basename(opts.cwd) || 'workspace';
-    const title = opts.title || `${agent.name} in ${folderName}`;
+    // The vendor icon already says which agent: the default title is just the folder
+    const title = opts.title || folderName;
+    const importAgentSessionId = opts.importAgentSessionId?.trim();
+    if (importAgentSessionId && !isSafeImportedSessionId(importAgentSessionId)) {
+      throw new Error('The agent session id contains unsupported characters');
+    }
+    // Two CodePit sessions continuing one agent session would write into the same conversation
+    const owner = importAgentSessionId ? agentSessionOwner(agent.id, importAgentSessionId) : undefined;
+    if (owner) throw new Error(`That agent session is already continued by the CodePit session "${owner.title}"`);
 
     const session: AcpSession = {
       id,
@@ -505,6 +567,11 @@ export class SessionManager extends EventEmitter {
       pendingPermission: null,
       turns: [],
       failoverFromId: opts.failoverFromId,
+      // An imported conversation is deliberately only an agent resume, not a copy of its
+      // transcript into CodePit. The source app remains the owner of that history.
+      ...(importAgentSessionId
+        ? { agentResume: { agentId: agent.id, sessionId: importAgentSessionId, cwd: opts.cwd, savedAt: Date.now() }, skipClaudeAdoption: true }
+        : {}),
       rateLimits: (agent.id === 'claude' || agent.provider === 'anthropic') ? getClaudeRateLimits() : undefined,
       autoCompact: readAutoCompactDefault(),
     };
@@ -562,11 +629,13 @@ export class SessionManager extends EventEmitter {
       if (current) {
         if (host.mcpInfo) current.mcp = host.mcpInfo;
         this.recordAgentStart(current, host, opts.beforeTurnId);
+        noteModelRefused(current, host, opts.beforeTurnId);
         store.save(current, { touch: false });
         this.emit('sessionStream', {
           sessionId: current.id,
           type: 'agentSession',
-          session: { agentSessionId: current.agentSessionId, agentResume: current.agentResume, agentSessions: current.agentSessions, turns: current.turns },
+          // Always an array so the client's shallow merge clears an emptied list
+          session: { agentSessionId: current.agentSessionId, agentResume: current.agentResume, parkedAgentResumes: current.parkedAgentResumes ?? [], agentSessions: current.agentSessions, turns: current.turns },
         });
       }
       return host;
@@ -611,7 +680,7 @@ export class SessionManager extends EventEmitter {
           timestamp: Date.now(),
           agentId: s.agentId,
           agentName: s.agentName,
-          model: s.model,
+          model: stampedModel(s, host),
         };
         s.turns.push(activeAgentTurn);
       }
@@ -886,7 +955,7 @@ export class SessionManager extends EventEmitter {
           timestamp: Date.now(),
           agentId: s.agentId,
           agentName: s.agentName,
-          model: s.model,
+          model: stampedModel(s, host),
         };
         s.turns.push(activeAgentTurn);
       } else if (!activeAgentTurn.content) {
@@ -974,7 +1043,7 @@ export class SessionManager extends EventEmitter {
     const userTurn = session.turns[session.turns.length - 1];
     if (keywords.length > 0) userTurn.keywords = keywords;
     // /clear empties Claude's own context: continuing that session later would not bring it back
-    if (promptText.trim() === '/clear') delete session.agentResume;
+    if (promptText.trim() === '/clear') dropAgentResume(session, 'Context cleared by /clear');
 
     store.save(session);
     this.emit('sessionsUpdated', this.listSessions());
@@ -990,13 +1059,16 @@ export class SessionManager extends EventEmitter {
       let promptToSendToHost = promptWithAttachments;
       const current = store.get(sessionId);
       if (current?.contextHandoffPending) {
-        const historyBlock = formatSessionHistory(handoffTurns(current, userTurn.id), {
+        const turns = handoffTurns(current, userTurn.id);
+        const historyBlock = formatSessionHistory(turns, {
           compact: current.contextMode !== 'full',
+          catchUp: catchUpFor(current, turns),
         });
         if (historyBlock) {
           promptToSendToHost = `${historyBlock}\n\n[Active User Request]\n${promptWithAttachments}`;
         }
         current.contextHandoffPending = false;
+        delete current.catchUpAfterTurnId;
         store.save(current, { touch: false });
       }
       const { stopReason } = await host.sendPrompt(promptToSendToHost, savedAttachments);
@@ -1325,7 +1397,7 @@ export class SessionManager extends EventEmitter {
     const targetAgent = getAgent(newAgentId);
     let targetModel = newModel || targetAgent.defaultModel;
     if (targetAgent.id === 'claude') {
-      targetModel = normalizeClaudeModel(targetModel);
+      targetModel = normalizeClaudeModel(targetModel, targetModel);
     }
 
     // Same agent, and it can switch models while running: keep the process and its conversation.
@@ -1335,10 +1407,17 @@ export class SessionManager extends EventEmitter {
       try {
         return await this.switchModelLive(session, liveHost, targetModel, newEffort);
       } catch (err: any) {
-        if (!(err instanceof HostClosedError)) {
-          throw new Error(`${targetAgent.name.replace(/ \(ACP\)$/, '')} did not accept model ${targetModel}: ${err.message}`);
+        const agentLabel = targetAgent.name.replace(/ \(ACP\)$/, '');
+        // An agent that takes models at launch (Codex) gets one it refused live on a restart,
+        // which would cut off a running turn
+        const restartable = err instanceof ModelRefusedError && Boolean(targetAgent.modelConfigEnv);
+        if (restartable && (this.isTurnInFlight(sessionId) || this.compactionRuns.has(sessionId))) {
+          throw new TurnInFlightError(`${agentLabel} takes model ${targetModel} only on a restart: switch once the current turn has finished`);
         }
-        // The agent exited meanwhile: fall through to a restart with a handover
+        if (!(err instanceof HostClosedError) && !restartable) {
+          throw new Error(`${agentLabel} did not accept model ${targetModel}: ${err.message}`);
+        }
+        // The agent exited meanwhile, or takes the model at launch: fall through to a restart with a handover
       }
     }
 
@@ -1350,6 +1429,14 @@ export class SessionManager extends EventEmitter {
       session.contextWindow = undefined;
     }
 
+    // Another agent's turn: this agent's session is set aside to continue on a switch back
+    const switching = targetAgent.id !== session.agentId;
+    if (switching && contextMode !== 'none') parkAgentResume(session, targetAgent.name);
+    // The catch-up mark belongs to the agent session being left
+    if (switching || contextMode === 'none') delete session.catchUpAfterTurnId;
+    // Every set-aside session holds the context a clean slate drops
+    if (contextMode === 'none') dropParkedResumes(session, () => true, 'Dropped by a clean slate');
+
     session.agentId = targetAgent.id;
     session.agentName = targetAgent.name;
     session.model = targetModel;
@@ -1359,13 +1446,20 @@ export class SessionManager extends EventEmitter {
 
     session.contextMode = contextMode;
     // Another agent cannot continue this one's session, and a clean slate means a new one
-    if (session.agentResume && (session.agentResume.agentId !== targetAgent.id || contextMode === 'none')) delete session.agentResume;
+    if (session.agentResume && (session.agentResume.agentId !== targetAgent.id || contextMode === 'none')) {
+      dropAgentResume(session, contextMode === 'none' ? 'Dropped by a clean slate' : `Not continued after you switched to ${targetAgent.name.replace(/ \(ACP\)$/, '')}`);
+    }
     if (contextMode === 'none') {
       session.contextStartIndex = session.turns.length;
       session.skipClaudeAdoption = true;
     }
-    session.contextHandoffPending = false;
-    const handover = contextMode === 'none' || !hasHandoffContext(session) ? '' : resumableSessionId(session) ? 'kept' : contextMode;
+    // A kept agent session that was never sent the conversation still owes it; a new one is told on start
+    if (switching || contextMode === 'none' || !resumableSessionId(session)) session.contextHandoffPending = false;
+    // Back to an agent set aside here: continue its session, caught up on the turns it missed
+    const restored = switching && contextMode !== 'none' ? takeParkedResume(session) : undefined;
+    const handover = restored
+      ? `continues ${shortId(restored.sessionId)}`
+      : contextMode === 'none' || !hasHandoffContext(session) ? '' : resumableSessionId(session) && !session.contextHandoffPending ? 'kept' : contextMode;
 
     // Reset crashed, blocked, or working state since old host is shutdown
     if (session.state === 'crashed' || session.state === 'blocked' || session.state === 'working') {
@@ -1412,7 +1506,9 @@ export class SessionManager extends EventEmitter {
     // The new model's choices arrive during applyModel and may add an effort note; it goes after this line
     const switchLineAt = session.turns.length;
     if (targetModel && targetModel !== session.model) {
-      await host.applyModel(targetModel);
+      await host.applyModel(targetModel).catch((err) => {
+        throw err instanceof HostClosedError ? err : new ModelRefusedError(err?.message || String(err));
+      });
       session.model = targetModel;
       // The agent reports the new window with its next usage
       session.contextWindow = undefined;
@@ -1500,10 +1596,22 @@ export class SessionManager extends EventEmitter {
     }
 
     // A new agent session gets the conversation with the next prompt; a continued one has it
-    // (a continued one that was started but never sent a prompt still owes it)
-    s.contextHandoffPending = host.resumed ? Boolean(s.contextHandoffPending) : hasHandoffContext(s, beforeTurnId);
+    // (a continued one that was started but never sent a prompt still owes it). One continued
+    // after another agent's turns gets those; one that failed to continue was never caught up
+    const catchingUp = host.resumed && s.catchUpAfterTurnId !== undefined;
+    if (!host.resumed) delete s.catchUpAfterTurnId;
+    s.contextHandoffPending = host.resumed && !catchingUp ? Boolean(s.contextHandoffPending) : hasHandoffContext(s, beforeTurnId);
+    if (catchingUp && !s.contextHandoffPending) delete s.catchUpAfterTurnId;
+    if (tried && !host.resumed) {
+      const setAside = records.find((r) => r.id === tried && r.endReason?.startsWith('Set aside when you switched'));
+      if (setAside) setAside.endReason = 'Could not be continued when you switched back';
+    }
     let note: string | undefined;
-    if (host.resumed) note = `↪️ Continued agent session ${shortId(id)}: the agent still has the whole conversation.`;
+    if (host.resumed) {
+      note = catchingUp && s.contextHandoffPending
+        ? `↪️ Continued agent session ${shortId(id)}: the agent gets the turns since it last took part.`
+        : `↪️ Continued agent session ${shortId(id)}: the agent still has the whole conversation.`;
+    }
     else if (tried) {
       note = `⚠️ Could not continue agent session ${shortId(tried)} (${host.resumeError ?? 'not supported'}). Started a new one${
         s.contextHandoffPending ? ', which gets a summary of this conversation' : ''
@@ -1537,11 +1645,16 @@ export class SessionManager extends EventEmitter {
     }
     this.dropHost(sessionId, 'Set aside for a fresh agent session');
     ptyManager.release(`session-term-${sessionId}`);
-    delete session.agentResume;
+    dropAgentResume(session, 'Set aside for a fresh agent session');
+    delete session.catchUpAfterTurnId;
     session.skipClaudeAdoption = true;
     session.contextMode = contextMode;
     session.contextHandoffPending = false;
-    if (contextMode === 'none') session.contextStartIndex = session.turns.length;
+    if (contextMode === 'none') {
+      session.contextStartIndex = session.turns.length;
+      // Other agents' set-aside sessions hold the context a clean slate drops
+      dropParkedResumes(session, () => true, 'Dropped by a clean slate');
+    }
     session.isAgentRunning = false;
     session.activeTerminalId = undefined;
     session.turns.push({
@@ -1691,13 +1804,15 @@ export class SessionManager extends EventEmitter {
         prompt = HANDOFF_SUMMARY_PROMPT;
         // A freshly started agent has none of the conversation yet: give it what there is to summarise
         if (needsHistory) {
-          const history = formatSessionHistory(handoffTurns(session, run.turnId), { compact: false, maxTurns: 20 });
+          const turns = handoffTurns(session, run.turnId);
+          const history = formatSessionHistory(turns, { compact: false, maxTurns: 20, catchUp: catchUpFor(session, turns) });
           if (history) prompt = `${history}\n\n${prompt}`;
         }
         // The agent now has the history; the next prompt must not send it again
         const s = store.get(sessionId);
         if (s?.contextHandoffPending) {
           s.contextHandoffPending = false;
+          delete s.catchUpAfterTurnId;
           store.save(s, { touch: false });
         }
       }
@@ -1755,7 +1870,9 @@ export class SessionManager extends EventEmitter {
       // Restart: the next prompt starts a fresh agent with the summary as its first context.
       // The old agent session still holds everything the summary replaces: never continue it
       this.dropHost(sessionId, 'Replaced by a summary (compaction)');
-      delete s.agentResume;
+      dropAgentResume(s, 'Replaced by a summary (compaction)');
+      // The new agent session gets the whole conversation (the summary), not a catch-up
+      delete s.catchUpAfterTurnId;
       s.contextHandoffPending = true;
       s.usage = { ...s.usage, contextTokens: c.postTokens ?? 0 };
     }
@@ -1824,6 +1941,17 @@ export class SessionManager extends EventEmitter {
     return added;
   }
 
+  /** Re-rank and tell the sidebar when background work starts or stops counting as "working in background". */
+  private refreshBackgroundStatus(sessionId: string): void {
+    const s = store.get(sessionId);
+    if (!s) return;
+    const now = isWorkingInBackground(s, s.state);
+    if (this.inBackground.get(sessionId) === now) return;
+    this.inBackground.set(sessionId, now);
+    store.save(s, { touch: false });
+    this.emit('sessionsUpdated', this.listSessions());
+  }
+
   /** Start "Compact when finished" when the turn that just ended qualifies. */
   private maybeAutoCompact(sessionId: string, stopReason?: string): void {
     const s = store.get(sessionId);
@@ -1849,6 +1977,7 @@ export class SessionManager extends EventEmitter {
 
   /** Decide again for a turn whose compaction waited on background work, once none is left running. */
   private recheckAutoCompact(sessionId: string): void {
+    this.refreshBackgroundStatus(sessionId);
     if (!this.autoCompactAfterBackground.has(sessionId)) return;
     const s = store.get(sessionId);
     if (s && hasRunningBackground(s)) return;
@@ -1901,11 +2030,7 @@ export class SessionManager extends EventEmitter {
     const current = store.get(sessionId);
     if (!current) throw new Error(`Session ${sessionId} not found`);
 
-    const targetAgent = getAgent(targetAgentId);
     const git = await getGitInfo(current.cwd);
-
-    const folderName = path.basename(current.cwd) || 'workspace';
-    const newTitle = `${targetAgent.name} (from ${current.agentName}) in ${folderName}`;
 
     // If requested, archive/clean up previous session
     if (opts?.archivePrevious) {
@@ -1944,7 +2069,6 @@ export class SessionManager extends EventEmitter {
     const newSession = await this.createSession({
       agentId: targetAgentId,
       cwd: current.cwd,
-      title: newTitle,
       model: opts?.model,
       failoverFromId: current.id,
       initialPrompt,
@@ -2003,7 +2127,11 @@ export class SessionManager extends EventEmitter {
     // Terminate running host process so old conversation state is cleared from process memory.
     // Its own transcript still holds the undone turns, so it is not continued either
     this.dropHost(sessionId, 'Conversation rewound');
-    delete session.agentResume;
+    dropAgentResume(session, 'Conversation rewound');
+    delete session.catchUpAfterTurnId;
+    // A set-aside agent session that saw undone turns would bring them back if continued
+    const kept = new Set(session.turns.map((t) => t.id));
+    dropParkedResumes(session, (p) => Boolean(p.lastSeenTurnId) && !kept.has(p.lastSeenTurnId!), 'Conversation rewound past where it was set aside');
     session.skipClaudeAdoption = true;
     // Rewound to before a clean slate: that clean slate is undone too
     if ((session.contextStartIndex ?? 0) > session.turns.length) delete session.contextStartIndex;
@@ -2149,12 +2277,6 @@ interface CompactionRun {
   agentCompactionId?: string;
 }
 
-/** Background shells, workflows or async subagents still running after the turn ended. */
-function hasRunningBackground(s: AcpSession): boolean {
-  if (s.agentTasks?.some((t) => t.status === 'running')) return true;
-  return s.turns.some((t) => t.toolCalls?.some((c) => c.background && (c.backgroundState ?? 'running') === 'running'));
-}
-
 const kTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 
 /** The compaction turn's text: what the card shows, and what search and older clients see. */
@@ -2253,9 +2375,95 @@ function resumableSessionId(s: AcpSession): string | undefined {
   return r && r.agentId === s.agentId && r.cwd === s.cwd ? r.sessionId : undefined;
 }
 
-/** The turns a new agent session is told about: after a clean slate only later ones, never `excludeId`. */
+/**
+ * The turns a new agent session is told about: after a clean slate only later ones, never `excludeId`.
+ * A continued session catching up after another agent gets only the turns since it last took part.
+ */
 function handoffTurns(s: AcpSession, excludeId?: string): TurnMessage[] {
-  return s.turns.slice(s.contextStartIndex ?? 0).filter((t) => t.id !== excludeId);
+  const from = Math.max(s.contextStartIndex ?? 0, catchUpStart(s) ?? 0);
+  return s.turns.slice(from).filter((t) => t.id !== excludeId);
+}
+
+/** Where the turns a continued agent session missed begin, when it is catching up and its last turn still exists. */
+function catchUpStart(s: AcpSession): number | undefined {
+  if (!s.catchUpAfterTurnId) return undefined;
+  const at = s.turns.findIndex((t) => t.id === s.catchUpAfterTurnId);
+  return at === -1 ? undefined : at + 1;
+}
+
+/** formatSessionHistory's catch-up option for a handoff: the other agents that answered meanwhile. */
+function catchUpFor(s: AcpSession, turns: TurnMessage[]): { by: string[] } | undefined {
+  if (catchUpStart(s) === undefined) return undefined;
+  const names = turns.filter((t) => t.role === 'agent' && t.agentName && t.agentId !== s.agentId).map((t) => t.agentName!.replace(/ \(ACP\)$/, ''));
+  return { by: [...new Set(names)] };
+}
+
+/**
+ * On a switch to another agent: set the current agent session aside, to continue when the
+ * conversation switches back. One still owed the conversation never saw it, so there is
+ * nothing to continue (unless all it is owed is a catch-up: it saw up to that mark).
+ */
+function parkAgentResume(s: AcpSession, targetName: string): void {
+  const sessionId = resumableSessionId(s);
+  const caughtUpTo = s.catchUpAfterTurnId;
+  if (!sessionId || (s.contextHandoffPending && caughtUpTo === undefined)) return;
+  // Not a trailing message: one still on its way ("send now") is taken back out if it fails,
+  // and a mark that is gone would hand the whole conversation over again
+  let seen = s.turns.length - 1;
+  while (seen >= 0 && s.turns[seen].role === 'user') seen--;
+  const lastSeenTurnId = caughtUpTo !== undefined ? caughtUpTo || undefined : s.turns[seen]?.id;
+  // At most one per agent: an older one of this agent (another folder) gives way
+  dropParkedResumes(s, (p) => p.agentId === s.agentId, 'Replaced by a later session of this agent');
+  (s.parkedAgentResumes ??= []).push({
+    agentId: s.agentId,
+    agentName: s.agentName,
+    sessionId,
+    cwd: s.cwd,
+    savedAt: s.agentResume!.savedAt,
+    parkedAt: Date.now(),
+    model: s.model,
+    ...(lastSeenTurnId ? { lastSeenTurnId } : {}),
+  });
+  const rec = s.agentSessions?.find((r) => r.id === sessionId);
+  if (rec) {
+    rec.endedAt ??= Date.now();
+    rec.endReason = `Set aside when you switched to ${targetName.replace(/ \(ACP\)$/, '')}; continues if you switch back`;
+  }
+}
+
+/** The set-aside session of the agent now serving `s`, made the one to continue, with its catch-up mark. */
+function takeParkedResume(s: AcpSession): ParkedAgentResume | undefined {
+  const parked = s.parkedAgentResumes?.find((p) => p.agentId === s.agentId && p.cwd === s.cwd);
+  if (!parked) return undefined;
+  s.parkedAgentResumes = s.parkedAgentResumes!.filter((p) => p !== parked);
+  if (s.parkedAgentResumes.length === 0) delete s.parkedAgentResumes;
+  s.agentResume = { agentId: parked.agentId, sessionId: parked.sessionId, cwd: parked.cwd, savedAt: parked.savedAt };
+  // '' when it saw no turns: the whole conversation is handed over, as to a new session
+  s.catchUpAfterTurnId = parked.lastSeenTurnId ?? '';
+  return parked;
+}
+
+/**
+ * Forget the agent session to continue. One switched back to but not continued yet still reads
+ * "continues if you switch back" on its record, which is no longer true: it says why instead.
+ */
+function dropAgentResume(s: AcpSession, reason: string): void {
+  const id = s.agentResume?.sessionId;
+  delete s.agentResume;
+  if (!id || s.parkedAgentResumes?.some((p) => p.sessionId === id)) return;
+  const rec = s.agentSessions?.find((r) => r.id === id);
+  if (rec?.endReason?.startsWith('Set aside when you switched')) rec.endReason = reason;
+}
+
+/** Forget the set-aside agent sessions `drop` picks, saying why on their records. */
+function dropParkedResumes(s: AcpSession, drop: (p: ParkedAgentResume) => boolean, reason: string): void {
+  if (!s.parkedAgentResumes?.length) return;
+  for (const p of s.parkedAgentResumes.filter(drop)) {
+    const rec = s.agentSessions?.find((r) => r.id === p.sessionId);
+    if (rec) rec.endReason = reason;
+  }
+  s.parkedAgentResumes = s.parkedAgentResumes.filter((p) => !drop(p));
+  if (s.parkedAgentResumes.length === 0) delete s.parkedAgentResumes;
 }
 
 /** Whether there is a conversation a new agent session needs to be handed. */
@@ -2265,6 +2473,269 @@ function hasHandoffContext(s: AcpSession, excludeId?: string): boolean {
 }
 
 const shortId = (id: string | undefined) => (id ? id.slice(0, 8) : 'unknown');
+
+/** A title CodePit generated before default titles were just the folder: "<agent>[ (from <agent>)] in <folder>". */
+export function isOldDefaultTitle(title: string, cwd: string): boolean {
+  const folder = path.basename(cwd);
+  const suffix = ` in ${folder}`;
+  if (!folder || !title.endsWith(suffix)) return false;
+  const head = title.slice(0, -suffix.length);
+  const names = new Set(listAgents(true).map((a) => a.name));
+  const isAgentName = (n: string) => names.has(n) || n.endsWith('(ACP)');
+  const from = head.match(/^(.+?) \(from .+\)$/);
+  return isAgentName(head) || Boolean(from && isAgentName(from[1]));
+}
+
+/** Session candidates the New session dialog can offer without ever copying the source transcript. */
+export interface ImportableAgentSession {
+  id: string;
+  agentId: string;
+  /** A short, local-only preview of the latest user request or vendor-provided title. */
+  label: string;
+  updatedAt: number;
+  transcriptPath?: string;
+}
+
+/** Real ACP agents accept arbitrary vendor session ids; keep the handoff value bounded and non-path-like. */
+export function isSafeImportedSessionId(id: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(id);
+}
+
+/**
+ * Locally discover sessions for agents whose CLIs keep readable transcripts. Other ACP
+ * adapters still support import by pasted id: their conversation store is intentionally
+ * treated as private and is not guessed at here.
+ */
+export function listImportableAgentSessions(agentId: string, cwd: string): ImportableAgentSession[] {
+  // One already continued by a CodePit session would get two conversations writing into it
+  const bound = new Set(store.getAll().flatMap((s) => [...boundAgentSessions(s, agentId)]));
+  if (agentId === 'claude') return listClaudeImportableSessions(cwd, bound);
+  if (agentId === 'codex') return listCodexImportableSessions(cwd, bound);
+  return [];
+}
+
+/** The agent sessions of `agentId` this CodePit session would continue: the current one and any set aside. */
+function boundAgentSessions(s: AcpSession, agentId: string): string[] {
+  return [s.agentResume, ...(s.parkedAgentResumes ?? [])].filter((r) => r?.agentId === agentId).map((r) => r!.sessionId);
+}
+
+/** The CodePit session that would already continue this agent session, if any. */
+export function agentSessionOwner(agentId: string, agentSessionId: string): AcpSession | undefined {
+  return store.getAll().find((s) => boundAgentSessions(s, agentId).includes(agentSessionId));
+}
+
+const importPreview = (text: string | undefined, fallback: string): string => {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+  return clean ? (clean.length > 180 ? `${clean.slice(0, 177)}…` : clean) : fallback;
+};
+
+function listClaudeImportableSessions(cwd: string, bound: Set<string>): ImportableAgentSession[] {
+  const found = new Map<string, ImportableAgentSession>();
+  for (const dir of claudeProjectDirs(cwd)) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^[0-9a-f-]{36}\.jsonl$/i.test(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      let updatedAt: number;
+      try {
+        updatedAt = fs.statSync(file).mtimeMs;
+      } catch {
+        continue;
+      }
+      const id = path.basename(entry.name, '.jsonl');
+      if (bound.has(id)) continue;
+      // Folder names map every other character to '-', so /a/my-app and /a/my/app share one
+      const started = claudeTranscriptCwd(file);
+      if (started && !sameWorkspace(started, cwd)) continue;
+      const candidate: ImportableAgentSession = {
+        id,
+        agentId: 'claude',
+        label: importPreview(lastHumanPrompt(file), 'Claude conversation'),
+        updatedAt,
+        transcriptPath: file,
+      };
+      if ((found.get(id)?.updatedAt ?? 0) < updatedAt) found.set(id, candidate);
+    }
+  }
+  return [...found.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** The folder a Claude Code transcript started in: the first entry that records one. */
+function claudeTranscriptCwd(file: string): string | undefined {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'r');
+  } catch {
+    return undefined;
+  }
+  try {
+    const buf = Buffer.alloc(256 * 1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+      try {
+        const entry = JSON.parse(line);
+        if (typeof entry?.cwd === 'string' && entry.cwd) return entry.cwd;
+      } catch {
+        // a partial last line, or not JSON
+      }
+    }
+  } catch {
+    // unreadable: listed without the check
+  } finally {
+    fs.closeSync(fd);
+  }
+  return undefined;
+}
+
+interface CodexTranscriptMeta {
+  id?: string;
+  cwd?: string;
+}
+
+function readCodexTranscriptMeta(file: string): CodexTranscriptMeta | undefined {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'r');
+  } catch {
+    return undefined;
+  }
+  try {
+    // Only the first line is needed: read until it ends (it is ~20 KB), not the whole transcript
+    const CHUNK = 64 * 1024;
+    const chunks: Buffer[] = [];
+    let read = 0;
+    for (;;) {
+      const buf = Buffer.alloc(CHUNK);
+      const n = fs.readSync(fd, buf, 0, CHUNK, read);
+      if (n === 0) break;
+      chunks.push(buf.subarray(0, n));
+      read += n;
+      if (buf.subarray(0, n).includes(10) || read >= 1 << 20) break;
+    }
+    const line = Buffer.concat(chunks).toString('utf8').split('\n').find(Boolean);
+    const entry = line ? JSON.parse(line) : undefined;
+    if (entry?.type !== 'session_meta') return undefined;
+    return { id: typeof entry.payload?.session_id === 'string' ? entry.payload.session_id : undefined, cwd: typeof entry.payload?.cwd === 'string' ? entry.payload.cwd : undefined };
+  } catch {
+    return undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Codex records the user turn as a response_item; scanning backwards keeps this quick for long transcripts. */
+function lastCodexHumanPrompt(file: string): string | undefined {
+  const CHUNK = 1 << 20;
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'r');
+  } catch {
+    return undefined;
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    let end = size;
+    let carry = '';
+    while (end > 0 && size - end < 16 * CHUNK) {
+      const start = Math.max(0, end - CHUNK);
+      const buf = Buffer.alloc(end - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      const lines = (buf.toString('utf8') + carry).split('\n');
+      carry = start > 0 ? lines.shift() ?? '' : '';
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const entry = JSON.parse(lines[i]);
+          const payload = entry?.type === 'response_item' ? entry.payload : undefined;
+          if (payload?.type !== 'message' || payload.role !== 'user') continue;
+          const content = payload.content;
+          if (typeof content === 'string' && content.trim()) return content;
+          if (Array.isArray(content)) {
+            const text = content.filter((part: any) => typeof part?.text === 'string').map((part: any) => part.text).join('\n');
+            if (text.trim()) return text;
+          }
+        } catch {
+          // Ignore a partial line or a malformed event and keep looking.
+        }
+      }
+      end = start;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return undefined;
+}
+
+function sameWorkspace(a: string, b: string): boolean {
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return path.resolve(a) === path.resolve(b);
+  }
+}
+
+function codexTranscriptFiles(root: string): string[] {
+  const files: string[] = [];
+  const dirs = [root];
+  while (dirs.length > 0) {
+    const dir = dirs.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) dirs.push(file);
+      else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(file);
+    }
+  }
+  return files;
+}
+
+// What each rollout file held when last read, so a repeated listing only stats the files
+const codexMetaCache = new Map<string, { mtimeMs: number; size: number; meta?: CodexTranscriptMeta; label?: string }>();
+
+function listCodexImportableSessions(cwd: string, bound: Set<string>): ImportableAgentSession[] {
+  // The override keeps tests hermetic and also supports a deliberately relocated Codex home.
+  const root = path.join(process.env.CODEPIT_CODEX_CONFIG_DIR || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
+  const candidates: ImportableAgentSession[] = [];
+  const files = codexTranscriptFiles(root);
+  for (const file of files) {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    let cached = codexMetaCache.get(file);
+    if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+      cached = { mtimeMs: stat.mtimeMs, size: stat.size, meta: readCodexTranscriptMeta(file) };
+      codexMetaCache.set(file, cached);
+    }
+    const meta = cached.meta;
+    if (!meta?.id || !isSafeImportedSessionId(meta.id) || bound.has(meta.id) || !meta.cwd || !sameWorkspace(meta.cwd, cwd)) continue;
+    cached.label ??= importPreview(lastCodexHumanPrompt(file), 'Codex conversation');
+    candidates.push({
+      id: meta.id,
+      agentId: 'codex',
+      label: cached.label,
+      updatedAt: stat.mtimeMs,
+      transcriptPath: file,
+    });
+  }
+  // Files that are gone do not stay cached
+  if (codexMetaCache.size > files.length) {
+    const present = new Set(files);
+    for (const file of codexMetaCache.keys()) if (!present.has(file)) codexMetaCache.delete(file);
+  }
+  return candidates.sort((a, b) => b.updatedAt - a.updatedAt);
+}
 
 const isSlashCommand = (text: string) => text.trim().startsWith('/');
 

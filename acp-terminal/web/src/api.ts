@@ -102,7 +102,12 @@ export const api = {
   getAgents: () => request<{ agents: AgentDescriptor[] }>('/api/agents'),
   getSessions: () => request<{ sessions: SessionSummary[] }>('/api/sessions'),
   getSession: (id: string) => request<{ session: AcpSession }>(`/api/sessions/${id}`),
-  createSession: (data: { agentId: string; cwd: string; title?: string; initialPrompt?: string; model?: string }) =>
+  getImportableAgentSessions: (agentId: string, cwd: string) =>
+    request<{
+      sessions: Array<{ id: string; agentId: string; label: string; updatedAt: number; transcriptPath?: string }>;
+      supportsManualId: boolean;
+    }>(`/api/agent-sessions/imports?agentId=${encodeURIComponent(agentId)}&cwd=${encodeURIComponent(cwd)}`),
+  createSession: (data: { agentId: string; cwd: string; title?: string; initialPrompt?: string; model?: string; importAgentSessionId?: string }) =>
     request<{ session: AcpSession }>('/api/sessions', {
       method: 'POST',
       body: JSON.stringify(data),

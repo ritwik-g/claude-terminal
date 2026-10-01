@@ -19,11 +19,12 @@ export interface SessionStatus {
 }
 
 /** Label and tone for a session's state, per the table in DESIGN.md. */
-export function sessionStatus(s: Pick<SessionSummary, 'state' | 'isAgentRunning' | 'compacting'>): SessionStatus {
+export function sessionStatus(s: Pick<SessionSummary, 'state' | 'isAgentRunning' | 'compacting' | 'workingInBackground'>): SessionStatus {
   if (s.compacting && s.state !== 'blocked') return { label: 'Compacting', tone: 'accent', pulse: true };
   if (s.isAgentRunning === false && s.state !== 'crashed' && s.state !== 'blocked') {
     return { label: 'Agent stopped', tone: 'neutral', pulse: false };
   }
+  if (s.workingInBackground && s.state === 'needs_you') return { label: 'Working in background', tone: 'accent', pulse: true };
   switch (s.state) {
     case 'blocked':
       return { label: 'Needs approval', tone: 'danger', pulse: false };
@@ -43,7 +44,10 @@ export function sessionStatus(s: Pick<SessionSummary, 'state' | 'isAgentRunning'
 }
 
 export const needsAttention = (s: SessionSummary) =>
-  s.state === 'blocked' || s.state === 'needs_you' || s.state === 'crashed';
+  s.state === 'blocked' || (s.state === 'needs_you' && !s.workingInBackground) || s.state === 'crashed';
+
+/** A turn is running, or work the agent started still runs after its turn ended. */
+export const isWorking = (s: SessionSummary) => s.state === 'working' || (s.state === 'needs_you' && Boolean(s.workingInBackground));
 
 /** Previews are one line of plain text; drop markdown markers. */
 export function plainText(md: string | undefined): string {
@@ -133,7 +137,7 @@ interface SidebarProps {
 
 const GROUPS: Array<{ id: string; label: string; test: (s: SessionSummary) => boolean }> = [
   { id: 'needs_you', label: 'Needs you', test: needsAttention },
-  { id: 'working', label: 'Working', test: (s) => s.state === 'working' },
+  { id: 'working', label: 'Working', test: isWorking },
   { id: 'parked', label: 'Parked', test: (s) => s.state === 'parked' },
   { id: 'quiet', label: 'Idle', test: (s) => s.state === 'quiet' },
   { id: 'snoozed', label: 'Snoozed', test: (s) => s.state === 'snoozed' },
@@ -178,7 +182,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const tabs: Array<{ id: FilterTab; label: string; test: (s: SessionSummary) => boolean }> = [
     { id: 'all', label: 'All', test: () => true },
     { id: 'needs_you', label: 'Needs you', test: needsAttention },
-    { id: 'active', label: 'Active', test: (s) => needsAttention(s) || s.state === 'working' },
+    { id: 'active', label: 'Active', test: (s) => needsAttention(s) || isWorking(s) },
     { id: 'cleanup', label: 'Cleanup', test: (s) => s.user.cleanup },
   ];
   const activeTab = tabs.find((t) => t.id === filterTab)!;

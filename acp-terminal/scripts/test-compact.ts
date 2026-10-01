@@ -90,6 +90,15 @@ await test('the old local-only compaction turn (role system) is no longer droppe
   assert.ok(!formatSessionHistory([other, user('u', 'x')]).includes('Switched model'));
 });
 
+await test('a cut catch-up says turns are left out; a whole one does not', () => {
+  const turns = Array.from({ length: 10 }, (_, i) => (i % 2 ? agent(`a${i}`, `ANSWER-${i}`) : user(`u${i}`, `QUESTION-${i}`)));
+  const cut = formatSessionHistory(turns, { catchUp: { by: ['Codex'] } });
+  assert.ok(cut.includes('the last 6 of the 10 turns since then (the 4 before them are left out)'), cut);
+  assert.ok(!cut.includes('QUESTION-0') && cut.includes('ANSWER-9'));
+  const whole = formatSessionHistory(turns.slice(-4), { catchUp: { by: ['Codex'] } });
+  assert.ok(whole.includes('These are the turns since then, while Codex handled'), whole);
+});
+
 await test('no turns and no summary gives nothing to hand off', () => {
   assert.equal(formatSessionHistory([]), '');
 });

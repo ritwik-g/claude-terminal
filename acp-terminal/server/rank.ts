@@ -22,6 +22,21 @@ const PRIORITY_BOOST = {
 const PINNED_BOOST = 10_000;
 const SNOOZED_PENALTY = -100_000;
 
+/** Background shells, workflows or async subagents still running after the turn ended. */
+export function hasRunningBackground(s: Pick<AcpSession, 'agentTasks' | 'turns'>): boolean {
+  if (s.agentTasks?.some((t) => t.status === 'running')) return true;
+  return Boolean(s.turns?.some((t) => t.toolCalls?.some((c) => c.background && (c.backgroundState ?? 'running') === 'running')));
+}
+
+/**
+ * The turn ended but work the agent started still runs, and the agent picks up again when it
+ * finishes: nothing is needed from the user yet. The state stays needs_you so a message is
+ * sent straight away rather than queued behind a turn.
+ */
+export function isWorkingInBackground(s: Pick<AcpSession, 'agentTasks' | 'turns'>, state: SessionState): boolean {
+  return state === 'needs_you' && hasRunningBackground(s);
+}
+
 export function deriveSessionState(session: Pick<AcpSession, 'pendingPermission' | 'turns' | 'git' | 'user' | 'state' | 'agentStopped'>): SessionState {
   // Check snooze first
   if (session.user?.snoozedUntil && session.user.snoozedUntil > Date.now()) {
@@ -144,8 +159,11 @@ export function rankSession(session: AcpSession): RankResult {
   const factors: RankFactor[] = [];
   const add = (label: string, points: number) => factors.push({ label, points });
 
-  const base = stateFactor(session, state);
-  add(base.label, (BASE_SCORE[state] ?? 0) + (state === 'snoozed' ? SNOOZED_PENALTY : 0));
+  const inBackground = isWorkingInBackground(session, state);
+  const base = inBackground
+    ? { label: 'Working in the background', sentence: 'Its turn ended, but work the agent started is still running; it carries on when that finishes.' }
+    : stateFactor(session, state);
+  add(base.label, (BASE_SCORE[inBackground ? 'working' : state] ?? 0) + (state === 'snoozed' ? SNOOZED_PENALTY : 0));
   const extra: string[] = [];
 
   if (session.user.pinned) {

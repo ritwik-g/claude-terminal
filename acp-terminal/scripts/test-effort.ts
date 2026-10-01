@@ -25,6 +25,7 @@ const {
   cachedAgentOptions,
   effortChoicesFor,
   markNewModels,
+  launchModelValue,
 } = await import('../server/acp/agent-options.js');
 const { normalizeClaudeModel } = await import('../server/acp/client-host.js');
 const { groupModels } = await import('../server/agents/antigravity-models.js');
@@ -127,6 +128,10 @@ function unitTests(): void {
   const haiku = parseAgentOptions(CLAUDE_OPTIONS.filter((o) => o.id !== 'effort'))!;
   check('a model without an effort option has no levels', haiku.efforts.length === 0 && !haiku.effortConfigId);
 
+  // Like claude-agent-acp after resuming a session on a pinned id it does not list
+  const pinned = parseAgentOptions([{ id: 'model', category: 'model', type: 'select', currentValue: 'claude-opus-4-6-20251101', options: [{ value: 'opus', name: 'Opus' }] }])!;
+  check('an unlisted current model is not added to the list', pinned.currentModel === 'claude-opus-4-6-20251101' && pinned.models.map((m) => m.value).join() === 'opus', pinned.models);
+
   console.log('1b. Approval modes, fast mode and new models');
   const withModes = parseAgentOptions([
     { id: 'mode', category: 'mode', type: 'select', currentValue: 'default', options: [
@@ -200,6 +205,20 @@ function unitTests(): void {
   check('cached under the reported id too', cachedAgentOptions('codex', 'gpt-6-luna') !== undefined);
   check('cache written to the app dir', fs.existsSync(path.join(testAppDir, 'agent-options.json')));
   check('the running session report wins', effortChoicesFor('claude', 'haiku', claude).length === 5);
+
+  console.log('5b. Which models go in through the launch config');
+  AGENT_REGISTRY.launchtest = { ...AGENT_REGISTRY.codex, id: 'launchtest', availableModels: ['6-luna'] };
+  const report = (current: string, values: string[]) => ({ efforts: [], models: values.map((value) => ({ value, label: value })), currentModel: current, updatedAt: 0 });
+  // An old report still lists gpt-6-luna; the agent has retired it since
+  rememberAgentOptions('launchtest', 'gpt-6-mini', report('gpt-6-mini', ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-mini']));
+  rememberAgentOptions('launchtest', 'gpt-6-sol', report('gpt-6-sol', ['gpt-6-sol', 'gpt-6-mini']));
+  // Like Codex: a custom model it ran is listed as its current one
+  rememberAgentOptions('launchtest', 'my-custom', report('my-custom', ['my-custom', 'gpt-6-sol', 'gpt-6-mini']));
+  check('a listed model is left to set_config_option', launchModelValue('launchtest', 'gpt-6-sol') === undefined);
+  check('so is one listed before and retired since', launchModelValue('launchtest', 'gpt-6-luna') === undefined);
+  check('and a registry id', launchModelValue('launchtest', '6-luna') === undefined);
+  check('a custom model it ran before goes in at launch', launchModelValue('launchtest', 'my-custom') === 'my-custom');
+  check('so does one it never ran', launchModelValue('launchtest', 'brand-new') === 'brand-new');
 
   console.log('6. Reconciling a stored effort with a new model');
   const s: any = { effort: 'xhigh', model: 'haiku', agentName: 'Claude', turns: [] };
@@ -365,7 +384,67 @@ async function liveTests(): Promise<void> {
   check('stored mode and fast mode applied at start', field(sixth, 'mode') === 'acceptEdits' && field(sixth, 'fast') === 'true', sixth);
   check('new process', field(sixth, 'pid') !== field(first, 'pid'));
 
+  await customModelTests(cwd);
   sessionManager.shutdown();
+}
+
+/** A model id the agent does not list: run through its launch config, or refused and said so. */
+async function customModelTests(cwd: string): Promise<void> {
+  const lastAgentTurn = (id: string) => [...sessionManager.getSession(id)!.turns].reverse().find((t) => t.role === 'agent');
+  const refusedNotes = (id: string) => sessionManager.getSession(id)!.turns.filter((t) => t.role === 'system' && /did not accept model/.test(t.content || ''));
+
+  console.log('11. A custom model the agent takes at launch sticks');
+  // Like Codex: unlisted models go in through the launch config env
+  AGENT_REGISTRY.efforttestcfg = { ...AGENT_REGISTRY.efforttest, id: 'efforttestcfg', name: 'Config test agent', modelConfigEnv: 'EFFORT_TEST_CONFIG' };
+  const cfg = await sessionManager.createSession({ agentId: 'efforttestcfg', cwd, model: 'custom-sol' });
+  const c1 = await ask(cfg.id, 'hello custom');
+  const cs1 = sessionManager.getSession(cfg.id)!;
+  check('the agent runs the custom model', field(c1, 'model') === 'custom-sol', c1);
+  check('reported as the current model', cs1.agentOptions?.currentModel === 'custom-sol' && cs1.agentOptions.models.some((m) => m.value === 'custom-sol'), cs1.agentOptions);
+  check('the turn is stamped with it', lastAgentTurn(cfg.id)?.model === 'custom-sol', lastAgentTurn(cfg.id)?.model);
+  check('no refusal note', refusedNotes(cfg.id).length === 0);
+  check('cached under the custom id', cachedAgentOptions('efforttestcfg', 'custom-sol')?.currentModel === 'custom-sol');
+  const c2 = await ask(cfg.id, 'second prompt');
+  check('still on it for the next prompt', field(c2, 'model') === 'custom-sol' && field(c2, 'pid') === field(c1, 'pid'), c2);
+  await sessionManager.stopSessionAgent(cfg.id);
+  const c3 = await ask(cfg.id, 'after restart');
+  check('and after a restart', field(c3, 'model') === 'custom-sol' && field(c3, 'pid') !== field(c1, 'pid'), c3);
+  check('the session keeps it', sessionManager.getSession(cfg.id)!.model === 'custom-sol' && sessionManager.getSession(cfg.id)!.agentOptions?.currentModel === 'custom-sol');
+  // A live switch the agent refuses restarts it with the model in its launch config
+  await sessionManager.setSessionAgent(cfg.id, 'efforttestcfg', 'big');
+  await sessionManager.setSessionAgent(cfg.id, 'efforttestcfg', 'custom-luna');
+  const c4 = await ask(cfg.id, 'switched to another custom one');
+  check('a live switch to an unlisted model goes through a restart', field(c4, 'model') === 'custom-luna', c4);
+  await sessionManager.setSessionAgent(cfg.id, 'efforttestcfg', 'big');
+  const c5 = await ask(cfg.id, 'back to a listed one');
+  check('a switch back to a listed one stays live', field(c5, 'model') === 'big' && field(c5, 'pid') === field(c4, 'pid'), { c4, c5 });
+  // That restart would cut off a running turn: refused until it ends
+  const slowCfg = sessionManager.sendPrompt(cfg.id, 'slow-turn please');
+  for (let i = 0; i < 100 && !sessionManager.isTurnInFlight(cfg.id); i++) await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, 200));
+  let busyError = '';
+  await sessionManager.setSessionAgent(cfg.id, 'efforttestcfg', 'custom-mid').catch((err) => (busyError = err.message));
+  check('a switch that needs a restart is refused while a turn runs', /current turn/.test(busyError) && sessionManager.isTurnInFlight(cfg.id), busyError);
+  check('the session keeps its model', sessionManager.getSession(cfg.id)!.model === 'big', sessionManager.getSession(cfg.id)!.model);
+  await sessionManager.cancelPrompt(cfg.id);
+  await slowCfg;
+  await waitForIdle(cfg.id);
+  const c6 = await ask(cfg.id, 'after the refused switch');
+  check('the turn was not cut off by a restart', field(c6, 'pid') === field(c5, 'pid') && field(c6, 'model') === 'big', c6);
+
+  console.log('12. A custom model the agent refuses is said once, and turns show what runs');
+  const ref = await sessionManager.createSession({ agentId: 'efforttest', cwd, model: 'custom-sol' });
+  const r1 = await ask(ref.id, 'hello refused');
+  const rs1 = sessionManager.getSession(ref.id)!;
+  check('the agent runs its own model', field(r1, 'model') === 'big', r1);
+  check('a note says so', refusedNotes(ref.id).length === 1 && /custom-sol.*running Big/.test(refusedNotes(ref.id)[0].content || ''), refusedNotes(ref.id));
+  check('the turn is stamped with the model that ran', lastAgentTurn(ref.id)?.model === 'big', lastAgentTurn(ref.id)?.model);
+  check('the choice is kept as the requested model', rs1.model === 'custom-sol', rs1.model);
+  await ask(ref.id, 'again');
+  await sessionManager.stopSessionAgent(ref.id);
+  await ask(ref.id, 'after restart');
+  check('the note is not repeated', refusedNotes(ref.id).length === 1, refusedNotes(ref.id).length);
+  check('later turns stamped with it too', lastAgentTurn(ref.id)?.model === 'big', lastAgentTurn(ref.id)?.model);
 }
 
 try {

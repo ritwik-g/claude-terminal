@@ -32,6 +32,8 @@ export const AgentSessionsPanel: React.FC<{
 }> = ({ session, focusedId, busy, onChanged }) => {
   const records = [...(session.agentSessions || [])].sort((a, b) => b.lastStartedAt - a.lastStartedAt);
   const continuing = session.agentResume?.sessionId;
+  // Set aside by a switch to another agent: switching back continues them
+  const parked = new Set((session.parkedAgentResumes || []).map((p) => p.sessionId));
   // A running agent's session is set aside too, even one the agent could not continue later
   const hasCurrent = Boolean(continuing || session.isAgentRunning);
   const [mode, setMode] = useState<HandoverMode>('compact');
@@ -97,6 +99,7 @@ export const AgentSessionsPanel: React.FC<{
                 record={r}
                 current={r.id === session.agentSessionId && Boolean(session.isAgentRunning)}
                 continues={r.id === continuing}
+                parked={parked.has(r.id)}
                 focused={r.id === focusedId}
                 ref={r.id === focusedId ? focusRef : undefined}
               />
@@ -110,15 +113,17 @@ export const AgentSessionsPanel: React.FC<{
 
 const AgentSessionRow = React.forwardRef<
   HTMLLIElement,
-  { record: AgentSessionRecord; current: boolean; continues: boolean; focused: boolean }
->(({ record: r, current, continues, focused }, ref) => {
+  { record: AgentSessionRecord; current: boolean; continues: boolean; parked: boolean; focused: boolean }
+>(({ record: r, current, continues, parked, focused }, ref) => {
   const rows: Array<{ label: string; node: React.ReactNode }> = [
     { label: 'Session id', node: <DetailValue value={r.id} /> },
     { label: 'Started', node: exactTime(r.startedAt) },
   ];
   if (r.resumes > 0) rows.push({ label: 'Last continued', node: exactTime(r.lastStartedAt) });
-  if (r.endedAt) rows.push({ label: 'Ended', node: `${exactTime(r.endedAt)}${r.endReason ? ` · ${r.endReason}` : ''}` });
-  else if (r.endReason) rows.push({ label: 'Ended', node: r.endReason });
+  // A set-aside session is only paused, so it does not read as ended
+  const endLabel = parked ? 'Set aside' : 'Ended';
+  if (r.endedAt) rows.push({ label: endLabel, node: `${exactTime(r.endedAt)}${r.endReason ? ` · ${r.endReason}` : ''}` });
+  else if (r.endReason) rows.push({ label: endLabel, node: r.endReason });
   if (r.replacedBecause) rows.push({ label: 'Replaced the previous one', node: r.replacedBecause });
   if (r.transcriptPath) rows.push({ label: 'Transcript', node: <DetailValue value={r.transcriptPath} /> });
 
@@ -136,6 +141,10 @@ const AgentSessionRow = React.forwardRef<
           ) : continues ? (
             <Badge tone="accent" title="Your next message continues this agent session">
               Continues next
+            </Badge>
+          ) : parked ? (
+            <Badge tone="info" title={`Switching back to ${shortName(r.agentName)} continues this agent session`}>
+              Kept for later
             </Badge>
           ) : (
             <Badge tone="neutral">Ended</Badge>

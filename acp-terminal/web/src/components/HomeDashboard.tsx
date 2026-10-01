@@ -2,7 +2,7 @@ import React from 'react';
 import type { AgentDescriptor, SessionSummary } from '../types';
 import { Badge, Button, EmptyState, Icon, Kbd, StatusDot } from '../ui';
 import { VendorIcon } from './VendorLogos';
-import { MOD_KEY, PriorityBadge, SessionMeta, needsAttention, relativeTime, sessionPreview, sessionStatus } from './Sidebar';
+import { MOD_KEY, PriorityBadge, SessionMeta, isWorking, needsAttention, relativeTime, sessionPreview, sessionStatus } from './Sidebar';
 
 interface HomeDashboardProps {
   sessions: SessionSummary[];
@@ -36,7 +36,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 
 export const HomeDashboard: React.FC<HomeDashboardProps> = ({ sessions, agents, onSelectSession, onNewSession, onOpenPalette }) => {
   const attention = sessions.filter(needsAttention);
-  const working = sessions.filter((s) => s.state === 'working');
+  const working = sessions.filter(isWorking);
   const recent = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 6);
   const firstRun = sessions.length === 0;
 

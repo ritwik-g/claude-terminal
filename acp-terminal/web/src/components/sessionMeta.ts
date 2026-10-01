@@ -28,11 +28,18 @@ const STATE_TONE: Record<string, Tone> = {
 /** The label, tone and pulse for a session's state dot. */
 export function sessionStateView(session: AcpSession): { label: string; tone: Tone; pulse: boolean } {
   if (session.isAgentRunning === false) return { label: 'Agent stopped', tone: 'neutral', pulse: false };
+  if (session.state === 'needs_you' && hasRunningBackground(session)) return { label: 'Working in background', tone: 'accent', pulse: true };
   return {
     label: STATE_LABEL[session.state] || session.state,
     tone: STATE_TONE[session.state] || 'neutral',
     pulse: session.state === 'working',
   };
+}
+
+/** Background shells, workflows or async subagents still running after the turn ended (as the server ranks it). */
+export function hasRunningBackground(session: Pick<AcpSession, 'agentTasks' | 'turns'>): boolean {
+  if (session.agentTasks?.some((t) => t.status === 'running')) return true;
+  return session.turns.some((t) => t.toolCalls?.some((c) => c.background && (c.backgroundState ?? 'running') === 'running'));
 }
 
 export function formatTime(ts: number): string {

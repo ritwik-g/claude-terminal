@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import { hasAgent, listAgents } from './agents/registry.js';
-import { AgentNotRunningError, InvalidOptionError, NothingToCompactError, QueuedPromptNotFoundError, sessionManager } from './acp/session-mgr.js';
+import { AgentNotRunningError, InvalidOptionError, NothingToCompactError, QueuedPromptNotFoundError, isSafeImportedSessionId, listImportableAgentSessions, sessionManager } from './acp/session-mgr.js';
 import { parseAutoCompact } from './compaction.js';
 import { TurnInFlightError } from './acp/client-host.js';
 import { searchSessions } from './search.js';
@@ -73,10 +73,34 @@ apiRouter.get('/sessions', (_req: Request, res: Response) => {
   res.json({ sessions: sessionManager.listSessions() });
 });
 
-// 3. Create a new session
+// 3. Discover conversations an agent can continue when creating a new CodePit session.
+// Claude and Codex have readable local transcript stores; other resume-capable agents can
+// still use a pasted session id, since their stores are intentionally not poked at.
+apiRouter.get('/agent-sessions/imports', (req: Request, res: Response) => {
+  const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : '';
+  const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : '';
+  if (!hasAgent(agentId) || !cwd) {
+    res.status(400).json({ error: 'agentId and cwd are required' });
+    return;
+  }
+  const targetCwd = path.resolve(cwd.replace(/^~/, os.homedir()));
+  let isDir = false;
+  try {
+    isDir = fs.statSync(targetCwd).isDirectory();
+  } catch {
+    // missing or unreadable
+  }
+  if (!isDir) {
+    res.status(400).json({ error: `Working directory does not exist: ${targetCwd}` });
+    return;
+  }
+  res.json({ sessions: listImportableAgentSessions(agentId, targetCwd), supportsManualId: agentId !== 'mock' });
+});
+
+// 4. Create a new session
 apiRouter.post('/sessions', async (req: Request, res: Response) => {
   try {
-    const { agentId, cwd, title, initialPrompt, model } = req.body;
+    const { agentId, cwd, title, initialPrompt, model, importAgentSessionId } = req.body;
     if (!agentId || !cwd) {
       res.status(400).json({ error: 'agentId and cwd are required' });
       return;
@@ -87,6 +111,10 @@ apiRouter.post('/sessions', async (req: Request, res: Response) => {
     }
     if (typeof cwd !== 'string') {
       res.status(400).json({ error: 'cwd must be a string' });
+      return;
+    }
+    if (importAgentSessionId !== undefined && (typeof importAgentSessionId !== 'string' || !isSafeImportedSessionId(importAgentSessionId.trim()))) {
+      res.status(400).json({ error: 'importAgentSessionId must be a valid agent session id' });
       return;
     }
     const targetCwd = path.resolve(cwd.replace(/^~/, os.homedir()));
@@ -106,6 +134,7 @@ apiRouter.post('/sessions', async (req: Request, res: Response) => {
       title,
       model,
       initialPrompt,
+      importAgentSessionId,
     });
     res.json({ session });
   } catch (err: any) {
@@ -674,4 +703,3 @@ function maskCredentials<T>(creds: T): T {
   }
   return out as T;
 }
-

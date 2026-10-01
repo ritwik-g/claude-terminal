@@ -9,9 +9,10 @@ import { ptyManager } from '../pty-manager.js';
 import { appEnv } from '../env.js';
 import type { AgentCommand, AgentDescriptor, AgentOptions, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
 import { appliesTo, listMcpServers, resolveSessionMcpServers } from '../mcp/config.js';
-import { effortToSend, parseAgentOptions, resolveModelValue } from './agent-options.js';
+import { effortToSend, launchModelValue, parseAgentOptions, resolveModelValue } from './agent-options.js';
 
-export function normalizeClaudeModel(model?: string): string {
+/** `fallback` is what an id with no known Claude family becomes (a custom id can pass through). */
+export function normalizeClaudeModel(model?: string, fallback = 'sonnet'): string {
   if (!model) return 'sonnet';
   const m = model.toLowerCase().trim();
   // Keep a context variant ("opus[1m]", "claude-sonnet-5-1m"): it picks the 1M window
@@ -28,7 +29,7 @@ export function normalizeClaudeModel(model?: string): string {
   if (m.includes('sonnet')) return 'sonnet';
   if (m.includes('haiku')) return 'haiku';
   if (m.includes('opus')) return 'opus';
-  return 'sonnet';
+  return fallback;
 }
 
 /**
@@ -135,6 +136,8 @@ export class AcpClientHost extends EventEmitter {
   public fastMode?: boolean;
   /** The agent's latest effort and model choices; null until it advertises any. */
   public options: AgentOptions | null = null;
+  /** Set when the agent refused the model at start: it runs options.currentModel instead. */
+  public modelRefused?: { model: string; reason: string };
   private holdOptions = false;
   /**
    * Subagents that report through their own ACP session (Codex, AIR nativeSubagentSessions),
@@ -252,6 +255,19 @@ export class AcpClientHost extends EventEmitter {
       env.OPENAI_MODEL = this.model;
       env.GEMINI_MODEL = this.model;
       env.MODEL = this.model;
+    }
+    const configEnv = this.agent.modelConfigEnv;
+    const launchModel = configEnv ? launchModelValue(this.agent.id, this.model) : undefined;
+    if (configEnv && launchModel) {
+      // Merged into any config already set there; an unreadable one is replaced
+      let config: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(env[configEnv] || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed;
+      } catch {
+        // not JSON
+      }
+      env[configEnv] = JSON.stringify({ ...config, model: launchModel });
     }
     // Effort goes through the agent's own config option after session/new, so it can
     // change without a restart. (A MAX_THINKING_TOKENS budget here would pin Claude's
@@ -627,15 +643,18 @@ export class AcpClientHost extends EventEmitter {
 
   private async applyStartOptions(): Promise<void> {
     // Apply model if specified: the advertised value it matches, else the id as stored
+    this.modelRefused = undefined;
     if (this.model) {
       const advertised = resolveModelValue(this.model, this.options?.models ?? []);
-      const modelToSend = advertised ?? (this.agent.id === 'claude' ? normalizeClaudeModel(this.model) : this.model);
+      const modelToSend = advertised ?? (this.agent.id === 'claude' ? normalizeClaudeModel(this.model, this.model) : this.model);
       if (modelToSend !== this.options?.currentModel) {
         try {
           await this.setConfigValue(this.options?.modelConfigId ?? 'model', modelToSend);
-        } catch (err) {
+        } catch (err: any) {
           if (err instanceof HostClosedError) throw err;
-          // Fallback gracefully if agent doesn't support session/setConfigOption
+          // An agent without a model option may lack session/setConfigOption; one with it refused
+          // the model and runs its own, which the session manager says in the conversation
+          if (this.options?.modelConfigId) this.modelRefused = { model: this.model, reason: err?.message || String(err) };
         }
       }
     }
@@ -731,9 +750,10 @@ export class AcpClientHost extends EventEmitter {
   async applyModel(model: string): Promise<string> {
     const opts = this.options;
     if (!opts?.modelConfigId) throw new Error(`${this.agent.name} cannot switch models while running`);
-    const value = resolveModelValue(model, opts.models) ?? (this.agent.id === 'claude' ? normalizeClaudeModel(model) : model);
+    const value = resolveModelValue(model, opts.models) ?? (this.agent.id === 'claude' ? normalizeClaudeModel(model, model) : model);
     await this.setConfigValue(opts.modelConfigId, value);
     this.model = model;
+    this.modelRefused = undefined;
     return value;
   }
 

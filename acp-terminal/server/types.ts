@@ -36,6 +36,11 @@ export interface AgentDescriptor {
   efforts?: ConfigChoice[];
   /** Ask the agent to run each subagent in a session of its own (AIR nativeSubagentSessions), so its work streams live. */
   nativeSubagentSessions?: boolean;
+  /**
+   * Env var holding a JSON config the agent merges at launch (Codex: CODEX_CONFIG). The model
+   * goes in there as `model`, since set_config_option only takes the models the agent lists.
+   */
+  modelConfigEnv?: string;
   /** What the agent last advertised per model (from the options cache), keyed by model id. */
   advertised?: Record<string, AgentOptions>;
 }
@@ -280,6 +285,18 @@ export interface AgentSessionRecord {
   transcriptPath?: string;
 }
 
+/** An agent session set aside when the conversation switched to another agent. */
+export interface ParkedAgentResume {
+  agentId: string;
+  agentName: string;
+  sessionId: string;
+  cwd: string;
+  savedAt: number;
+  parkedAt: number;
+  model?: string;
+  lastSeenTurnId?: string;
+}
+
 export interface AcpSession {
   id: string;
   agentId: string;
@@ -314,6 +331,17 @@ export interface AcpSession {
   agentSessionId?: string;
   /** The agent session to continue on the next start (ACP session/resume); absent means start fresh. */
   agentResume?: { agentId: string; sessionId: string; cwd: string; savedAt: number };
+  /**
+   * Other agents' sessions set aside by a switch to another agent, at most one per agent:
+   * switching back to that agent (same folder) continues it and catches it up on what it
+   * missed. `lastSeenTurnId` is the last turn it saw (absent when it saw none).
+   */
+  parkedAgentResumes?: ParkedAgentResume[];
+  /**
+   * The continued agent session saw the conversation up to and including this turn ('' for
+   * none): its handoff is only the turns since. Cleared once that handoff is sent.
+   */
+  catchUpAfterTurnId?: string;
   /** Every agent session that has served this conversation, oldest first. */
   agentSessions?: AgentSessionRecord[];
   /**
@@ -387,6 +415,8 @@ export interface SessionSummary {
   isAgentRunning?: boolean;
   /** A compaction is running (started here or by the agent). */
   compacting?: boolean;
+  /** The turn ended but subagents, workflows or background commands it started still run. */
+  workingInBackground?: boolean;
 }
 
 // ------------------------------------------------------------------ MCP

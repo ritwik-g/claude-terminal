@@ -8,6 +8,8 @@
  * `_session/steering`: a "slow-turn" prompt waits for a steered message and answers it.
  * With EFFORT_TEST_STATE_DIR set it keeps each session in a file there and offers
  * session/resume, so a new process can continue it; EFFORT_TEST_NO_STEER=1 turns steering off.
+ * Like Codex, set_config_option refuses a model it does not list, but a `model` in the
+ * EFFORT_TEST_CONFIG JSON (read at launch, as Codex reads CODEX_CONFIG) runs whatever it names.
  */
 import * as acp from '@agentclientprotocol/sdk';
 import { Readable, Writable } from 'node:stream';
@@ -17,6 +19,13 @@ import path from 'node:path';
 
 const STATE_DIR = process.env.EFFORT_TEST_STATE_DIR;
 const NO_STEER = process.env.EFFORT_TEST_NO_STEER === '1';
+const LAUNCH_MODEL: string | undefined = (() => {
+  try {
+    return JSON.parse(process.env.EFFORT_TEST_CONFIG || '{}').model;
+  } catch {
+    return undefined;
+  }
+})();
 
 const EFFORTS: Record<string, string[]> = {
   big: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -63,6 +72,8 @@ function configOptions(s: State) {
         { value: 'big', name: 'Big', description: 'The capable one' },
         { value: 'big[1m]', name: 'Big (1M context)', description: 'Big with a 1M window' },
         { value: 'small', name: 'Small', description: 'No effort setting' },
+        // Like Codex: a launch model it does not list is shown as the current one
+        ...(s.model in EFFORTS ? [] : [{ value: s.model, name: s.model }]),
       ],
     },
   ];
@@ -82,7 +93,7 @@ function configOptions(s: State) {
       ],
     });
   }
-  const levels = EFFORTS[s.model];
+  const levels = EFFORTS[s.model] ?? [];
   if (levels.length > 0) {
     options.push({
       id: 'effort',
@@ -110,7 +121,7 @@ async function main() {
       if (!STATE_DIR || !fs.existsSync(stateFile(sessionId))) throw acp.RequestError.resourceNotFound(sessionId);
       const saved = JSON.parse(fs.readFileSync(stateFile(sessionId), 'utf8')) as State;
       // Like both real adapters: the conversation comes back, the approval mode and fast mode do not
-      const s: State = { ...saved, mode: 'default', fast: false, resumed: true };
+      const s: State = { ...saved, ...(LAUNCH_MODEL ? { model: LAUNCH_MODEL } : {}), mode: 'default', fast: false, resumed: true };
       sessions.set(sessionId, s);
       return { configOptions: configOptions(s) };
     })
@@ -124,7 +135,7 @@ async function main() {
     })
     .onRequest('session/new', (ctx: any) => {
       const sessionId = crypto.randomUUID();
-      const s: State = { model: 'big', effort: 'default', mode: 'default', fast: false, prompts: [] };
+      const s: State = { model: LAUNCH_MODEL || 'big', effort: 'default', mode: 'default', fast: false, prompts: [] };
       sessions.set(sessionId, s);
       // Like Claude: the command list (skills included, plugin ones prefixed) follows the new session
       setTimeout(() => {
@@ -156,7 +167,7 @@ async function main() {
         if (value !== 'on' && value !== 'off') throw acp.RequestError.invalidParams();
         s.fast = value === 'on';
       } else if (configId === 'effort') {
-        if (value !== 'default' && !EFFORTS[s.model].includes(value)) throw acp.RequestError.invalidParams();
+        if (value !== 'default' && !(EFFORTS[s.model] ?? []).includes(value)) throw acp.RequestError.invalidParams();
         s.effort = value;
       } else {
         throw acp.RequestError.invalidParams();
