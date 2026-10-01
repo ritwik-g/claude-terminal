@@ -171,7 +171,7 @@ export function Segmented<T extends string>({
   );
 }
 
-/** A large selectable option with a title and description (radio semantics). */
+/** A large selectable option with a title and description (radio semantics, or checkbox with `multiple`). */
 export const ChoiceCard: React.FC<{
   selected: boolean;
   onSelect: () => void;
@@ -180,13 +180,15 @@ export const ChoiceCard: React.FC<{
   icon?: React.ReactNode;
   badge?: React.ReactNode;
   disabled?: boolean;
-}> = ({ selected, onSelect, title, description, icon, badge, disabled }) => (
+  /** One of several that can be picked together: a checkbox with a square mark. */
+  multiple?: boolean;
+}> = ({ selected, onSelect, title, description, icon, badge, disabled, multiple }) => (
   <button
     type="button"
-    role="radio"
+    role={multiple ? 'checkbox' : 'radio'}
     aria-checked={selected}
     disabled={disabled}
-    className={cx('ui-choice', selected && 'is-selected')}
+    className={cx('ui-choice', selected && 'is-selected', multiple && 'is-multiple')}
     onClick={onSelect}
   >
     {icon && <span className="ui-choice-icon">{icon}</span>}

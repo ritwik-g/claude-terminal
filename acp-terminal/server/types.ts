@@ -107,6 +107,76 @@ export interface PendingPermission {
   requestedAt: number;
 }
 
+/** A value the user gave in a form field: text or a choice, a number, a yes/no, or several choices. */
+export type ElicitationValue = string | number | boolean | string[];
+
+/** One choice of a single- or multi-select field. */
+export interface ElicitationOption {
+  /** What is sent back when it is picked (the schema's `const` or enum value). */
+  value: string;
+  title: string;
+  description?: string;
+  /** Extra content shown when the option has focus (Claude's AskUserQuestion `preview`, often markdown). */
+  preview?: string;
+}
+
+/**
+ * One field of a form the agent asked for (ACP elicitation/create, mode "form"), flattened from
+ * its JSON Schema property. A string field with `options` is a single select; an array field is
+ * a multi-select and always has `options`.
+ */
+export interface ElicitationField {
+  /** The property name; the answer goes under it. */
+  key: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array';
+  title?: string;
+  description?: string;
+  required: boolean;
+  default?: ElicitationValue;
+  options?: ElicitationOption[];
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  format?: 'email' | 'uri' | 'date' | 'date-time';
+  minimum?: number;
+  maximum?: number;
+  minItems?: number;
+  maxItems?: number;
+  /**
+   * Set on the free-text "Other" box that belongs to another field (Claude's and Codex's
+   * AskUserQuestion): the key of that field. Show it with that question, not on its own.
+   */
+  customAnswerFor?: string;
+  /** The answer is a secret (Codex `isSecret`): mask it while typing. */
+  secret?: boolean;
+}
+
+/** A form the agent is waiting for the user to fill in, or to skip. */
+export interface PendingElicitation {
+  requestId: string;
+  /** The tool call whose card records the question and answer in the conversation. */
+  toolCallId: string;
+  message: string;
+  /** The subagent asking, when it is not the main agent. */
+  subagent?: string;
+  fields: ElicitationField[];
+  requestedAt: number;
+}
+
+/** What was asked and how it was answered, kept on the tool call that asked it. */
+export interface ElicitationRecord {
+  requestId: string;
+  message: string;
+  fields: ElicitationField[];
+  /** accepted: submitted with `content`; declined: skipped; cancelled: withdrawn or stopped. */
+  status: 'pending' | 'accepted' | 'declined' | 'cancelled';
+  content?: Record<string, ElicitationValue>;
+  requestedAt: number;
+  resolvedAt?: number;
+}
+
+export type ElicitationAction = 'accept' | 'decline' | 'cancel';
+
 export interface ToolCallRecord {
   id: string;
   title: string;
@@ -145,6 +215,8 @@ export interface ToolCallRecord {
   agentOutputFile?: string;
   /** What the agent said about the subagent or workflow this call launched (ids, model, transcript). */
   agentRef?: Omit<TaskAudit, 'agentId' | 'agentName' | 'model' | 'agentSessionId'>;
+  /** A form the agent asked the user to fill in during this call, and the answer. */
+  elicitation?: ElicitationRecord;
 }
 
 /**
@@ -318,6 +390,8 @@ export interface AcpSession {
   git: GitInfo | null;
   user: UserAnnotations;
   pendingPermission: PendingPermission | null;
+  /** A form the agent is waiting on (e.g. Claude's AskUserQuestion); absent on older sessions. */
+  pendingElicitation?: PendingElicitation | null;
   turns: TurnMessage[];
   model?: string;
   effort?: ThinkingEffort;
@@ -410,6 +484,9 @@ export interface SessionSummary {
   user: UserAnnotations;
   hasPendingPermission: boolean;
   pendingPermissionTitle?: string;
+  /** The agent is waiting for the user to answer a form; the title is the form's message, on one line. */
+  hasPendingElicitation: boolean;
+  pendingElicitationTitle?: string;
   tokenCount: number;
   turnCount: number;
   isAgentRunning?: boolean;

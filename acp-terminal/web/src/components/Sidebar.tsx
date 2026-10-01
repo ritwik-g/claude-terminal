@@ -19,7 +19,10 @@ export interface SessionStatus {
 }
 
 /** Label and tone for a session's state, per the table in DESIGN.md. */
-export function sessionStatus(s: Pick<SessionSummary, 'state' | 'isAgentRunning' | 'compacting' | 'workingInBackground'>): SessionStatus {
+export function sessionStatus(
+  s: Pick<SessionSummary, 'state' | 'isAgentRunning' | 'compacting' | 'workingInBackground'> &
+    Partial<Pick<SessionSummary, 'hasPendingPermission' | 'hasPendingElicitation'>>
+): SessionStatus {
   if (s.compacting && s.state !== 'blocked') return { label: 'Compacting', tone: 'accent', pulse: true };
   if (s.isAgentRunning === false && s.state !== 'crashed' && s.state !== 'blocked') {
     return { label: 'Agent stopped', tone: 'neutral', pulse: false };
@@ -27,6 +30,8 @@ export function sessionStatus(s: Pick<SessionSummary, 'state' | 'isAgentRunning'
   if (s.workingInBackground && s.state === 'needs_you') return { label: 'Working in background', tone: 'accent', pulse: true };
   switch (s.state) {
     case 'blocked':
+      // Blocked on a question rather than an approval
+      if (s.hasPendingElicitation && !s.hasPendingPermission) return { label: 'Needs your answer', tone: 'danger', pulse: false };
       return { label: 'Needs approval', tone: 'danger', pulse: false };
     case 'needs_you':
       return { label: 'Your turn', tone: 'warn', pulse: false };
@@ -72,12 +77,18 @@ export const folderName = (cwd: string) => cwd.split('/').filter(Boolean).pop() 
 
 export const shortModel = (model?: string) => model?.replace(/^claude-/, '').replace(/^gemini-/, '');
 
-/** The line under a session's title: the pending approval, else the recap or last prompt. */
-export function sessionPreview(s: SessionSummary): { text: string; approval: boolean } {
+/**
+ * The line under a session's title: the pending approval or question, else the
+ * recap or last prompt. `approval` marks either kind of request; `question` the second.
+ */
+export function sessionPreview(s: SessionSummary): { text: string; approval: boolean; question: boolean } {
   if (s.hasPendingPermission && s.pendingPermissionTitle) {
-    return { text: `Approve: ${s.pendingPermissionTitle}`, approval: true };
+    return { text: `Approve: ${s.pendingPermissionTitle}`, approval: true, question: false };
   }
-  return { text: plainText(s.recap || s.lastPrompt), approval: false };
+  if (s.hasPendingElicitation && s.pendingElicitationTitle) {
+    return { text: `Answer: ${s.pendingElicitationTitle}`, approval: true, question: true };
+  }
+  return { text: plainText(s.recap || s.lastPrompt), approval: false, question: false };
 }
 
 const PRIORITY_TONE: Record<string, Tone> = { p0: 'danger', p1: 'warn', p2: 'neutral' };

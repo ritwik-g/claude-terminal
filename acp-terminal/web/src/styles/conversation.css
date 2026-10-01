@@ -328,6 +328,32 @@
 .tool-row-head:hover .tool-chevron { opacity: 1; }
 .tool-row.is-open > .tool-row-head .tool-chevron { transform: rotate(90deg); opacity: 1; }
 
+/* The answers given to a question the agent asked, shown without opening the row */
+.tool-answers {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px var(--space-3);
+  margin: 0;
+  padding: 0 var(--space-2) var(--space-2) 32px;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.tool-answer {
+  display: contents;
+}
+
+.tool-answer dt {
+  color: var(--text-3);
+}
+
+.tool-answer dd {
+  margin: 0;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .tool-row-body {
   display: flex;
   flex-direction: column;

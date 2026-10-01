@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import { hasAgent, listAgents } from './agents/registry.js';
-import { AgentNotRunningError, InvalidOptionError, NothingToCompactError, QueuedPromptNotFoundError, isSafeImportedSessionId, listImportableAgentSessions, sessionManager } from './acp/session-mgr.js';
+import { AgentNotRunningError, ElicitationAnswerError, InvalidOptionError, NothingToCompactError, QueuedPromptNotFoundError, isSafeImportedSessionId, listImportableAgentSessions, sessionManager } from './acp/session-mgr.js';
 import { parseAutoCompact } from './compaction.js';
 import { TurnInFlightError } from './acp/client-host.js';
 import { searchSessions } from './search.js';
@@ -274,6 +274,25 @@ apiRouter.post('/sessions/:id/permission', async (req: Request, res: Response) =
     res.json({ ok });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// 7b. Answer a form the agent asked for: accept with content, decline (skip it) or cancel
+apiRouter.post('/sessions/:id/elicitation', (req: Request, res: Response) => {
+  const { requestId, action, content } = req.body || {};
+  if (typeof requestId !== 'string' || !requestId) {
+    res.status(400).json({ error: 'requestId is required' });
+    return;
+  }
+  if (action !== 'accept' && action !== 'decline' && action !== 'cancel') {
+    res.status(400).json({ error: 'action must be accept, decline or cancel' });
+    return;
+  }
+  try {
+    sessionManager.resolveElicitation(sid(req), requestId, action, content);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(err instanceof ElicitationAnswerError ? err.status : 500).json({ error: err.message });
   }
 });
 

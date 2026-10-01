@@ -97,6 +97,63 @@ export interface PendingPermission {
   requestedAt: number;
 }
 
+/** Form elicitations the agent asks the user to fill in (see server/types.ts). */
+export type ElicitationValue = string | number | boolean | string[];
+
+export interface ElicitationOption {
+  /** What is sent back when it is picked. */
+  value: string;
+  title: string;
+  description?: string;
+  /** Shown when the option has focus (Claude's AskUserQuestion preview, often markdown). */
+  preview?: string;
+}
+
+/** A string field with `options` is a single select; an array field is a multi-select. */
+export interface ElicitationField {
+  key: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array';
+  title?: string;
+  description?: string;
+  required: boolean;
+  default?: ElicitationValue;
+  options?: ElicitationOption[];
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  format?: 'email' | 'uri' | 'date' | 'date-time';
+  minimum?: number;
+  maximum?: number;
+  minItems?: number;
+  maxItems?: number;
+  /** The free-text "Other" box of another field: that field's key. */
+  customAnswerFor?: string;
+  /** Mask the answer while typing. */
+  secret?: boolean;
+}
+
+export interface PendingElicitation {
+  requestId: string;
+  /** The tool call whose card records the question and answer. */
+  toolCallId: string;
+  message: string;
+  subagent?: string;
+  fields: ElicitationField[];
+  requestedAt: number;
+}
+
+export interface ElicitationRecord {
+  requestId: string;
+  message: string;
+  fields: ElicitationField[];
+  status: 'pending' | 'accepted' | 'declined' | 'cancelled';
+  content?: Record<string, ElicitationValue>;
+  requestedAt: number;
+  resolvedAt?: number;
+}
+
+export type ElicitationAction = 'accept' | 'decline' | 'cancel';
+
 export interface ToolCallRecord {
   id: string;
   title: string;
@@ -123,6 +180,8 @@ export interface ToolCallRecord {
   backgroundEndedAt?: number;
   /** Set on calls made inside a subagent or workflow: the id of that AgentTask. */
   agentTaskId?: string;
+  /** A form the agent asked the user to fill in during this call, and the answer. */
+  elicitation?: ElicitationRecord;
 }
 
 /** Chronological parts of an agent turn (see server/types.ts). */
@@ -275,6 +334,7 @@ export interface AcpSession {
   git: GitInfo | null;
   user: UserAnnotations;
   pendingPermission: PendingPermission | null;
+  pendingElicitation?: PendingElicitation | null;
   turns: TurnMessage[];
   model?: string;
   effort?: ThinkingEffort;
@@ -355,6 +415,8 @@ export interface SessionSummary {
   user: UserAnnotations;
   hasPendingPermission: boolean;
   pendingPermissionTitle?: string;
+  hasPendingElicitation: boolean;
+  pendingElicitationTitle?: string;
   tokenCount: number;
   turnCount: number;
   isAgentRunning?: boolean;

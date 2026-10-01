@@ -17,10 +17,15 @@ class MockAcpAgent {
   private sessions = new Map<string, SessionData>();
   /** The client takes subagent sessions (AIR nativeSubagentSessions), as Codex's adapter checks. */
   private subagentSessions = false;
+  /** The client draws forms (ACP elicitation, form mode), as Claude's adapter checks before AskUserQuestion. */
+  private forms = false;
+  private clientCapabilities: unknown = null;
 
   async initialize(params: any) {
     const air = params?.clientCapabilities?._meta?.jetbrains?.air;
     this.subagentSessions = Array.isArray(air?.capabilities) && air.capabilities.includes('nativeSubagentSessions');
+    this.forms = params?.clientCapabilities?.elicitation?.form != null;
+    this.clientCapabilities = params?.clientCapabilities ?? null;
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
@@ -146,6 +151,100 @@ class MockAcpAgent {
       await send({ sessionUpdate: 'subagent_state_update', subagentSessionId: explorer, state: 'completed' });
       await say('The subagent found 3 config files.');
       return { stopReason: 'end_turn' as const };
+    }
+
+    // "client capabilities" reports what the client advertised at initialize
+    if (/\bclient capabilities\b/.test(lower)) {
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Client capabilities: ${JSON.stringify(this.clientCapabilities)}` } },
+      });
+      return { stopReason: 'end_turn' as const };
+    }
+
+    // "ask me" asks a form the way Claude's AskUserQuestion does (a single select with its own
+    // "Other" box, a multi-select), plus a required free-text field, and says what came back.
+    // "ask me plainly" asks without a tool call, as an MCP server's elicitation would;
+    // "ask me quickly" takes the question back after a moment, as Codex's answer timer does.
+    if (/\bask me\b/.test(lower)) {
+      const send = (update: Record<string, unknown>) => cx.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update });
+      const say = (text: string) => send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+      if (!this.forms) {
+        await say('This client cannot show forms, so I will ask in chat instead.');
+        return { stopReason: 'end_turn' as const };
+      }
+      const toolCallId = /\bplainly\b/.test(lower) ? undefined : `call-ask-${crypto.randomUUID().slice(0, 8)}`;
+      if (toolCallId) {
+        await send({
+          sessionUpdate: 'tool_call',
+          toolCallId,
+          title: 'AskUserQuestion',
+          kind: 'other',
+          status: 'pending',
+          rawInput: { questions: [{ question: 'Which database should I use?', header: 'Database' }, { question: 'Which features should I build?', header: 'Features', multiSelect: true }] },
+          _meta: { claudeCode: { toolName: 'AskUserQuestion' } },
+        });
+      }
+      const timer = new AbortController();
+      if (/\bquickly\b/.test(lower)) setTimeout(() => timer.abort(), 300);
+      const res = await cx.request(acp.methods.client.elicitation.create, {
+        mode: 'form',
+        sessionId: params.sessionId,
+        ...(toolCallId ? { toolCallId } : {}),
+        message: 'Please answer the following questions.',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            question_0: {
+              type: 'string',
+              title: 'Database',
+              description: 'Which database should I use?',
+              oneOf: [
+                { const: 'Postgres', title: 'Postgres', description: 'Relational, the safe default' },
+                { const: 'SQLite', title: 'SQLite', description: 'One file, no server', _meta: { '_claude/askUserQuestionOption': { preview: '```sql\nCREATE TABLE notes (id INTEGER PRIMARY KEY);\n```' } } },
+              ],
+            },
+            question_0_custom: {
+              type: 'string',
+              title: 'Other',
+              description: 'Type your own answer, or add a note to the option you chose above (optional).',
+              _meta: { _askUserQuestionCustomAnswer: { questionId: 'question_0', isCustomAnswer: true } },
+            },
+            question_1: {
+              type: 'array',
+              title: 'Features',
+              description: 'Which features should I build?',
+              items: { anyOf: [{ const: 'Auth', title: 'Auth' }, { const: 'Search', title: 'Search' }, { const: 'Export', title: 'Export' }] },
+            },
+            name: { type: 'string', title: 'Project name', description: 'What should the project be called?', minLength: 2, maxLength: 40 },
+          },
+          required: ['question_0', 'name'],
+        },
+      }, { cancellationSignal: timer.signal }).catch((err: unknown) => {
+        if (timer.signal.aborted) return null;
+        throw err;
+      });
+      // The client may still answer the withdrawn request (with cancel) before it is dropped
+      if (res === null || timer.signal.aborted) {
+        await say('No answer in time, so I went with the defaults.');
+        return { stopReason: 'end_turn' as const };
+      }
+      if (res?.action === 'accept') {
+        const c = (res.content ?? {}) as Record<string, unknown>;
+        const features = Array.isArray(c.question_1) && c.question_1.length ? c.question_1.join(', ') : 'none';
+        const other = typeof c.question_0_custom === 'string' ? `; note=${c.question_0_custom}` : '';
+        if (toolCallId) await send({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', rawOutput: { answers: c } });
+        await say(`You answered: database=${c.question_0}; features=${features}; name=${c.name}${other}`);
+        return { stopReason: 'end_turn' as const };
+      }
+      if (res?.action === 'decline') {
+        if (toolCallId) await send({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', rawOutput: { answers: {} } });
+        await say('You skipped the questions.');
+        return { stopReason: 'end_turn' as const };
+      }
+      if (toolCallId) await send({ sessionUpdate: 'tool_call_update', toolCallId, status: 'failed', rawOutput: { error: 'Tool use aborted' } });
+      await say('The question was cancelled.');
+      return { stopReason: 'cancelled' as const };
     }
 
     // "mcp" lists the MCP servers this session was given, so the app's injection can be checked

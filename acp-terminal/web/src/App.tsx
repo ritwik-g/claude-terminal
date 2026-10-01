@@ -233,7 +233,7 @@ export const App: React.FC = () => {
             fetchSessions();
           }
         }
-      } else if (msg.type === 'permissionRequested' || msg.type === 'permissionResolved') {
+      } else if (['permissionRequested', 'permissionResolved', 'elicitationRequested', 'elicitationResolved'].includes(msg.type)) {
         if (selectedId && msg.sessionId === selectedId) {
           fetchSessionDetail(selectedId);
           fetchSessions();

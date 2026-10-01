@@ -88,6 +88,16 @@ export function setupWebSockets(): (server: Server) => void {
     }
   });
 
+  // Forms the agent asks the user to fill in, relayed like approvals
+  for (const type of ['elicitationRequested', 'elicitationResolved']) {
+    sessionManager.on(type, (payload) => {
+      const msg = JSON.stringify({ type, ...payload });
+      for (const ws of sessionClients) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+      }
+    });
+  }
+
   wss.on('connection', (ws: WebSocket, _req: IncomingMessage, url: URL) => {
     const pathname = url.pathname;
 

@@ -97,7 +97,12 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({ sessions, agents, 
               {attention.map((s) => {
                 // Lead with why the session needs the user; a stopped agent is a
                 // secondary note, not the reason it's listed here.
-                const status = sessionStatus({ state: s.state, isAgentRunning: true });
+                const status = sessionStatus({
+                  state: s.state,
+                  isAgentRunning: true,
+                  hasPendingPermission: s.hasPendingPermission,
+                  hasPendingElicitation: s.hasPendingElicitation,
+                });
                 const stopped = sessionStatus(s).label === 'Agent stopped';
                 const preview = sessionPreview(s);
                 return (
@@ -110,8 +115,8 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({ sessions, agents, 
                       <Badge tone={status.tone}>{status.label}</Badge>
                     </span>
                     {preview.text && (
-                      <span className={`home-attn-preview ${preview.approval ? 'is-approval' : ''}`}>
-                        {preview.approval && <Icon name="shield" size={13} />}
+                      <span className={`home-attn-preview ${preview.approval ? 'is-approval' : ''} ${preview.question ? 'is-question' : ''}`}>
+                        {preview.approval && <Icon name={preview.question ? 'help' : 'shield'} size={13} />}
                         <span className="home-attn-preview-text">{preview.text}</span>
                       </span>
                     )}
@@ -119,7 +124,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({ sessions, agents, 
                       <SessionMeta session={s} />
                       <span className="home-time">{relativeTime(s.updatedAt)}</span>
                       <span className="home-attn-open">
-                        {preview.approval ? 'Review' : 'Open'}
+                        {preview.question ? 'Answer' : preview.approval ? 'Review' : 'Open'}
                         <Icon name="arrowRight" size={13} />
                       </span>
                     </span>

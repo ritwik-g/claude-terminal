@@ -7,7 +7,8 @@ import { store } from '../store.js';
 import { getGitInfo } from '../git.js';
 import { hasRunningBackground, isWorkingInBackground, rankSession, sortSessions } from '../rank.js';
 import { getAgent, hasAgent, listAgents } from '../agents/registry.js';
-import { AcpClientHost, HostClosedError, TurnInFlightError, capToolOutput, normalizeClaudeModel, type ChunkMeta, type CompactionEvent } from './client-host.js';
+import { AcpClientHost, HostClosedError, TurnInFlightError, capToolOutput, normalizeClaudeModel, type ChunkMeta, type CompactionEvent, type ElicitationOutcome } from './client-host.js';
+import { describeElicitationAnswer, validateElicitationContent } from './elicitation.js';
 import { HANDOFF_SUMMARY_PROMPT, autoCompactDecision, capSummary, contextWindowFor, latestCompaction, readAutoCompactDefault, writeAutoCompactDefault } from '../compaction.js';
 import { ptyManager } from '../pty-manager.js';
 import { getUploadsDir } from '../paths.js';
@@ -16,7 +17,7 @@ import { cachedAgentOptions, effortChoicesFor, effortLabel, markNewModels, remem
 import { logQueueEvent } from '../queue-log.js';
 import { appendSubagentText, completeAsyncSubagent, endAgentTasks, stopAgentTask, stopTranscriptWatchers, syncAgentTasks, trackAsyncTask, trackTaskText, trackToolCall, trackToolCallUpdate, watchSubagentTranscript } from './agent-tasks.js';
 import { AUTO_EFFORT } from '../types.js';
-import type { AcpSession, ParkedAgentResume, AgentCommand, TaskAudit, AutoCompactSetting, CompactionRecord, AgentOptions, AgentTask, AgentTaskTextDelta, AsyncTaskUpdate, QueuedPrompt, ContextTransferMode, FileAttachment, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
+import type { AcpSession, ParkedAgentResume, AgentCommand, TaskAudit, AutoCompactSetting, CompactionRecord, AgentOptions, AgentTask, AgentTaskTextDelta, AsyncTaskUpdate, QueuedPrompt, ContextTransferMode, ElicitationAction, ElicitationRecord, FileAttachment, PendingElicitation, PendingPermission, PlanEntry, SessionSummary, ThinkingEffort, ToolCallRecord, TurnMessage, UserAnnotations } from '../types.js';
 
 /**
  * Format conversation history into a structured briefing block for context transfer.
@@ -155,6 +156,13 @@ export class NothingToCompactError extends Error {
 }
 
 export class InvalidOptionError extends Error {}
+
+/** An answer to a form that cannot be taken; `status` is the HTTP status that says why. */
+export class ElicitationAnswerError extends Error {
+  constructor(message: string, public readonly status: 400 | 404 | 409) {
+    super(message);
+  }
+}
 
 export class AgentNotRunningError extends Error {
   constructor() {
@@ -306,9 +314,8 @@ export class SessionManager extends EventEmitter {
         session.state = 'needs_you';
         sessionChanged = true;
       }
-      // No agent survives a server restart, so a stored approval request can never be answered
-      if (session.pendingPermission && !host) {
-        session.pendingPermission = null;
+      // No agent survives a server restart, so a stored approval request or form can never be answered
+      if (!host && clearPendingRequests(session)) {
         sessionChanged = true;
       }
       if (!host && endBackgroundWork(session, 'Stopped when the server restarted')) {
@@ -424,6 +431,8 @@ export class SessionManager extends EventEmitter {
       user: s.user,
       hasPendingPermission: Boolean(s.pendingPermission),
       pendingPermissionTitle: s.pendingPermission?.title,
+      hasPendingElicitation: Boolean(s.pendingElicitation),
+      pendingElicitationTitle: s.pendingElicitation ? oneLine(s.pendingElicitation.message) : undefined,
       tokenCount: s.usage.contextTokens || (s.usage.inputTokens + s.usage.outputTokens),
       turnCount: s.turns.length,
       model: s.model || getAgent(s.agentId)?.defaultModel,
@@ -889,6 +898,55 @@ export class SessionManager extends EventEmitter {
       this.emit('sessionsUpdated', this.listSessions());
     });
 
+    host.on('elicitationRequested', (asked: PendingElicitation) => {
+      const s = store.get(session.id);
+      if (!s) return;
+      const record: ElicitationRecord = { requestId: asked.requestId, message: asked.message, fields: asked.fields, status: 'pending', requestedAt: asked.requestedAt };
+      // The question goes on the call that asked it (Claude's AskUserQuestion), else on a card of its own
+      let owner = findToolCall(s, asked.toolCallId);
+      const e = owner ? asked : { ...asked, toolCallId: `elicitation:${asked.requestId}` };
+      s.pendingElicitation = e;
+      s.state = 'blocked';
+      if (owner) {
+        owner.call.elicitation = record;
+      } else {
+        const turn = ensureAgentTurn(s);
+        const call: ToolCallRecord = {
+          id: e.toolCallId,
+          title: oneLine(e.message) || 'Question',
+          kind: 'other',
+          toolName: 'Question',
+          status: 'pending',
+          startedAt: e.requestedAt,
+          elicitation: record,
+        };
+        turn.toolCalls = turn.toolCalls || [];
+        turn.toolCalls.push(call);
+        turn.segments = turn.segments || [];
+        turn.segments.push({ kind: 'tool', id: `seg-${call.id}`, toolCallId: call.id });
+        owner = { turn, call };
+      }
+      store.save(s);
+      // Not 'toolCall': that event marks the session working, and it is waiting on the user
+      this.emit('sessionStream', { sessionId: s.id, type: 'elicitation', toolCall: owner.call, turn: owner.turn, session: { pendingElicitation: e, state: s.state } });
+      this.emit('elicitationRequested', { sessionId: s.id, elicitation: e });
+      this.emit('sessionsUpdated', this.listSessions());
+    });
+
+    host.on('elicitationResolved', (requestId: string, outcome: ElicitationOutcome) => {
+      const s = store.get(session.id);
+      if (!s) return;
+      if (s.pendingElicitation?.requestId === requestId) s.pendingElicitation = null;
+      // Answered, or withdrawn by the agent, the turn carries on; a cancel from here ends it
+      if ((outcome.action !== 'cancel' || outcome.withdrawn) && host.isTurnInFlight) s.state = 'working';
+      const owner = findElicitationCall(s, requestId);
+      if (owner) settleElicitationRecord(owner.call, outcome);
+      store.save(s);
+      if (owner) this.emit('sessionStream', { sessionId: s.id, type: 'elicitation', toolCall: owner.call, turn: owner.turn, session: { pendingElicitation: s.pendingElicitation ?? null, state: s.state } });
+      this.emit('elicitationResolved', { sessionId: s.id, requestId, action: outcome.action });
+      this.emit('sessionsUpdated', this.listSessions());
+    });
+
     host.on('turnCompleted', () => {
       const s = store.get(session.id);
       if (!s) return;
@@ -944,7 +1002,9 @@ export class SessionManager extends EventEmitter {
         return;
       }
       s.state = 'needs_you';
-      s.pendingPermission = null;
+      // The agent may outlive its failed turn: answer what it still waits on, not just the record
+      host.cancelPendingRequests();
+      clearPendingRequests(s);
       if (!activeAgentTurn) {
         activeAgentTurn = {
           id: `msg-${Date.now()}`,
@@ -999,9 +1059,9 @@ export class SessionManager extends EventEmitter {
       this.settleAgentCompactions(session.id, 'Stopped when the agent exited');
       this.settleBackgroundWork(session.id, 'Stopped when the agent exited');
       const s = store.get(session.id);
-      if (s && (s.state === 'working' || s.state === 'blocked' || s.pendingPermission)) {
+      if (s && (s.state === 'working' || s.state === 'blocked' || s.pendingPermission || s.pendingElicitation)) {
         s.state = 'needs_you';
-        s.pendingPermission = null;
+        clearPendingRequests(s);
         store.save(s);
         this.emit('sessionStream', { sessionId: s.id, type: 'turnCompleted' });
         this.emit('sessionsUpdated', this.listSessions());
@@ -1287,6 +1347,23 @@ export class SessionManager extends EventEmitter {
     return host.resolvePermission(optionId);
   }
 
+  /**
+   * Answer the form the agent is waiting on: accept with the user's answers (checked against
+   * the form first), decline to skip it, or cancel.
+   */
+  resolveElicitation(sessionId: string, requestId: string, action: ElicitationAction, content?: unknown): void {
+    if (!store.get(sessionId)) throw new ElicitationAnswerError(`Session ${sessionId} not found`, 404);
+    const pending = this.activeHosts.get(sessionId)?.pendingElicitation;
+    if (!pending || pending.requestId !== requestId) throw new ElicitationAnswerError('That question was already answered or withdrawn', 409);
+    let answer: ElicitationOutcome = { action };
+    if (action === 'accept') {
+      const checked = validateElicitationContent(pending.fields, content);
+      if (!checked.ok) throw new ElicitationAnswerError(checked.error, 400);
+      answer = { action, content: checked.content };
+    }
+    this.activeHosts.get(sessionId)!.resolveElicitation(requestId, answer);
+  }
+
   async cancelPrompt(sessionId: string): Promise<void> {
     // Let go of the turn before waiting on the agent: one that still ends cleanly (the agent
     // missed the cancel) must not start the next queued message, and once the wait is over
@@ -1302,7 +1379,7 @@ export class SessionManager extends EventEmitter {
     const session = store.get(sessionId);
     if (session) {
       session.state = 'needs_you';
-      session.pendingPermission = null;
+      clearPendingRequests(session);
       store.save(session);
       this.emit('sessionStream', { sessionId: session.id, type: 'turnCompleted', session });
       this.emit('sessionsUpdated', this.listSessions());
@@ -1327,7 +1404,7 @@ export class SessionManager extends EventEmitter {
 
     session.state = 'parked';
     session.agentStopped = true;
-    session.pendingPermission = null;
+    clearPendingRequests(session);
     session.activeTerminalId = undefined;
     session.isAgentRunning = false;
     session.updatedAt = Date.now();
@@ -1464,8 +1541,8 @@ export class SessionManager extends EventEmitter {
     // Reset crashed, blocked, or working state since old host is shutdown
     if (session.state === 'crashed' || session.state === 'blocked' || session.state === 'working') {
       session.state = 'needs_you';
-      session.pendingPermission = null;
     }
+    clearPendingRequests(session);
 
     // A level the new model is known not to offer falls back to Auto (the agent's report settles unknown models)
     const effortNote = session.agentOptions ? reconcileEffort(session, session.agentOptions) : null;
@@ -1645,6 +1722,8 @@ export class SessionManager extends EventEmitter {
     }
     this.dropHost(sessionId, 'Set aside for a fresh agent session');
     ptyManager.release(`session-term-${sessionId}`);
+    // A form or approval from work outside a turn died with the agent
+    if (clearPendingRequests(session) && session.state === 'blocked') session.state = 'needs_you';
     dropAgentResume(session, 'Set aside for a fresh agent session');
     delete session.catchUpAfterTurnId;
     session.skipClaudeAdoption = true;
@@ -1871,6 +1950,8 @@ export class SessionManager extends EventEmitter {
       // The old agent session still holds everything the summary replaces: never continue it
       this.dropHost(sessionId, 'Replaced by a summary (compaction)');
       dropAgentResume(s, 'Replaced by a summary (compaction)');
+      // Nothing is left to answer a form or approval the old agent was waiting on
+      if (clearPendingRequests(s) && s.state === 'blocked') s.state = 'needs_you';
       // The new agent session gets the whole conversation (the summary), not a catch-up
       delete s.catchUpAfterTurnId;
       s.contextHandoffPending = true;
@@ -1961,7 +2042,7 @@ export class SessionManager extends EventEmitter {
       stopReason,
       queuedCount: s.queuedPrompts?.length ?? 0,
       backgroundRunning: hasRunningBackground(s),
-      pendingPermission: Boolean(s.pendingPermission),
+      pendingPermission: Boolean(s.pendingPermission || s.pendingElicitation),
       contextTokens: s.usage.contextTokens,
       contextWindow: contextWindowFor(s),
     });
@@ -2146,7 +2227,7 @@ export class SessionManager extends EventEmitter {
       : '';
 
     session.state = 'needs_you';
-    session.pendingPermission = null;
+    clearPendingRequests(session);
     session.activeTerminalId = undefined;
     session.updatedAt = Date.now();
 
@@ -2306,6 +2387,53 @@ function findToolCall(s: AcpSession, toolCallId: string): { turn: TurnMessage; c
     if (call) return { turn, call };
   }
   return null;
+}
+
+function findElicitationCall(s: AcpSession, requestId: string): { turn: TurnMessage; call: ToolCallRecord } | null {
+  for (const turn of s.turns) {
+    const call = turn.toolCalls?.find((c) => c.elicitation?.requestId === requestId);
+    if (call) return { turn, call };
+  }
+  return null;
+}
+
+const oneLine = (text: string) => {
+  const line = text.trim().replace(/\s+/g, ' ');
+  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+};
+
+/** Record how a form ended on its card. A card of its own also ends as a call, with the answer as its output. */
+function settleElicitationRecord(call: ToolCallRecord, outcome: ElicitationOutcome): void {
+  const rec = call.elicitation;
+  if (!rec || rec.status !== 'pending') return;
+  rec.status = outcome.action === 'accept' ? 'accepted' : outcome.action === 'decline' ? 'declined' : 'cancelled';
+  rec.resolvedAt = Date.now();
+  const content = outcome.action === 'accept' ? outcome.content ?? {} : undefined;
+  // A secret answer goes to the agent but is not kept in the session file
+  if (content) rec.content = Object.fromEntries(Object.entries(content).filter(([key]) => !rec.fields.some((f) => f.key === key && f.secret)));
+  // The agent's own call (AskUserQuestion) reports its own result
+  if (!call.id.startsWith('elicitation:')) return;
+  call.output = content ? describeElicitationAnswer(rec.fields, content) : outcome.action === 'decline' ? 'Skipped' : outcome.withdrawn ? 'Withdrawn by the agent' : 'Cancelled';
+  call.status = outcome.action === 'cancel' ? 'failed' : 'completed';
+  call.completedAt = rec.resolvedAt;
+}
+
+/**
+ * Drop the approval request and form waiting on the user, for when the turn or the agent is
+ * gone and no answer can reach it. True when there was anything to drop.
+ */
+function clearPendingRequests(s: AcpSession): boolean {
+  let changed = Boolean(s.pendingPermission || s.pendingElicitation);
+  s.pendingPermission = null;
+  s.pendingElicitation = null;
+  for (const turn of s.turns) {
+    for (const call of turn.toolCalls || []) {
+      if (call.elicitation?.status !== 'pending') continue;
+      settleElicitationRecord(call, { action: 'cancel' });
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 /** Write a prompt's attachments under the session's uploads, as the transcript records them. */

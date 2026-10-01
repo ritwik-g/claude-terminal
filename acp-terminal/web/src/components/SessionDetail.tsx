@@ -12,6 +12,7 @@ import { advertisedModelLabel, effortLabel, sessionEffortChoices } from '../effo
 import type { MenuItem } from './Menu';
 import { SessionHeader, SessionTabsBar, type WorkspaceTab } from './SessionHeader';
 import { ApprovalBanner } from './ApprovalBanner';
+import { ElicitationCard } from './ElicitationCard';
 import { ConversationView, type RollbackAction } from './ConversationView';
 import { Composer } from './Composer';
 import { MobileActionSheet } from './MobileActionSheet';
@@ -98,7 +99,7 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
     -1
   );
   const hasNewToCompact = session.turns.slice(compactBoundary + 1).some((t) => t.role === 'agent');
-  const turnBusy = session.state === 'working' || Boolean(session.pendingPermission);
+  const turnBusy = session.state === 'working' || Boolean(session.pendingPermission || session.pendingElicitation);
   const canCompact = hasNewToCompact && !turnBusy;
   const compactBlockedReason = compacting
     ? 'Already compacting'
@@ -403,12 +404,22 @@ export const SessionDetail: React.FC<SessionDetailProps> = ({
         onRefresh={onRefresh}
         onOpenSwitchModal={onOpenSwitchModal}
         above={
-          session.pendingPermission && (
+          // An approval and a form can both be waiting (e.g. from two subagents): the approval shows first
+          session.pendingPermission ? (
             <ApprovalBanner
               permission={session.pendingPermission}
               onResolve={handleResolvePermission}
               onApproveAndAutoApprove={handleApproveAndAutoApprove}
             />
+          ) : (
+            session.pendingElicitation && (
+              <ElicitationCard
+                key={session.pendingElicitation.requestId}
+                sessionId={session.id}
+                elicitation={session.pendingElicitation}
+                onAnswered={onRefresh}
+              />
+            )
           )
         }
       />

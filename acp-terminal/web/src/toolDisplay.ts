@@ -41,6 +41,7 @@ const VERB_TENSE: Record<string, { pending: string; running: string }> = {
   Searched: { pending: 'Search', running: 'Searching' },
   'Searched the web': { pending: 'Search the web', running: 'Searching the web' },
   Fetched: { pending: 'Fetch', running: 'Fetching' },
+  Asked: { pending: 'Asking', running: 'Asking' },
 };
 
 /** `interrupted`: the call was cut off, so it reads as never having run ("Run", not "Running"). */
@@ -57,6 +58,10 @@ function describeToolDone(call: ToolCallRecord): ToolDescription {
   const name = call.toolName || '';
   const path: string | undefined = input.file_path || input.path || input.notebook_path;
 
+  // A question for the user: Claude's AskUserQuestion, or a form card of its own
+  if (call.elicitation || name === 'AskUserQuestion') {
+    return { icon: 'help', verb: 'Asked', target: call.elicitation?.message || call.title, mono: false };
+  }
   if (call.isSubagent) {
     return { icon: 'bot', verb: 'Subagent', target: call.description || input.description || call.title, mono: false };
   }
@@ -100,7 +105,7 @@ export function backgroundRunning(call: ToolCallRecord): boolean {
  */
 export function liveCallIds(session: AcpSession): Set<string> {
   const ids = new Set<string>();
-  const busy = session.state === 'working' || Boolean(session.pendingPermission);
+  const busy = session.state === 'working' || Boolean(session.pendingPermission || session.pendingElicitation);
   const last = session.turns[session.turns.length - 1];
   for (const t of session.turns) {
     for (const c of t.toolCalls || []) {

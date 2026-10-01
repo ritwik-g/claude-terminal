@@ -197,6 +197,7 @@
   flex-shrink: 0;
 }
 .ui-choice.is-selected .ui-choice-check { background: var(--accent-solid); border-color: var(--accent-solid); }
+.ui-choice.is-multiple .ui-choice-check { border-radius: var(--radius-xs); }
 
 /* --------------------------------------------------------------- Switch */
 .ui-switch-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); cursor: pointer; }

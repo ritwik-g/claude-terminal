@@ -3,6 +3,8 @@ import type {
   AutoCompactSetting,
   AgentDescriptor,
   EcosystemReport,
+  ElicitationAction,
+  ElicitationValue,
   McpPreset,
   McpProbeResult,
   McpServer,
@@ -152,6 +154,11 @@ export const api = {
     request<{ ok: boolean }>(`/api/sessions/${id}/permission`, {
       method: 'POST',
       body: JSON.stringify({ optionId }),
+    }),
+  answerElicitation: (id: string, requestId: string, action: ElicitationAction, content?: Record<string, ElicitationValue>) =>
+    request<{ ok: boolean }>(`/api/sessions/${id}/elicitation`, {
+      method: 'POST',
+      body: JSON.stringify({ requestId, action, content }),
     }),
   switchAgent: (
     id: string,

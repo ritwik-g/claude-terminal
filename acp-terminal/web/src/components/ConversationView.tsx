@@ -189,8 +189,9 @@ const AgentTurn: React.FC<{
       </div>
       <AgentTurnBody
         turn={turn}
-        isActiveTurn={isLast && (session.state === 'working' || Boolean(session.pendingPermission))}
+        isActiveTurn={isLast && (session.state === 'working' || Boolean(session.pendingPermission || session.pendingElicitation))}
         isAwaitingApproval={isLast && Boolean(session.pendingPermission)}
+        awaitingAnswerId={session.pendingElicitation?.toolCallId}
       />
     </div>
   );
@@ -223,7 +224,7 @@ export const ConversationView: React.FC<{
     // Instant, not smooth: a smooth scroll emits intermediate scroll events that
     // would read as "user scrolled up" and unstick the view.
     if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [session.turns, session.id, session.state, session.pendingPermission]);
+  }, [session.turns, session.id, session.state, session.pendingPermission, session.pendingElicitation]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -247,7 +248,7 @@ export const ConversationView: React.FC<{
     lastTurn?.role === 'agent' && lastTurn?.toolCalls?.some((tc) => tc.status === 'pending' || tc.status === 'running')
   );
   const suggestions = useSuggestions(session, lastAgentText, hasActiveToolCalls);
-  const working = session.state === 'working' && !session.pendingPermission;
+  const working = session.state === 'working' && !session.pendingPermission && !session.pendingElicitation;
   const wrappingUp = Boolean(lastAgentText) && !hasActiveToolCalls;
 
   return (
@@ -334,6 +335,13 @@ export const ConversationView: React.FC<{
                   <Icon name="shield" size={13} />
                   <span className="ws-status-text" title={session.pendingPermission.title}>
                     Waiting for your approval below
+                  </span>
+                </div>
+              ) : session.pendingElicitation ? (
+                <div className="ws-status is-blocked" role="status">
+                  <Icon name="help" size={13} />
+                  <span className="ws-status-text" title={session.pendingElicitation.message}>
+                    Waiting for your answer below
                   </span>
                 </div>
               ) : (

@@ -4,6 +4,7 @@ import { MarkdownContent } from './MarkdownContent';
 import { Badge, Button, Icon, IconButton, Spinner, type Tone } from '../ui';
 import { BackgroundBadge } from './BackgroundBadge';
 import { useOpenAgentTask } from './agentTaskNav';
+import { answerLines } from '../elicitation';
 import {
   backgroundRunning,
   commandOf,
@@ -29,6 +30,8 @@ interface AgentTurnBodyProps {
   isActiveTurn: boolean;
   /** The newest turn is waiting on a permission decision. */
   isAwaitingApproval: boolean;
+  /** The call whose question the user still has to answer. */
+  awaitingAnswerId?: string;
 }
 
 type ThoughtSegment = Extract<TurnSegment, { kind: 'thought' }>;
@@ -44,7 +47,7 @@ type Block =
  * wrote is its own block, runs of tool calls and reasoning between them are
  * grouped into a compact activity list, and subagents get their own card.
  */
-const AgentTurnBodyImpl: React.FC<AgentTurnBodyProps> = ({ turn, isActiveTurn, isAwaitingApproval }) => {
+const AgentTurnBodyImpl: React.FC<AgentTurnBodyProps> = ({ turn, isActiveTurn, isAwaitingApproval, awaitingAnswerId }) => {
   const calls = new Map((turn.toolCalls || []).map((c) => [c.id, c]));
   const childrenOf = (id: string) => (turn.toolCalls || []).filter((c) => c.parentToolUseId === id);
 
@@ -89,6 +92,7 @@ const AgentTurnBodyImpl: React.FC<AgentTurnBodyProps> = ({ turn, isActiveTurn, i
             live={isActiveTurn && isLastBlock}
             stale={!isActiveTurn}
             isAwaitingApproval={isAwaitingApproval && isLastBlock}
+            awaitingAnswerId={awaitingAnswerId}
           />
         );
       })}
@@ -114,7 +118,8 @@ const ActivityGroup: React.FC<{
   /** The turn is over, so a call still marked as going was cut off. */
   stale: boolean;
   isAwaitingApproval: boolean;
-}> = ({ items, live, stale, isAwaitingApproval }) => {
+  awaitingAnswerId?: string;
+}> = ({ items, live, stale, isAwaitingApproval, awaitingAnswerId }) => {
   const [expanded, setExpanded] = useState(false);
   // Tool calls carry a status; reasoning segments don't.
   const tools = items.filter((i): i is ToolCallRecord => 'status' in i);
@@ -148,6 +153,7 @@ const ActivityGroup: React.FC<{
                 key={item.id}
                 call={item}
                 awaitingApproval={isAwaitingApproval && isActive(item)}
+                awaitingAnswer={item.id === awaitingAnswerId}
                 interrupted={isInterrupted(item, stale)}
               />
             ) : (
@@ -178,9 +184,10 @@ const SummaryText: React.FC<{ text: string }> = ({ text }) => {
  */
 const isInterrupted = (call: ToolCallRecord, stale: boolean) => stale && isActive(call) && !backgroundRunning(call);
 
-const StatusGlyph: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolean; interrupted?: boolean }> = ({
+const StatusGlyph: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolean; awaitingAnswer?: boolean; interrupted?: boolean }> = ({
   call,
   awaitingApproval,
+  awaitingAnswer,
   interrupted,
 }) => {
   let content: React.ReactNode;
@@ -191,6 +198,13 @@ const StatusGlyph: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolean; 
   } else if (awaitingApproval) {
     tone = 'warn';
     content = <Icon name="alert" size={13} title="Waiting for approval" />;
+  } else if (awaitingAnswer) {
+    tone = 'warn';
+    content = <Icon name="alert" size={13} title="Waiting for your answer" />;
+  } else if (call.elicitation?.status === 'cancelled') {
+    // A question that was called off did not fail
+    tone = 'neutral';
+    content = <Icon name="stop" size={12} title="Cancelled" />;
   } else if (isActive(call)) {
     tone = 'accent';
     content = <Spinner size={11} />;
@@ -330,14 +344,17 @@ const DiffView: React.FC<{ diff: NonNullable<ReturnType<typeof editDiff>> }> = (
 // Input keys that only repeat what the row already says.
 const QUIET_KEYS = new Set(['file_path', 'path', 'notebook_path', 'description']);
 
-export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolean; interrupted?: boolean }> = ({
+export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolean; awaitingAnswer?: boolean; interrupted?: boolean }> = ({
   call,
   awaitingApproval,
+  awaitingAnswer,
   interrupted,
 }) => {
   const [open, setOpen] = useState(false);
   const d = describeTool(call, interrupted);
-  const output = call.output?.trim();
+  const asked = call.elicitation;
+  // A question's own card has the answers as its output, which the answer list already shows
+  const output = asked && call.id.startsWith('elicitation:') ? undefined : call.output?.trim();
   const input = toolInput(call);
   const isCommand = d.icon === 'terminal';
   const command = isCommand ? commandOf(call) : undefined;
@@ -349,7 +366,7 @@ export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolea
   const failed = isFailed(call);
 
   return (
-    <div className={`tool-row${open ? ' is-open' : ''}${awaitingApproval ? ' is-awaiting' : ''}${failed ? ' is-failed' : ''}`}>
+    <div className={`tool-row${open ? ' is-open' : ''}${awaitingApproval || awaitingAnswer ? ' is-awaiting' : ''}${failed ? ' is-failed' : ''}`}>
       <button
         type="button"
         className="tool-row-head"
@@ -357,7 +374,7 @@ export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolea
         aria-expanded={hasDetail ? open : undefined}
         disabled={!hasDetail}
       >
-        <StatusGlyph call={call} awaitingApproval={awaitingApproval} interrupted={interrupted} />
+        <StatusGlyph call={call} awaitingApproval={awaitingApproval} awaitingAnswer={awaitingAnswer} interrupted={interrupted} />
         <Icon name={d.icon} size={14} className="tool-kind" />
         {d.verb && <span className="tool-verb">{d.verb}</span>}
         <span className={`tool-target${d.mono ? ' mono' : ''}`} title={d.target}>
@@ -370,12 +387,20 @@ export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolea
               Needs approval
             </Badge>
           )}
+          {awaitingAnswer && (
+            <Badge tone="warn" dot>
+              Needs your answer
+            </Badge>
+          )}
+          {asked?.status === 'declined' && <Badge tone="neutral">Skipped</Badge>}
           {interrupted && <Badge tone="neutral">Interrupted</Badge>}
           {!isActive(call) && <BackgroundBadge call={call} />}
           {failedExit && !backgroundRunning(call) ? (
             <Badge tone="danger" mono>
               exit {call.exitCode}
             </Badge>
+          ) : asked?.status === 'cancelled' ? (
+            <Badge tone="neutral">Cancelled</Badge>
           ) : (
             call.status === 'failed' && <Badge tone="danger">Failed</Badge>
           )}
@@ -383,6 +408,16 @@ export const ToolRow: React.FC<{ call: ToolCallRecord; awaitingApproval?: boolea
           {hasDetail && <Icon name="chevronRight" size={13} className="tool-chevron" />}
         </span>
       </button>
+      {asked?.status === 'accepted' && (
+        <dl className="tool-answers" aria-label="Your answers">
+          {answerLines(asked).map((line, i) => (
+            <div key={i} className="tool-answer">
+              <dt>{line.label}</dt>
+              <dd>{line.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
       {open && (
         <div className="tool-row-body">
           {command != null && (

@@ -7,9 +7,10 @@ import { EventEmitter } from 'node:events';
 import * as acp from '@agentclientprotocol/sdk';
 import { ptyManager } from '../pty-manager.js';
 import { appEnv } from '../env.js';
-import type { AgentCommand, AgentDescriptor, AgentOptions, AsyncTaskUpdate, FileAttachment, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
+import type { AgentCommand, AgentDescriptor, AgentOptions, AsyncTaskUpdate, ElicitationAction, ElicitationValue, FileAttachment, PendingElicitation, PendingPermission, PlanEntry, SessionMcpInfo, ToolCallRecord, TokenUsage } from '../types.js';
 import { appliesTo, listMcpServers, resolveSessionMcpServers } from '../mcp/config.js';
 import { effortToSend, launchModelValue, parseAgentOptions, resolveModelValue } from './agent-options.js';
+import { parseElicitationFields } from './elicitation.js';
 
 /** `fallback` is what an id with no known Claude family becomes (a custom id can pass through). */
 export function normalizeClaudeModel(model?: string, fallback = 'sonnet'): string {
@@ -77,6 +78,18 @@ type PermissionEntry = {
   resolve: (res: acp.RequestPermissionResponse) => void;
 };
 
+type ElicitationEntry = {
+  data: PendingElicitation;
+  resolve: (res: acp.CreateElicitationResponse) => void;
+};
+
+/** How a form was settled; `withdrawn` means the agent took the question back itself. */
+export interface ElicitationOutcome {
+  action: ElicitationAction;
+  content?: Record<string, ElicitationValue>;
+  withdrawn?: boolean;
+}
+
 export interface ClientHostEvents {
   thought: (text: string, meta: ChunkMeta) => void;
   message: (text: string, meta: ChunkMeta) => void;
@@ -86,6 +99,8 @@ export interface ClientHostEvents {
   usageUpdate: (usage: TokenUsage) => void;
   permissionRequested: (perm: PendingPermission) => void;
   permissionResolved: (permId: string, info: { cancelled: boolean }) => void;
+  elicitationRequested: (elicitation: PendingElicitation) => void;
+  elicitationResolved: (requestId: string, outcome: ElicitationOutcome) => void;
   turnCompleted: (stopReason: string) => void;
   promptSuggestion: (suggestion: string) => void;
   asyncTask: (update: AsyncTaskUpdate) => void;
@@ -104,6 +119,10 @@ export class AcpClientHost extends EventEmitter {
   private connection: acp.ClientConnection | null = null;
   // Permission requests are answered in arrival order; only the head is shown to the user
   private permissionQueue: PermissionEntry[] = [];
+  // Forms work the same way: answered in arrival order, the head shown
+  private elicitationQueue: ElicitationEntry[] = [];
+  // Bumped each time the waiting requests are cancelled, so a form still on its way in is cancelled too
+  private requestCancels = 0;
   // Agent-created terminals, released when the host shuts down
   private terminalIds = new Set<string>();
   private isInitialized = false;
@@ -341,6 +360,45 @@ export class AcpClientHost extends EventEmitter {
       });
     });
 
+    // 1b. Forms the agent asks the user to fill in (Claude's AskUserQuestion, Codex's questions,
+    // MCP servers' elicitations). Only form mode is advertised; anything else is declined.
+    clientApp.onRequest(acp.methods.client.elicitation.create, async (ctx: any) => {
+      const params = ctx.params;
+      this.touch();
+      const fields = params.mode === 'form' ? parseElicitationFields(params.requestedSchema) : null;
+      if (!fields) {
+        console.warn(`[client-host] Declined a ${params.mode} elicitation from ${this.agent.name}: ${params.mode === 'form' ? 'a required field this app cannot show' : 'only forms are supported'}`);
+        return { action: 'decline' };
+      }
+      // The tool call it belongs to was sent just before; let that update land first so the
+      // question is filed on it rather than on a card of its own
+      const cancels = this.requestCancels;
+      await settleNotifications();
+      const signal: AbortSignal | undefined = ctx.signal;
+      // A cancel that ran during the wait (Stop, a failed turn) covers this form too
+      if (signal?.aborted || this.closed || this.requestCancels !== cancels) return { action: 'cancel' };
+      const requestId = `elicit_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const subagent = this.subagentSessions.get(params.sessionId)?.name;
+      const pending: PendingElicitation = {
+        requestId,
+        toolCallId: typeof params.toolCallId === 'string' && params.toolCallId ? params.toolCallId : `elicitation:${requestId}`,
+        message: typeof params.message === 'string' ? params.message : '',
+        ...(subagent ? { subagent } : {}),
+        fields,
+        requestedAt: Date.now(),
+      };
+      return new Promise<acp.CreateElicitationResponse>((resolve) => {
+        const entry: ElicitationEntry = { data: pending, resolve };
+        this.elicitationQueue.push(entry);
+        if (this.elicitationQueue.length === 1) this.emit('elicitationRequested', pending);
+        // The agent took it back: Codex's answer timer ran out, or its tool call was aborted
+        signal?.addEventListener('abort', () => this.settleElicitation(requestId, { action: 'cancel', withdrawn: true }), { once: true });
+      });
+    });
+
+    // Only sent for URL elicitations, which are not advertised
+    clientApp.onNotification(acp.methods.client.elicitation.complete, () => {});
+
     // 2. Terminal creation & control
     clientApp.onRequest(acp.methods.client.terminal.create, async (ctx: any) => {
       const params = ctx.params;
@@ -536,7 +594,7 @@ export class AcpClientHost extends EventEmitter {
 
     child.on('exit', () => {
       this.markClosed(false);
-      this.cancelPendingPermissions();
+      this.cancelPendingRequests();
       this.emit('closed');
     });
 
@@ -551,6 +609,8 @@ export class AcpClientHost extends EventEmitter {
           writeTextFile: true,
         },
         terminal: true,
+        // Forms only: a URL elicitation would send the user to a page this app cannot follow up on
+        elicitation: { form: {} },
         // Compaction runs (the agent's own /compact, or its automatic one) are
         // reported as compaction_update lifecycles with a retained summary.
         session: { compaction: {} },
@@ -866,13 +926,13 @@ export class AcpClientHost extends EventEmitter {
 
   /**
    * Cancel the running turn. Pending permission requests are answered `cancelled` (as ACP
-   * requires), then the agent gets a grace period to end the turn with stopReason
+   * requires) and pending forms `cancel`, then the agent gets a grace period to end the turn with stopReason
    * `cancelled`. An agent that ignores the cancel has its turn abandoned so the session is
    * usable again.
    */
   async cancel(): Promise<void> {
     this.touch();
-    this.cancelPendingPermissions();
+    this.cancelPendingRequests();
     if (this.connection && this.sessionId) {
       try {
         await this.connection.agent.notify(acp.methods.agent.session.cancel, {
@@ -934,6 +994,13 @@ export class AcpClientHost extends EventEmitter {
     return true;
   }
 
+  /** Answer every waiting approval request `cancelled` and every waiting form `cancel`. */
+  cancelPendingRequests(): void {
+    this.requestCancels++;
+    this.cancelPendingPermissions();
+    this.cancelPendingElicitations();
+  }
+
   private cancelPendingPermissions(): void {
     const pending = this.permissionQueue;
     this.permissionQueue = [];
@@ -947,6 +1014,38 @@ export class AcpClientHost extends EventEmitter {
     }
   }
 
+  get pendingElicitation(): PendingElicitation | null {
+    return this.elicitationQueue[0]?.data ?? null;
+  }
+
+  /** Answer the form on show. False when it is no longer the one waiting. */
+  resolveElicitation(requestId: string, outcome: ElicitationOutcome): boolean {
+    if (this.elicitationQueue[0]?.data.requestId !== requestId) return false;
+    this.touch();
+    return this.settleElicitation(requestId, outcome);
+  }
+
+  private settleElicitation(requestId: string, outcome: ElicitationOutcome): boolean {
+    const at = this.elicitationQueue.findIndex((e) => e.data.requestId === requestId);
+    if (at === -1) return false;
+    const [entry] = this.elicitationQueue.splice(at, 1);
+    entry.resolve(outcome.action === 'accept' ? { action: 'accept', content: outcome.content ?? {} } : { action: outcome.action });
+    this.emit('elicitationResolved', requestId, outcome);
+    // The next one is shown once the head is settled
+    const next = this.elicitationQueue[0];
+    if (at === 0 && next) this.emit('elicitationRequested', next.data);
+    return true;
+  }
+
+  private cancelPendingElicitations(): void {
+    const pending = this.elicitationQueue;
+    this.elicitationQueue = [];
+    for (const { data, resolve } of pending) {
+      resolve({ action: 'cancel' });
+      this.emit('elicitationResolved', data.requestId, { action: 'cancel' });
+    }
+  }
+
   shutdown(): void {
     // Detach first: the owner has moved on, so late events from this host must not touch the session
     this.removeAllListeners();
@@ -954,7 +1053,7 @@ export class AcpClientHost extends EventEmitter {
     this.turnSeq++;
     this.isTurnInFlight = false;
     this.inflightPrompt = null;
-    this.cancelPendingPermissions();
+    this.cancelPendingRequests();
     for (const termId of this.terminalIds) {
       ptyManager.release(termId);
     }

@@ -969,6 +969,11 @@
   font-size: var(--text-sm);
 }
 
+/* A question is prose, not a command */
+.home-attn-preview.is-question {
+  font-family: var(--font-ui);
+}
+
 .home-attn-preview-text {
   overflow: hidden;
   text-overflow: ellipsis;

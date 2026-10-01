@@ -52,7 +52,7 @@ The tone classes `.tone-neutral|accent|ok|warn|danger|info` set `--tone`,
 
 | State | Label | Tone |
 | --- | --- | --- |
-| blocked | Needs approval | danger |
+| blocked | Needs approval (Needs your answer when the agent asked a question) | danger |
 | needs_you | Your turn | warn |
 | working | Working | accent (pulsing dot) |
 | parked | Parked | neutral |

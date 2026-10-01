@@ -20,6 +20,7 @@ const { getAppDir, getSessionsDir } = await import('../server/paths.js');
 const { TurnInFlightError } = await import('../server/acp/client-host.js');
 const { checkAccess, getRemoteAddress } = await import('../server/security.js');
 const { apiRouter } = await import('../server/api.js');
+const { parseElicitationFields, validateElicitationContent } = await import('../server/acp/elicitation.js');
 const { default: express } = await import('express');
 const { AGENT_REGISTRY } = await import('../server/agents/registry.js');
 
@@ -469,6 +470,218 @@ async function runTests() {
     }
     if (codexLimits.windows![0].resetsAtMs !== 1793282029000) throw new Error('Codex reset time should be epoch milliseconds');
     console.log('   ✅ Codex rate limits map onto plan windows and credits\n');
+
+    // 9d. Forms the agent asks for (ACP elicitation): the session waits on the user, answered over HTTP
+    console.log('9️⃣d Testing forms the agent asks for (elicitation)...');
+    const formSession = await sessionManager.createSession({ agentId: 'mock', cwd: testDir, title: 'Forms' });
+    await waitForIdle(formSession.id);
+    const formNow = () => sessionManager.getSession(formSession.id)!;
+    const formReply = () => formNow().turns.filter((t) => t.role === 'agent').at(-1)?.content || '';
+    const formCall = (id: string) => formNow().turns.flatMap((t) => t.toolCalls || []).find((c) => c.id === id);
+    const nextForm = () =>
+      new Promise<any>((resolve) => {
+        const handler = (evt: any) => {
+          if (evt.sessionId !== formSession.id) return;
+          sessionManager.off('elicitationRequested', handler);
+          resolve(evt.elicitation);
+        };
+        sessionManager.on('elicitationRequested', handler);
+      });
+
+    await sessionManager.sendPrompt(formSession.id, 'Which client capabilities do you see?');
+    const caps = JSON.parse(formReply().slice(formReply().indexOf('{')));
+    if (JSON.stringify(caps.elicitation) !== '{"form":{}}') throw new Error(`Forms (and not URLs) should be advertised: ${JSON.stringify(caps.elicitation)}`);
+
+    const asked = nextForm();
+    const askTurn = sessionManager.sendPrompt(formSession.id, 'Please ask me a few questions');
+    const form = await asked;
+    const byKey = Object.fromEntries(form.fields.map((f: any) => [f.key, f]));
+    if (Object.keys(byKey).join(',') !== 'question_0,question_0_custom,question_1,name') throw new Error(`Form fields in order: ${Object.keys(byKey)}`);
+    if (byKey.question_0.type !== 'string' || byKey.question_0.options?.length !== 2 || byKey.question_0.options[0].description !== 'Relational, the safe default' || !byKey.question_0.options[1].preview?.includes('CREATE TABLE')) {
+      throw new Error(`Single select should carry its options, descriptions and preview: ${JSON.stringify(byKey.question_0)}`);
+    }
+    if (byKey.question_0_custom.customAnswerFor !== 'question_0' || byKey.question_0_custom.options) throw new Error(`The "Other" box should point at its question: ${JSON.stringify(byKey.question_0_custom)}`);
+    if (byKey.question_1.type !== 'array' || byKey.question_1.options?.map((o: any) => o.value).join(',') !== 'Auth,Search,Export') throw new Error(`Multi-select options: ${JSON.stringify(byKey.question_1)}`);
+    if (!byKey.name.required || byKey.name.minLength !== 2 || byKey.name.maxLength !== 40 || byKey.question_1.required) throw new Error(`Required and lengths: ${JSON.stringify(byKey.name)}`);
+
+    const waiting = formNow();
+    if (waiting.state !== 'blocked' || waiting.score < 200 || waiting.pendingElicitation?.requestId !== form.requestId) {
+      throw new Error(`A pending form should block the session: ${waiting.state} ${waiting.score} ${JSON.stringify(waiting.pendingElicitation)}`);
+    }
+    if (waiting.rankFactors?.[0]?.label !== 'Waiting for your answer' || !waiting.rankSummary?.includes(form.message)) {
+      throw new Error(`Ranking should say it waits for an answer: ${waiting.rankSummary} / ${JSON.stringify(waiting.rankFactors)}`);
+    }
+    const formSummary = sessionManager.listSessions().find((s) => s.id === formSession.id)!;
+    if (!formSummary.hasPendingElicitation || formSummary.pendingElicitationTitle !== form.message || formSummary.hasPendingPermission) {
+      throw new Error(`The summary should carry the waiting form: ${JSON.stringify(formSummary)}`);
+    }
+    const askCall = formCall(form.toolCallId);
+    if (askCall?.toolName !== 'AskUserQuestion' || askCall.elicitation?.status !== 'pending') throw new Error(`The question should be recorded on the call that asked it: ${JSON.stringify(askCall)}`);
+
+    const formApp = express();
+    formApp.use(express.json());
+    formApp.use('/api', apiRouter);
+    const formServer = formApp.listen(0, '127.0.0.1');
+    await once(formServer, 'listening');
+    const answer = async (body: unknown) => {
+      const res = await fetch(`http://127.0.0.1:${(formServer.address() as AddressInfo).port}/api/sessions/${formSession.id}/elicitation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json()) as { ok?: boolean; error?: string } };
+    };
+    try {
+      const requestId = form.requestId;
+      const valid = { question_0: 'SQLite', question_0_custom: 'keep it small', question_1: ['Auth', 'Search'], name: 'Notes app' };
+      const rejected: Array<[unknown, number]> = [
+        [{ requestId, action: 'accept', content: { ...valid, question_0: 'MySQL' } }, 400],
+        [{ requestId, action: 'accept', content: { ...valid, extra: 'x' } }, 400],
+        [{ requestId, action: 'accept', content: { question_0: 'Postgres' } }, 400],
+        [{ requestId, action: 'accept', content: { ...valid, name: 'N' } }, 400],
+        [{ requestId, action: 'accept', content: { ...valid, question_1: 'Auth' } }, 400],
+        [{ requestId, action: 'accept', content: { ...valid, question_1: ['Auth', 'Billing'] } }, 400],
+        [{ requestId, action: 'accept', content: 'Postgres' }, 400],
+        [{ requestId, action: 'maybe' }, 400],
+        [{ action: 'decline' }, 400],
+        [{ requestId: 'elicit_stale', action: 'decline' }, 409],
+      ];
+      for (const [body, status] of rejected) {
+        const res = await answer(body);
+        if (res.status !== status || !res.body.error) throw new Error(`${JSON.stringify(body)} should be ${status}, got ${res.status} ${JSON.stringify(res.body)}`);
+      }
+      if (formNow().pendingElicitation?.requestId !== requestId) throw new Error('A rejected answer must leave the form waiting');
+      const accepted = await answer({ requestId, action: 'accept', content: valid });
+      if (accepted.status !== 200 || !accepted.body.ok) throw new Error(`A valid answer should be taken: ${accepted.status} ${JSON.stringify(accepted.body)}`);
+      await askTurn;
+      await waitForIdle(formSession.id);
+      if (!formReply().includes('database=SQLite; features=Auth, Search; name=Notes app; note=keep it small')) throw new Error(`The agent should get the answers: ${formReply()}`);
+      const answered = formCall(form.toolCallId)?.elicitation;
+      if (formNow().pendingElicitation || formNow().state !== 'needs_you' || answered?.status !== 'accepted' || JSON.stringify(answered.content) !== JSON.stringify(valid)) {
+        throw new Error(`An answered form should be cleared and recorded: ${formNow().state} ${JSON.stringify(answered)}`);
+      }
+      if ((await answer({ requestId, action: 'decline' })).status !== 409) throw new Error('A form answered already should be 409');
+
+      // Skipping a form that came without a tool call: it gets a card of its own
+      const askedPlain = nextForm();
+      const plainTurn = sessionManager.sendPrompt(formSession.id, 'Ask me plainly');
+      const plain = await askedPlain;
+      if (!plain.toolCallId.startsWith('elicitation:') || formCall(plain.toolCallId)?.status !== 'pending') throw new Error(`A form without a call should get its own card: ${JSON.stringify(plain)}`);
+      const declined = await answer({ requestId: plain.requestId, action: 'decline' });
+      if (declined.status !== 200) throw new Error(`Decline should be taken: ${JSON.stringify(declined)}`);
+      await plainTurn;
+      await waitForIdle(formSession.id);
+      const plainCard = formCall(plain.toolCallId);
+      if (!formReply().includes('You skipped the questions.') || plainCard?.elicitation?.status !== 'declined' || plainCard.status !== 'completed' || plainCard.output !== 'Skipped') {
+        throw new Error(`A declined form should reach the agent and its card: ${formReply()} ${JSON.stringify(plainCard)}`);
+      }
+    } finally {
+      formServer.close();
+    }
+
+    // The agent can take its question back (Codex's answer timer): the form clears, the turn carries on
+    const askedQuick = nextForm();
+    const quickTurn = sessionManager.sendPrompt(formSession.id, 'ask me quickly');
+    const quick = await askedQuick;
+    await quickTurn;
+    await waitForIdle(formSession.id);
+    const quickCard = formCall(quick.toolCallId);
+    if (formNow().pendingElicitation || formNow().state !== 'needs_you' || quickCard?.elicitation?.status !== 'cancelled' || !formReply().includes('No answer in time')) {
+      throw new Error(`A withdrawn form should clear: ${formNow().state} ${JSON.stringify(quickCard?.elicitation)} ${formReply()}`);
+    }
+
+    // Stopping the turn, or the agent, answers the agent with cancel and clears the form
+    for (const stop of ['cancel', 'stop'] as const) {
+      const askedAgain = nextForm();
+      const turn = sessionManager.sendPrompt(formSession.id, `ask me before the ${stop}`);
+      const pending = await askedAgain;
+      if (stop === 'cancel') await sessionManager.cancelPrompt(formSession.id);
+      else await sessionManager.stopSessionAgent(formSession.id);
+      await turn;
+      const after = formNow();
+      const card = formCall(pending.toolCallId);
+      if (after.pendingElicitation || after.state === 'blocked' || card?.elicitation?.status !== 'cancelled') {
+        throw new Error(`A ${stop} should clear the form: ${after.state} ${JSON.stringify(after.pendingElicitation)} ${JSON.stringify(card?.elicitation)}`);
+      }
+      if (!formReply().includes('The question was cancelled.')) throw new Error(`The agent should be told the form was cancelled on ${stop}: ${formReply()}`);
+    }
+
+    // A rewind tears the agent down with the form still open
+    const askedRewind = nextForm();
+    const rewindTurn = sessionManager.sendPrompt(formSession.id, 'ask me, then I rewind');
+    await askedRewind;
+    const rewindUser = formNow().turns.filter((t) => t.role === 'user').at(-1)!;
+    await sessionManager.rollbackSession(formSession.id, { turnId: rewindUser.id, action: 'revert_before_this' });
+    await rewindTurn;
+    if (formNow().pendingElicitation || formNow().state === 'blocked') throw new Error(`A rewind should clear the form: ${formNow().state}`);
+
+    // A server restart: no agent survives, so a stored form is cleared and its card closed
+    const stale = formNow();
+    const staleCall = stale.turns.flatMap((t) => t.toolCalls || []).find((c) => c.elicitation)!;
+    stale.pendingElicitation = { ...staleCall.elicitation!, toolCallId: staleCall.id };
+    staleCall.elicitation = { ...staleCall.elicitation!, status: 'pending', content: undefined, resolvedAt: undefined };
+    store.save(stale);
+    if (formNow().state !== 'blocked') throw new Error('A stored form should rank as blocked');
+    sessionManager.init();
+    if (formNow().pendingElicitation || formNow().state === 'blocked' || formCall(staleCall.id)?.elicitation?.status !== 'cancelled') {
+      throw new Error(`A restart should clear a stored form: ${formNow().state} ${JSON.stringify(formCall(staleCall.id)?.elicitation)}`);
+    }
+
+    // A failed turn whose agent lives on: the form is cancelled on the agent too, so the next one still shows.
+    // A session of its own: a handed-over history would carry the earlier prompts' keywords
+    const failSession = await sessionManager.createSession({ agentId: 'mock', cwd: testDir, title: 'Failed form' });
+    await waitForIdle(failSession.id);
+    const failNow = () => sessionManager.getSession(failSession.id)!;
+    const nextFailForm = () =>
+      new Promise<any>((resolve) => {
+        const handler = (evt: any) => {
+          if (evt.sessionId !== failSession.id) return;
+          sessionManager.off('elicitationRequested', handler);
+          resolve(evt.elicitation);
+        };
+        sessionManager.on('elicitationRequested', handler);
+      });
+    const within = <T,>(p: Promise<T>, what: string) =>
+      Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`Timed out: ${what}`)), 5_000))]);
+    const askedErr = nextFailForm();
+    const errTurn = sessionManager.sendPrompt(failSession.id, 'ask me, then the turn fails');
+    await askedErr;
+    const errHost = (sessionManager as any).activeHosts.get(failSession.id);
+    errHost.emit('error', new Error('prompt failed'));
+    await within(errTurn, 'the agent should be answered with cancel when its turn fails');
+    await waitForIdle(failSession.id);
+    if (errHost.pendingElicitation || failNow().pendingElicitation || !failNow().turns.some((t) => t.content?.includes('The question was cancelled.'))) {
+      throw new Error(`A failed turn should cancel the form on the agent: ${JSON.stringify(errHost.pendingElicitation)}`);
+    }
+    const askedAfterErr = nextFailForm();
+    const afterErrTurn = sessionManager.sendPrompt(failSession.id, 'ask me plainly');
+    const afterErr = await within(askedAfterErr, 'a form after a failed turn should be shown');
+    sessionManager.resolveElicitation(failSession.id, afterErr.requestId, 'decline');
+    await afterErrTurn;
+    await waitForIdle(failSession.id);
+    sessionManager.deleteSession(failSession.id);
+
+    // A fresh agent session drops a stored form (one from work outside a turn) with the agent
+    const outside = formNow();
+    const outsideCall = outside.turns.flatMap((t) => t.toolCalls || []).find((c) => c.elicitation)!;
+    outside.pendingElicitation = { ...outsideCall.elicitation!, toolCallId: outsideCall.id };
+    outsideCall.elicitation = { ...outsideCall.elicitation!, status: 'pending', content: undefined, resolvedAt: undefined };
+    outside.state = 'blocked';
+    store.save(outside);
+    await sessionManager.forgetAgentSession(formSession.id, 'none');
+    if (formNow().pendingElicitation || formNow().state === 'blocked' || formCall(outsideCall.id)?.elicitation?.status !== 'cancelled') {
+      throw new Error(`A fresh agent session should clear a stored form: ${formNow().state} ${JSON.stringify(formCall(outsideCall.id)?.elicitation)}`);
+    }
+
+    // Field names are the agent's: one named after an Object.prototype member must not read the prototype
+    const protoFields = parseElicitationFields(
+      JSON.parse('{"type":"object","properties":{"constructor":{"type":"string"},"__proto__":{"type":"string"},"name":{"type":"string"}}}')
+    )!;
+    const protoChecked = validateElicitationContent(protoFields, { name: 'x' });
+    if (!protoChecked.ok || Object.keys(protoChecked.content).join(',') !== 'name') throw new Error(`Empty "constructor" and "__proto__" fields should be no answer: ${JSON.stringify(protoChecked)}`);
+    const protoGiven = validateElicitationContent(protoFields, JSON.parse('{"__proto__":"a","constructor":"b"}'));
+    if (!protoGiven.ok || protoGiven.content['__proto__'] !== 'a' || protoGiven.content['constructor'] !== 'b') throw new Error(`Answers named after prototype members should be kept: ${JSON.stringify(protoGiven)}`);
+    console.log('   ✅ Forms block the session, are checked and answered over HTTP, reach the agent, and clear on decline, withdrawal, cancel, stop, rewind, restart, a failed turn and a fresh agent session\n');
 
     // 10. Regression checks
     console.log('🔟 Regression checks...');

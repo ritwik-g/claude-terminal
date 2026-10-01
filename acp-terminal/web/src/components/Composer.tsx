@@ -271,7 +271,8 @@ export const Composer: React.FC<{
   const canSend = (promptText.trim().length > 0 || attachments.length > 0) && !sending;
 
   return (
-    <form className="ws-composer-dock" onSubmit={handleSendPrompt}>
+    // noValidate: the question card above checks its own fields, and a bad answer there must not block Send
+    <form className="ws-composer-dock" onSubmit={handleSendPrompt} noValidate>
       <div className="ws-composer-column">
         {above}
         {session.queuedPrompts && session.queuedPrompts.length > 0 && (

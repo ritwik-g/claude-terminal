@@ -966,6 +966,98 @@
   color: var(--text-2);
 }
 
+/* ========================================================= Question card */
+
+/* A form the agent asks the user to fill in: the approval card's frame, with fields */
+.ws-ask-message {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ws-ask-fields {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-height: min(52dvh, 520px);
+  /* Room for focus rings, which the scroller would clip */
+  margin: -3px;
+  padding: 3px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ws-ask-required {
+  margin-left: 2px;
+  color: var(--danger);
+}
+
+.ws-ask-desc {
+  margin-top: -2px;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ws-ask-choices {
+  display: grid;
+  gap: 6px;
+}
+
+.ws-ask-choices .ui-choice {
+  padding: var(--space-2) var(--space-3);
+}
+
+.ws-ask-preview {
+  max-height: 240px;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+  font-size: var(--text-sm);
+}
+
+.ws-ask-note.ui-btn {
+  align-self: flex-start;
+  margin-left: calc(var(--space-2) * -1);
+  color: var(--text-2);
+}
+
+.ws-ask-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-ask-foot {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.ws-ask-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.ws-ask-error {
+  min-width: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
 /* ============================================================== Composer */
 
 .ws-composer-dock {
@@ -2434,6 +2526,20 @@ button.ws-sheet-row:active:not(:disabled) {
 
   .ws-approval-auto.ui-btn {
     margin: 0 auto;
+  }
+
+  .ws-ask-fields {
+    max-height: 46dvh;
+  }
+
+  /* Phones have no keyboard shortcut to point at */
+  .ws-ask-hint {
+    display: none;
+  }
+
+  .ws-ask-error {
+    order: -2;
+    width: 100%;
   }
 
   .ws-slash {

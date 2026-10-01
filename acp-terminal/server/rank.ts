@@ -37,14 +37,14 @@ export function isWorkingInBackground(s: Pick<AcpSession, 'agentTasks' | 'turns'
   return state === 'needs_you' && hasRunningBackground(s);
 }
 
-export function deriveSessionState(session: Pick<AcpSession, 'pendingPermission' | 'turns' | 'git' | 'user' | 'state' | 'agentStopped'>): SessionState {
+export function deriveSessionState(session: Pick<AcpSession, 'pendingPermission' | 'pendingElicitation' | 'turns' | 'git' | 'user' | 'state' | 'agentStopped'>): SessionState {
   // Check snooze first
   if (session.user?.snoozedUntil && session.user.snoozedUntil > Date.now()) {
     return 'snoozed';
   }
 
   // If there is an active permission or question request waiting for user response
-  if (session.pendingPermission) {
+  if (session.pendingPermission || session.pendingElicitation) {
     return 'blocked';
   }
 
@@ -123,6 +123,13 @@ function stateFactor(session: AcpSession, state: SessionState): { label: string;
   const git = session.git;
   switch (state) {
     case 'blocked': {
+      const question = session.pendingPermission ? undefined : session.pendingElicitation?.message.trim().replace(/\s+/g, ' ');
+      if (question !== undefined) {
+        return {
+          label: 'Waiting for your answer',
+          sentence: question ? `The agent is waiting for your answer to “${question}”.` : 'The agent is waiting for your answer.',
+        };
+      }
       const title = session.pendingPermission?.title;
       return {
         label: 'Waiting for your approval',
