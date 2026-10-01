@@ -8,6 +8,11 @@ so finding the one that actually needs you means opening several and reading
 them. This ranks them by attention instead, and gives you a real terminal in the
 same window.
 
+> **Looking for Codex or Antigravity too?** [CodePit](https://github.com/ritwik-g/codepit)
+> is this tool's successor: the same attention ranking, rebuilt on the Agent
+> Client Protocol so it drives Claude Code, Codex and Google Antigravity side by
+> side. Its README lists what has and hasn't come across from here yet.
+
 > **Not affiliated with, endorsed by, or sponsored by Anthropic.** An unofficial
 > personal project that works *with* Claude Code. "Claude" is a trademark of
 > Anthropic, used here only to say what this tool is for.
