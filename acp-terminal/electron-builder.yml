@@ -51,7 +51,7 @@ dmg:
   title: CodePit
   # Must be a REAL file, not null: with a custom `contents` layout dmgbuild
   # always installs a background, and electron-builder's built-in one fails on
-  # GitHub's macOS runners. Shared with Claude Terminal.
+  # GitHub's macOS runners.
   background: build/background.png
   writeUpdateInfo: false
   # The /Applications drag target.

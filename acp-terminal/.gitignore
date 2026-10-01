@@ -1,0 +1,29 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+.DS_Store
+
+# Local Claude Code state: settings.local.json carries absolute home paths,
+# MCP server names and permission allowlists.
+.claude/
+
+# Secrets and signing material.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.cer
+*.key
+*.mobileprovision
+
+# Editors and tooling output.
+.vscode/
+.idea/
+coverage/
+*.tsbuildinfo
+
+# Source art for the icon; the shipped icons are in build/.
+*.zip

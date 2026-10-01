@@ -5,6 +5,11 @@
   "private": true,
   "type": "module",
   "description": "Vendor-agnostic attention-ranked workspace for AI coding agents via Agent Client Protocol (ACP)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ritwik-g/codepit.git"
+  },
   "main": "dist-electron/main.mjs",
   "scripts": {
     "dev": "tsx watch --clear-screen=false server/cli.ts",
@@ -16,7 +21,7 @@
     "dist:mac": "npm run build && npm run build:electron && electron-builder --mac",
     "install:mac": "bash scripts/install-mac.sh",
     "dist:linux": "npm run build && npm run build:electron && npm run rebuild:electron && electron-builder --linux",
-    "rebuild:electron": "npm_config_python=\"$(node ../scripts/find-python.mjs)\" electron-rebuild -f -w node-pty",
+    "rebuild:electron": "npm_config_python=\"$(node scripts/find-python.mjs)\" electron-rebuild -f -w node-pty",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p web",
     "test": "NODE_ENV=test tsx scripts/test-acp.ts && NODE_ENV=test tsx scripts/test-mcp.ts && NODE_ENV=test tsx scripts/test-lan.ts && NODE_ENV=test tsx scripts/test-lan-qr.ts && NODE_ENV=test tsx scripts/test-effort.ts && NODE_ENV=test tsx scripts/test-compact.ts && NODE_ENV=test tsx scripts/test-agent-tasks.ts && NODE_ENV=test tsx scripts/test-migration.ts && NODE_ENV=test tsx scripts/test-resume.ts",
     "test:mcp": "NODE_ENV=test tsx scripts/test-mcp.ts",
